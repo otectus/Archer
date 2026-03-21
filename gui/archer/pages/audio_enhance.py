@@ -111,9 +111,18 @@ class AudioEnhancePage(Gtk.Box):
         switch.set_subtitle("Active" if enabled else "Off")
 
         def _apply():
-            self.client._send_command(
+            resp = self.client._send_command(
                 "set_audio_enhancement",
                 {"noise_suppression": enabled},
             )
+            if not resp.get("success", False):
+                # Revert toggle on failure
+                GLib.idle_add(self._revert_toggle, not enabled)
 
         threading.Thread(target=_apply, daemon=True).start()
+
+    def _revert_toggle(self, state):
+        self._noise_switch.handler_block_by_func(self._on_noise_toggled)
+        self._noise_switch.set_active(state)
+        self._noise_switch.set_subtitle("Active" if state else "Off")
+        self._noise_switch.handler_unblock_by_func(self._on_noise_toggled)

@@ -173,8 +173,8 @@ run_menu() {
         read -rp "> " choice
 
         case "$choice" in
-            [0-9]|[0-9][0-9])
-                if [ "$choice" -ge 1 ] && [ "$choice" -le "${#MODULE_IDS[@]}" ] 2>/dev/null; then
+            [1-9]|[1-9][0-9])
+                if [ "$choice" -le "${#MODULE_IDS[@]}" ] 2>/dev/null; then
                     local idx=$((choice - 1))
                     if [ "${MODULE_SELECTED[$idx]}" -eq 1 ]; then
                         MODULE_SELECTED[$idx]=0

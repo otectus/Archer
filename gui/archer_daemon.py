@@ -166,6 +166,8 @@ class FanCurveEngine:
         with self._lock:
             if not any(self._active.get(t) for t in ["cpu", "gpu"]):
                 self._running = False
+        if self._curve_thread and not self._running:
+            self._curve_thread.join(timeout=1.0)
 
     def get_state(self):
         with self._lock:
@@ -202,13 +204,15 @@ class FanCurveEngine:
                         self._fail_counts[target] = 0
                 except Exception as e:
                     logger.error(f"Fan curve tick failed for {target}: {e}")
+                    should_restore = False
                     with self._lock:
                         self._fail_counts[target] += 1
                         if self._fail_counts[target] >= 3:
                             logger.warning(f"Fan curve watchdog: 3 consecutive failures for {target}, restoring EC auto")
                             self._active[target] = False
                             self._fail_counts[target] = 0
-                    if self._fail_counts.get(target, 0) == 0 and not self._active.get(target, False):
+                            should_restore = True
+                    if should_restore:
                         self._restore_auto()
             time.sleep(0.5)  # 2 Hz
 
@@ -459,8 +463,12 @@ class HardwareManager:
             return None, None
         val = read_sysfs(path)
         if val and "," in val:
-            parts = val.split(",")
-            return int(parts[0]), int(parts[1])
+            try:
+                parts = val.split(",")
+                return int(parts[0]), int(parts[1])
+            except (ValueError, IndexError):
+                logger.warning(f"Malformed fan_speed value: {val}")
+                return None, None
         return None, None
 
     def set_fan_speed(self, cpu, gpu):
@@ -516,25 +524,31 @@ class HardwareManager:
                 continue
             bat_dir = os.path.join(POWER_SUPPLY_DIR, name)
             info["present"] = True
-            info["percentage"] = int(read_sysfs(os.path.join(bat_dir, "capacity")) or 0)
+            try:
+                info["percentage"] = int(read_sysfs(os.path.join(bat_dir, "capacity")) or 0)
+            except ValueError:
+                info["percentage"] = 0
             info["status"] = read_sysfs(os.path.join(bat_dir, "status")) or "Unknown"
             # Calculate time remaining
-            energy_now = read_sysfs(os.path.join(bat_dir, "energy_now"))
-            power_now = read_sysfs(os.path.join(bat_dir, "power_now"))
-            energy_full = read_sysfs(os.path.join(bat_dir, "energy_full"))
-            if energy_now and power_now and int(power_now) > 0:
-                en = int(energy_now)
-                pn = int(power_now)
-                if info["status"] == "Discharging":
-                    hours = en / pn
-                elif info["status"] == "Charging" and energy_full:
-                    hours = (int(energy_full) - en) / pn
+            try:
+                energy_now = read_sysfs(os.path.join(bat_dir, "energy_now"))
+                power_now = read_sysfs(os.path.join(bat_dir, "power_now"))
+                energy_full = read_sysfs(os.path.join(bat_dir, "energy_full"))
+                if energy_now and power_now and int(power_now) > 0:
+                    en = int(energy_now)
+                    pn = int(power_now)
+                    if info["status"] == "Discharging":
+                        hours = en / pn
+                    elif info["status"] == "Charging" and energy_full:
+                        hours = (int(energy_full) - en) / pn
+                    else:
+                        hours = 0
+                    h = int(hours)
+                    m = int((hours - h) * 60)
+                    info["time_remaining"] = f"{h}h {m}m"
                 else:
-                    hours = 0
-                h = int(hours)
-                m = int((hours - h) * 60)
-                info["time_remaining"] = f"{h}h {m}m"
-            else:
+                    info["time_remaining"] = ""
+            except (ValueError, ZeroDivisionError):
                 info["time_remaining"] = ""
             break
         return info
@@ -793,7 +807,12 @@ class HardwareManager:
         valid_modes = ["integrated", "hybrid", "nvidia"]
         if mode not in valid_modes:
             return {"success": False, "error": f"Invalid mode '{mode}'. Available: {valid_modes}"}
-        result = run_cmd(f"envycontrol -s {mode} 2>&1")
+        if not run_cmd("which envycontrol 2>/dev/null"):
+            return {"success": False, "error": "envycontrol not installed"}
+        result = run_cmd(f"envycontrol -s {mode} 2>&1", timeout=30)
+        if not result or "error" in result.lower():
+            logger.warning(f"Display mode change may have failed: {result}")
+            return {"success": False, "error": f"envycontrol failed: {result or 'no output'}", "mode": mode}
         logger.info(f"Display mode set to {mode}: {result}")
         return {"success": True, "mode": mode, "reboot_required": True, "output": result}
 
@@ -823,21 +842,33 @@ class HardwareManager:
         return mux_info
 
     # --- Game Mode ---
+    def _find_epp_path(self):
+        """Find energy_performance_preference sysfs file."""
+        for i in range(16):
+            path = f"/sys/devices/system/cpu/cpu{i}/cpufreq/energy_performance_preference"
+            if os.path.exists(path):
+                return path
+        return None
+
     def activate_game_mode(self):
         """Save current profile/EPP and set everything to performance."""
         if self._game_mode_active:
             return
         # Save current state
         self._game_mode_saved["platform_profile"] = self.get_thermal_profile()
-        epp_path = "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference"
-        self._game_mode_saved["epp"] = read_sysfs(epp_path) or "balance_performance"
+        epp_path = self._find_epp_path()
+        if epp_path:
+            self._game_mode_saved["epp"] = read_sysfs(epp_path) or "balance_performance"
+            self._game_mode_saved["epp_path"] = epp_path
         # Apply performance settings
         self.set_thermal_profile("performance")
-        write_sysfs(epp_path, "performance")
+        if epp_path:
+            write_sysfs(epp_path, "performance")
         # Start nvidia persistence mode
         run_cmd("nvidia-smi -pm 1 2>/dev/null")
         self._game_mode_active = True
         self.settings.set("game_mode_active", True)
+        self.settings.set("game_mode_saved_state", self._game_mode_saved)
         logger.info("Game mode activated")
 
     def deactivate_game_mode(self):
@@ -847,12 +878,14 @@ class HardwareManager:
         saved_profile = self._game_mode_saved.get("platform_profile", "balanced")
         saved_epp = self._game_mode_saved.get("epp", "balance_performance")
         self.set_thermal_profile(saved_profile)
-        epp_path = "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference"
-        write_sysfs(epp_path, saved_epp)
+        epp_path = self._game_mode_saved.get("epp_path") or self._find_epp_path()
+        if epp_path:
+            write_sysfs(epp_path, saved_epp)
         run_cmd("nvidia-smi -pm 0 2>/dev/null")
         self._game_mode_active = False
         self._game_mode_saved = {}
         self.settings.set("game_mode_active", False)
+        self.settings.remove("game_mode_saved_state")
         logger.info("Game mode deactivated")
 
     def get_game_mode(self):
@@ -864,18 +897,18 @@ class HardwareManager:
         sources = []
         try:
             with open("/proc/acpi/wakeup") as f:
-                for line in f:
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        device = parts[0]
-                        # Filter for USB-related entries
-                        sysfs_node = parts[-1] if len(parts) >= 4 else ""
-                        enabled = parts[2].strip("*").lower() == "enabled"
-                        sources.append({
-                            "device": device,
-                            "enabled": enabled,
-                            "sysfs_node": sysfs_node,
-                        })
+                lines = f.readlines()
+            for line in lines[1:]:  # Skip header line
+                parts = line.split()
+                if len(parts) >= 3:
+                    device = parts[0]
+                    sysfs_node = parts[-1] if len(parts) >= 4 else ""
+                    enabled = parts[2].strip("*").lower() == "enabled"
+                    sources.append({
+                        "device": device,
+                        "enabled": enabled,
+                        "sysfs_node": sysfs_node,
+                    })
         except (OSError, FileNotFoundError) as e:
             logger.error(f"Failed to read /proc/acpi/wakeup: {e}")
         return sources
@@ -907,6 +940,7 @@ class HardwareManager:
         """Get BIOS version and firmware update info."""
         info = {}
         info["bios_version"] = read_sysfs("/sys/class/dmi/id/bios_version") or "Unknown"
+        info["vendor"] = read_sysfs("/sys/class/dmi/id/sys_vendor") or "Unknown"
         info["fwupd_available"] = bool(run_cmd("which fwupdmgr 2>/dev/null"))
         info["updates"] = []
         if info["fwupd_available"]:
@@ -1047,6 +1081,7 @@ class DaemonServer:
             "get_usb_power_policy": self._cmd_get_usb_power_policy,
             "set_usb_wake": self._cmd_set_usb_wake,
             "get_firmware_info": self._cmd_get_firmware_info,
+            "set_audio_enhancement": self._cmd_set_audio_enhancement,
         }
 
         handler = handlers.get(command)
@@ -1234,6 +1269,27 @@ class DaemonServer:
 
     def _cmd_get_firmware_info(self, params):
         return {"success": True, "data": self.hw.get_firmware_info()}
+
+    def _cmd_set_audio_enhancement(self, params):
+        noise = params.get("noise_suppression", False)
+        conf = "/etc/pipewire/filter-chain.conf.d/archer-noise-suppress.conf"
+        conf_disabled = conf + ".disabled"
+        try:
+            if noise:
+                # Enable: rename .disabled back to .conf if it exists
+                if os.path.exists(conf_disabled) and not os.path.exists(conf):
+                    os.rename(conf_disabled, conf)
+                    run_cmd("systemctl --user restart pipewire.service 2>/dev/null")
+            else:
+                # Disable: rename .conf to .disabled
+                if os.path.exists(conf):
+                    os.rename(conf, conf_disabled)
+                    run_cmd("systemctl --user restart pipewire.service 2>/dev/null")
+            self.hw.settings.set("audio_enhancement", {"noise_suppression": noise})
+            return {"success": True, "data": {"noise_suppression": noise}}
+        except OSError as e:
+            logger.error(f"Failed to toggle audio enhancement: {e}")
+            return {"success": False, "error": str(e)}
 
 
 # --- Main ---
