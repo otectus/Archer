@@ -1,4 +1,4 @@
-# Archer Compatibility Suite (Linuwu-DAMX Installer v2.0)
+# Archer Compatibility Suite
 
 Have an Acer laptop running Arch Linux? You're in the right place.
 
