@@ -44,8 +44,10 @@ DISTRO_NAME=""
 DISTRO_FAMILY="unknown"
 AUR_HELPER=""
 
-# --- CachyOS ---
+# --- CachyOS / Clang ---
 IS_CACHYOS=0
+IS_CLANG_KERNEL=0
+CLANG_BUILD_FLAGS=""
 KERNEL_HEADERS="linux-headers"
 
 # --- Recommendations ---
@@ -76,7 +78,7 @@ detect_model_family() {
 
 detect_gpu() {
     local lspci_out
-    lspci_out=$(lspci 2>/dev/null || echo "")
+    lspci_out="${_CACHED_LSPCI:-$(lspci 2>/dev/null || echo "")}"
 
     if echo "$lspci_out" | grep -qi "nvidia"; then
         HAS_NVIDIA=1
@@ -98,7 +100,8 @@ detect_gpu() {
 }
 
 detect_wifi() {
-    WIFI_DEVICE=$(lspci 2>/dev/null | grep -iE "network|wireless" | head -1 || echo "")
+    local lspci_out="${_CACHED_LSPCI:-$(lspci 2>/dev/null || echo "")}"
+    WIFI_DEVICE=$(echo "$lspci_out" | grep -iE "network|wireless" | head -1 || echo "")
 
     case "$WIFI_DEVICE" in
         *MT7921*|*MT7902*|*MT7925*|*MT7922*|*MediaTek*)
@@ -120,7 +123,8 @@ detect_audio() {
         AUDIO_CODEC=$(cat /proc/asound/card*/codec* 2>/dev/null | grep "Codec:" | head -1 | sed 's/.*Codec: //' || echo "")
     fi
     SOF_ACTIVE=0
-    if dmesg 2>/dev/null | grep -qi "sof.*firmware\|sof-audio"; then
+    local dmesg_out="${_CACHED_DMESG:-$(dmesg 2>/dev/null || echo "")}"
+    if echo "$dmesg_out" | grep -qi "sof.*firmware\|sof-audio"; then
         SOF_ACTIVE=1
     fi
     CPU_VENDOR=$(grep -m1 "vendor_id" /proc/cpuinfo 2>/dev/null | awk '{print $3}' || echo "")
@@ -130,10 +134,11 @@ detect_touchpad() {
     HAS_I2C_TOUCHPAD=0
     TOUCHPAD_ERRORS=0
 
-    if dmesg 2>/dev/null | grep -qi "i2c_hid_acpi.*ELAN\|i2c_hid_acpi.*SYN\|i2c_hid_acpi.*MSFT\|i2c.*hid.*touchpad"; then
+    local dmesg_out="${_CACHED_DMESG:-$(dmesg 2>/dev/null || echo "")}"
+    if echo "$dmesg_out" | grep -qi "i2c_hid_acpi.*ELAN\|i2c_hid_acpi.*SYN\|i2c_hid_acpi.*MSFT\|i2c.*hid.*touchpad"; then
         HAS_I2C_TOUCHPAD=1
     fi
-    if dmesg 2>/dev/null | grep -qi "i2c_hid_acpi.*failed\|i2c_hid_acpi.*error\|i2c_hid.*timeout\|i2c_hid.*weird size"; then
+    if echo "$dmesg_out" | grep -qi "i2c_hid_acpi.*failed\|i2c_hid_acpi.*error\|i2c_hid.*timeout\|i2c_hid.*weird size"; then
         TOUCHPAD_ERRORS=1
     fi
 }
@@ -163,6 +168,14 @@ detect_kernel() {
     if [[ "$KERNEL_VERSION" == *"cachyos"* ]]; then
         IS_CACHYOS=1
         KERNEL_HEADERS="linux-cachyos-headers"
+    fi
+
+    # Detect Clang-built kernel (CachyOS and other distros may build with Clang/LLVM)
+    IS_CLANG_KERNEL=0
+    CLANG_BUILD_FLAGS=""
+    if grep -q "clang" /proc/version 2>/dev/null; then
+        IS_CLANG_KERNEL=1
+        CLANG_BUILD_FLAGS="LLVM=1 CC=clang"
     fi
 }
 
@@ -194,6 +207,10 @@ detect_distro() {
 
 # Run all detection functions
 detect_all() {
+    # Cache expensive command outputs for reuse across detection functions
+    _CACHED_DMESG=$(dmesg 2>/dev/null || echo "")
+    _CACHED_LSPCI=$(lspci 2>/dev/null || echo "")
+
     detect_dmi
     detect_model_family
     detect_gpu
@@ -228,8 +245,13 @@ print_hw_summary() {
     local wifi_info="$WIFI_CHIPSET"
     [ -n "$WIFI_DEVICE" ] && wifi_info="$WIFI_DEVICE"
 
+    local kernel_extra=""
+    if [ "$IS_CLANG_KERNEL" -eq 1 ]; then
+        kernel_extra=" [Clang]"
+    fi
+
     echo -e "${_BOLD}Detected:${_RESET} $ACER_PRODUCT_NAME ($ACER_SYS_VENDOR)"
-    echo -e "${_BOLD}Kernel:${_RESET}   $KERNEL_VERSION | ${_BOLD}GPU:${_RESET} $gpu_info"
+    echo -e "${_BOLD}Kernel:${_RESET}   ${KERNEL_VERSION}${kernel_extra} | ${_BOLD}GPU:${_RESET} $gpu_info"
     echo -e "${_BOLD}WiFi:${_RESET}     $wifi_info"
     echo -e "${_BOLD}Battery:${_RESET}  $([ "$HAS_BATTERY" -eq 1 ] && echo "Present" || echo "Not detected")"
     echo -e "${_BOLD}Distro:${_RESET}   ${DISTRO_NAME:-Unknown} ($DISTRO_FAMILY)$([ -n "$AUR_HELPER" ] && echo " | AUR: $AUR_HELPER")"

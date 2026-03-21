@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Linuwu-DAMX Unified Uninstaller v2.0
+# Archer Compatibility Suite - Unified Uninstaller v2.0
 # Supports manifest-based selective uninstall with legacy fallback
 
+# Note: -e intentionally omitted so uninstall continues if individual steps fail
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,7 +12,32 @@ source "$SCRIPT_DIR/lib/utils.sh"
 source "$SCRIPT_DIR/lib/detect.sh"
 source "$SCRIPT_DIR/lib/manifest.sh"
 
-section "Linuwu-DAMX Uninstaller"
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)    DRY_RUN=1 ;;
+        --no-confirm) NO_CONFIRM=1 ;;
+        --help|-h)
+            echo "Archer Compatibility Suite - Uninstaller v${INSTALLER_VERSION}"
+            echo ""
+            echo "Usage: ./uninstall.sh [OPTIONS]"
+            echo ""
+            echo "Options:"
+            echo "  --dry-run        Show what would be removed without making changes"
+            echo "  --no-confirm     Skip confirmation prompts"
+            echo "  --help, -h       Show this help message"
+            exit 0
+            ;;
+        *) warn "Unknown option: $1" ;;
+    esac
+    shift
+done
+
+if [ "$DRY_RUN" -eq 1 ]; then
+    log "DRY RUN mode enabled. No changes will be made."
+fi
+
+section "Archer Compatibility Suite - Uninstaller"
 
 if has_manifest; then
     log "Install manifest found. Performing targeted uninstall."
@@ -35,7 +61,7 @@ if has_manifest; then
     done
 
     # Remove manifest
-    remove_manifest
+    run rm -f "$MANIFEST_FILE"
     log "Install manifest removed."
 
 else
@@ -46,40 +72,40 @@ else
     # Legacy uninstall: same as original v1 behavior
     # 1. Disable Services
     log "Stopping and disabling DAMX Daemon..."
-    systemctl --user disable --now damx-daemon.service 2>/dev/null || true
-    rm -f "$HOME/.config/systemd/user/damx-daemon.service"
-    systemctl --user daemon-reload
+    run systemctl --user disable --now damx-daemon.service 2>/dev/null || true
+    run rm -f "$HOME/.config/systemd/user/damx-daemon.service"
+    run systemctl --user daemon-reload
 
     # 2. Remove Driver (DKMS)
     log "Removing Linuwu-Sense DKMS module..."
-    sudo dkms remove -m linuwu-sense -v 1.0 --all 2>/dev/null || true
-    sudo rm -rf "/usr/src/linuwu-sense-1.0"
+    run_sudo dkms remove -m linuwu-sense -v 1.0 --all 2>/dev/null || true
+    run_sudo rm -rf "/usr/src/linuwu-sense-1.0"
 
     # 3. Remove Blacklist
     log "Restoring acer_wmi (removing blacklist)..."
-    sudo rm -f /etc/modprobe.d/blacklist-acer-wmi.conf
+    run_sudo rm -f /etc/modprobe.d/blacklist-acer-wmi.conf
 
     # 4. Remove other possible configs from v2 modules
-    sudo rm -f /etc/modprobe.d/touchpad-amd-fix.conf
-    sudo rm -f /etc/modprobe.d/acer-audio-amd.conf
-    sudo rm -f /etc/modprobe.d/acer-thermal-profiles.conf
-    sudo rm -f /etc/udev/rules.d/99-acer-battery-health.rules
-    sudo rm -f /etc/tlp.d/01-acer-optimize.conf
+    run_sudo rm -f /etc/modprobe.d/touchpad-amd-fix.conf
+    run_sudo rm -f /etc/modprobe.d/acer-audio-amd.conf
+    run_sudo rm -f /etc/modprobe.d/acer-thermal-profiles.conf
+    run_sudo rm -f /etc/udev/rules.d/99-acer-battery-health.rules
+    run_sudo rm -f /etc/tlp.d/01-acer-optimize.conf
 
     # Remove touchpad service if present
     if [ -f /etc/systemd/system/touchpad-fix.service ]; then
-        sudo systemctl disable touchpad-fix.service 2>/dev/null || true
-        sudo rm -f /etc/systemd/system/touchpad-fix.service
-        sudo systemctl daemon-reload
+        run_sudo systemctl disable touchpad-fix.service 2>/dev/null || true
+        run_sudo rm -f /etc/systemd/system/touchpad-fix.service
+        run_sudo systemctl daemon-reload
     fi
 
     # Remove acer-wmi-battery DKMS if present
-    sudo dkms remove -m acer-wmi-battery -v 0.1.0 --all 2>/dev/null || true
-    sudo rm -rf "/usr/src/acer-wmi-battery-0.1.0"
+    run_sudo dkms remove -m acer-wmi-battery -v 0.1.0 --all 2>/dev/null || true
+    run_sudo rm -rf "/usr/src/acer-wmi-battery-0.1.0"
 
     # 5. Clean application files
     log "Removing DAMX files..."
-    rm -rf "$HOME/.local/share/damx"
+    run rm -rf "$HOME/.local/share/damx"
 fi
 
 section "Cleanup Complete"

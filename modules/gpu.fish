@@ -56,11 +56,33 @@ function module_install
     end
 
     log "Setting GPU mode to: $gpu_mode"
+    # EnvyControl internally calls 'mkinitcpio -P' via subprocess.run, which
+    # hangs on CachyOS due to the Limine wrapper's interactive prompt and
+    # multi-kernel preset rebuilds. We temporarily replace mkinitcpio with a
+    # no-op shim so envycontrol skips it, then do our own rebuild afterwards.
+    set -l _shim_path /usr/local/bin/mkinitcpio
+    set -l _had_existing 0
+    if test -f "$_shim_path"
+        set _had_existing 1
+        run_sudo mv "$_shim_path" "$_shim_path.archer-bak"
+    end
+    printf '#!/bin/sh\nexit 0\n' | run_sudo tee "$_shim_path" > /dev/null
+    run_sudo chmod 755 "$_shim_path"
+
     if test "$gpu_mode" = "hybrid"
         run_sudo envycontrol -s hybrid --rtd3 2
     else
         run_sudo envycontrol -s $gpu_mode
     end
+
+    # Restore original wrapper or remove shim
+    run_sudo rm -f "$_shim_path"
+    if test $_had_existing -eq 1
+        run_sudo mv "$_shim_path.archer-bak" "$_shim_path"
+    end
+
+    # Now rebuild initramfs properly (single preset, with timeout, bypasses wrapper)
+    rebuild_initramfs
 
     set -ga INSTALLED_PACKAGES envycontrol
     mark_reboot_required
@@ -70,7 +92,24 @@ end
 function module_uninstall
     log "Resetting GPU configuration..."
     if has_cmd envycontrol
+        # envycontrol --reset also calls mkinitcpio -P internally; use same shim trick
+        set -l _shim_path /usr/local/bin/mkinitcpio
+        set -l _had_existing 0
+        if test -f "$_shim_path"
+            set _had_existing 1
+            sudo mv "$_shim_path" "$_shim_path.archer-bak"
+        end
+        printf '#!/bin/sh\nexit 0\n' | sudo tee "$_shim_path" > /dev/null
+        sudo chmod 755 "$_shim_path"
+
         sudo envycontrol --reset 2>/dev/null; or true
+
+        sudo rm -f "$_shim_path"
+        if test $_had_existing -eq 1
+            sudo mv "$_shim_path.archer-bak" "$_shim_path"
+        end
+
+        rebuild_initramfs
     end
     log "EnvyControl package retained (remove manually if desired)."
 end

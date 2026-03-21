@@ -25,7 +25,7 @@ function module_install
         log "AMD system detected. Applying pinctrl_amd load order fix..."
         run_sudo tee "$_TOUCHPAD_AMD_CONF" > /dev/null <<'EOF'
 # Ensure pinctrl_amd loads before i2c_hid_acpi to fix touchpad detection
-# Installed by Linuwu-DAMX Installer
+# Installed by Archer Compatibility Suite
 softdep i2c_hid_acpi pre: pinctrl_amd
 EOF
         set -ga INSTALLED_FILES $_TOUCHPAD_AMD_CONF
@@ -55,21 +55,8 @@ SERVICE_EOF
     set fix_count (math $fix_count + 1)
 
     # Strategy 3: GRUB kernel parameters
-    if test -f /etc/default/grub
-        set -l params "i8042.reset i8042.nomux"
-        if not grep -q "i8042.reset" /etc/default/grub
-            log "Adding kernel parameters to GRUB: $params"
-            run_sudo sed -i "s/GRUB_CMDLINE_LINUX_DEFAULT=\"/GRUB_CMDLINE_LINUX_DEFAULT=\"$params /" /etc/default/grub
-            run_sudo grub-mkconfig -o /boot/grub/grub.cfg
-            set fix_count (math $fix_count + 1)
-        else
-            log "Kernel parameters already present in GRUB config."
-        end
-    else if test -d /boot/loader/entries
-        log "systemd-boot detected. Please manually add these kernel parameters:"
-        log "  i8042.reset i8042.nomux"
-        log "  Edit files in /boot/loader/entries/ and add to the 'options' line."
-    end
+    add_grub_params "i8042.reset i8042.nomux"
+    set fix_count (math $fix_count + 1)
 
     log "Applied $fix_count touchpad fix(es). A reboot is required."
     mark_reboot_required
@@ -88,17 +75,11 @@ function module_uninstall
         sudo systemctl daemon-reload
     end
 
-    if test -f /etc/default/grub
-        if grep -q "i8042.reset" /etc/default/grub
-            log "Removing i8042 kernel parameters from GRUB..."
-            sudo sed -i 's/i8042\.reset i8042\.nomux //g' /etc/default/grub
-            sudo grub-mkconfig -o /boot/grub/grub.cfg
-        end
-    end
+    remove_grub_params "i8042.reset i8042.nomux"
 end
 
 function module_verify
-    if grep -qi "touchpad|ELAN|Synaptics" /proc/bus/input/devices 2>/dev/null
+    if grep -qiE "touchpad|ELAN|Synaptics" /proc/bus/input/devices 2>/dev/null
         return 0
     end
     warn "Touchpad not detected in input devices (may need reboot)"

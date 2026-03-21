@@ -11,7 +11,7 @@ REPO_APP="PXDiv/Div-Acer-Manager-Max"
 DRIVER_MODULE="linuwu_sense"
 DKMS_NAME="linuwu-sense"
 DKMS_VERSION="1.0"
-INSTALL_DIR="$HOME/.local/share/damx"
+_DAMX_INSTALL_DIR="$HOME/.local/share/damx"
 
 module_detect() {
     # Relevant for gaming Acer models; usable on others with warning
@@ -37,11 +37,10 @@ module_install() {
     run_sudo rm -rf "$src_dir"
     run_sudo git clone "$REPO_DRIVER" "$src_dir"
 
-    # Determine compiler flags
-    local make_flags=""
-    if grep -q "clang" /proc/version 2>/dev/null; then
-        log "Clang kernel detected. Using LLVM flags."
-        make_flags="LLVM=1 CC=clang"
+    # Use centralized Clang detection from detect_kernel()
+    local make_flags="$CLANG_BUILD_FLAGS"
+    if [ "$IS_CLANG_KERNEL" -eq 1 ]; then
+        log "Clang-built kernel detected. Using LLVM build flags."
     fi
 
     # Create DKMS config
@@ -51,11 +50,13 @@ PACKAGE_VERSION="$DKMS_VERSION"
 CLEAN="make clean"
 MAKE[0]="make KVERSION=\\\$kernelver $make_flags"
 BUILT_MODULE_NAME[0]="$DRIVER_MODULE"
+BUILT_MODULE_LOCATION[0]="src/"
 DEST_MODULE_LOCATION[0]="/kernel/drivers/platform/x86"
 AUTOINSTALL="yes"
 DKMS_EOF
 
     run_sudo dkms add -m "$DKMS_NAME" -v "$DKMS_VERSION" || true
+    log "Building DKMS module (this may take a few minutes)..."
     run_sudo dkms install -m "$DKMS_NAME" -v "$DKMS_VERSION"
 
     # Blacklist acer_wmi
@@ -64,22 +65,31 @@ DKMS_EOF
 
     # --- DAMX GUI & Daemon Setup ---
     log "Fetching latest DAMX..."
-    mkdir -p "$INSTALL_DIR"
+    mkdir -p "$_DAMX_INSTALL_DIR"
 
     local latest_release
-    latest_release=$(curl -s "https://api.github.com/repos/$REPO_APP/releases/latest" | python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")
+    latest_release=$(curl -s --connect-timeout 10 --max-time 30 "https://api.github.com/repos/$REPO_APP/releases/latest" | python3 -c "import sys, json; print(json.load(sys.stdin)['tag_name'])")
     log "Latest version found: $latest_release"
 
     local v_num
     v_num=$(echo "$latest_release" | sed 's/v//')
     local dl_url="https://github.com/$REPO_APP/releases/download/$latest_release/DAMX-$v_num.tar.xz"
 
-    curl -L "$dl_url" -o "$INSTALL_DIR/damx.tar.xz"
-    tar -xf "$INSTALL_DIR/damx.tar.xz" --strip-components=1 -C "$INSTALL_DIR"
-    rm -f "$INSTALL_DIR/damx.tar.xz"
+    curl -L --connect-timeout 10 --max-time 300 --progress-bar "$dl_url" -o "$_DAMX_INSTALL_DIR/damx.tar.xz"
+    tar -xf "$_DAMX_INSTALL_DIR/damx.tar.xz" --strip-components=1 -C "$_DAMX_INSTALL_DIR"
+    rm -f "$_DAMX_INSTALL_DIR/damx.tar.xz"
 
-    if [ -f "$INSTALL_DIR/requirements.txt" ]; then
-        pip install -r "$INSTALL_DIR/requirements.txt" --break-system-packages > /dev/null 2>&1 || warn "pip install encountered issues."
+    # Install Python dependencies in a venv if possible
+    local python_exec="$_DAMX_INSTALL_DIR/DAMX.py"
+    if [ -f "$_DAMX_INSTALL_DIR/requirements.txt" ]; then
+        if python3 -m venv "$_DAMX_INSTALL_DIR/.venv" 2>/dev/null; then
+            log "Installing Python dependencies in virtual environment..."
+            "$_DAMX_INSTALL_DIR/.venv/bin/pip" install -r "$_DAMX_INSTALL_DIR/requirements.txt" > /dev/null 2>&1 || warn "pip install encountered issues."
+            python_exec="$_DAMX_INSTALL_DIR/.venv/bin/python $_DAMX_INSTALL_DIR/DAMX.py"
+        else
+            warn "Could not create venv. Falling back to --break-system-packages."
+            pip install -r "$_DAMX_INSTALL_DIR/requirements.txt" --break-system-packages > /dev/null 2>&1 || warn "pip install encountered issues."
+        fi
     fi
 
     # --- Systemd Service Setup ---
@@ -93,7 +103,7 @@ Description=DAMX Daemon - Fan & RGB Manager
 After=graphical-session.target
 
 [Service]
-ExecStart=$INSTALL_DIR/DAMX.py --daemon
+ExecStart=$python_exec --daemon
 Restart=on-failure
 Environment=PYTHONUNBUFFERED=1
 
@@ -124,7 +134,7 @@ module_uninstall() {
     sudo rm -f /etc/modprobe.d/blacklist-acer-wmi.conf
 
     log "Removing DAMX files..."
-    rm -rf "$INSTALL_DIR"
+    rm -rf "$_DAMX_INSTALL_DIR"
 }
 
 module_verify() {
@@ -143,5 +153,5 @@ module_verify() {
         warn "damx-daemon.service not active (may require reboot)"
     fi
 
-    return "$failures"
+    return $(( failures > 0 ? 1 : 0 ))
 }

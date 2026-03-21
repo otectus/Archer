@@ -1,5 +1,5 @@
 #!/usr/bin/env fish
-# Linuwu-DAMX Installer v2.0 (Fish)
+# Archer Compatibility Suite v2.0 (Fish)
 # Comprehensive Acer laptop compatibility suite for Arch Linux
 # Supports: Nitro, Predator, Helios, Triton, Swift, Aspire, and more
 
@@ -32,6 +32,7 @@ set -g SELECT_ALL_RECOMMENDED 0
 set -g EXPLICIT_MODULES ""
 set -g SHOW_HELP 0
 set -g SHOW_VERSION 0
+set -g VERIFY_ONLY 0
 
 function parse_args
     set -l i 1
@@ -46,6 +47,8 @@ function parse_args
                 set -g NO_CONFIRM 1
             case --dry-run
                 set -g DRY_RUN 1
+            case --verify
+                set -g VERIFY_ONLY 1
             case --help -h
                 set -g SHOW_HELP 1
             case --version -v
@@ -58,18 +61,28 @@ function parse_args
 end
 
 function show_help
-    echo "Linuwu-DAMX Installer v$INSTALLER_VERSION"
+    echo "Archer Compatibility Suite v$INSTALLER_VERSION"
     echo ""
     echo "Usage: ./setup.fish [OPTIONS]"
     echo ""
     echo "Options:"
     echo "  --all            Install all recommended modules (non-interactive)"
     echo "  --modules LIST   Comma-separated list of modules to install"
-    echo "                   Available: $MODULE_IDS"
+    echo "  --verify         Check status of previously installed modules"
     echo "  --no-confirm     Skip all confirmation prompts"
     echo "  --dry-run        Show what would be done without making changes"
     echo "  --help, -h       Show this help message"
     echo "  --version, -v    Show version"
+    echo ""
+    echo "Available modules:"
+    echo "  core-damx   Linuwu-Sense kernel driver and DAMX GUI for fan/RGB management"
+    echo "  battery     Limits battery charging to 80% via acer-wmi-battery"
+    echo "  gpu         EnvyControl for NVIDIA Optimus hybrid graphics switching"
+    echo "  touchpad    Fix I2C HID touchpad detection (module reload, kernel params)"
+    echo "  audio       SOF firmware, ALSA configuration, and audio codec fixes"
+    echo "  wifi        Diagnose and fix WiFi/Bluetooth issues for various chipsets"
+    echo "  power       TLP power management with Acer-optimized configuration"
+    echo "  thermal     Native kernel thermal profiles via acer_wmi (kernel 6.8+)"
     echo ""
     echo "Interactive mode (default): Detects hardware and presents a menu."
 end
@@ -88,7 +101,7 @@ end
 
 function display_menu
     echo ""
-    echo (set_color --bold)"=== Linuwu-DAMX Installer v$INSTALLER_VERSION ==="(set_color normal)
+    echo (set_color --bold)"=== Archer Compatibility Suite v$INSTALLER_VERSION ==="(set_color normal)
     echo ""
     print_hw_summary
     echo ""
@@ -182,7 +195,15 @@ end
 # --- Module execution ---
 function install_shared_deps
     log "Installing shared system dependencies..."
-    run_sudo pacman -Syu --needed --noconfirm base-devel dkms git curl $KERNEL_HEADERS python-pip
+    set -l deps base-devel dkms git curl $KERNEL_HEADERS python-pip
+
+    # Clang-built kernels require clang/llvm toolchain for DKMS module compilation
+    if test "$IS_CLANG_KERNEL" = 1
+        log "Clang-built kernel detected — including LLVM toolchain for DKMS builds."
+        set -a deps clang llvm
+    end
+
+    run_sudo pacman -Syu --needed --noconfirm $deps
 end
 
 function run_selected_modules
@@ -196,7 +217,10 @@ function run_selected_modules
 
             section "Installing: $label"
             source "$SCRIPT_DIR/modules/$id.fish"
-            module_install
+            if not module_install
+                warn "Module $id failed to install. Continuing..."
+                continue
+            end
         end
     end
 
@@ -219,6 +243,8 @@ function verify_modules
             set -l label $MODULE_LABELS[$i]
             set total (math $total + 1)
 
+            # Re-source to restore this module's function definitions (each module
+            # overrides the same names: module_verify, module_install, etc.)
             source "$SCRIPT_DIR/modules/$id.fish"
             if module_verify
                 success "$label"
@@ -238,11 +264,40 @@ function main
     parse_args $argv
 
     if test "$SHOW_VERSION" = 1
-        echo "Linuwu-DAMX Installer v$INSTALLER_VERSION"
+        echo "Archer Compatibility Suite v$INSTALLER_VERSION"
         exit 0
     end
     if test "$SHOW_HELP" = 1
         show_help
+        exit 0
+    end
+
+    # Standalone verify mode: check installed modules from manifest
+    if test "$VERIFY_ONLY" = 1
+        if not has_manifest
+            error "No install manifest found. Nothing to verify."
+        end
+        section "Verifying Installed Modules"
+        set -l mods (read_manifest_modules)
+        set -l total 0
+        set -l passed 0
+        for id in (string split " " "$mods")
+            set -l mod_file "$SCRIPT_DIR/modules/$id.fish"
+            if test -f "$mod_file"
+                set total (math $total + 1)
+                source "$mod_file"
+                if module_verify
+                    success "$MODULE_NAME"
+                    set passed (math $passed + 1)
+                else
+                    warn "$MODULE_NAME (check warnings above)"
+                end
+            else
+                warn "Module file not found: $mod_file"
+            end
+        end
+        echo ""
+        log "Verification: $passed/$total modules passed"
         exit 0
     end
 
@@ -278,10 +333,15 @@ function main
             set MODULE_SELECTED[$i] 0
         end
         for mod in (string split "," "$EXPLICIT_MODULES")
+            set -l found 0
             for i in (seq (count $MODULE_IDS))
                 if test "$MODULE_IDS[$i]" = "$mod"
                     set MODULE_SELECTED[$i] 1
+                    set found 1
                 end
+            end
+            if test $found -eq 0
+                warn "Unknown module: '$mod' (available: $MODULE_IDS)"
             end
         end
         if not check_conflicts

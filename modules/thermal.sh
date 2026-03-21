@@ -26,7 +26,8 @@ module_check_installed() {
 module_install() {
     # Kernel version check
     if [ "$SUPPORTS_THERMAL_PROFILES" -ne 1 ]; then
-        error "Kernel 6.8+ required for native thermal profile support. Current: $KERNEL_VERSION"
+        warn "Kernel 6.8+ required for native thermal profile support. Current: $KERNEL_VERSION"
+        return 1
     fi
 
     # Conflict check
@@ -46,7 +47,7 @@ module_install() {
     # Write thermal profile configuration
     log "Enabling Predator Sense v4 thermal profile support..."
     run_sudo tee "$_THERMAL_CONF" > /dev/null <<'EOF'
-# Acer thermal profile support - Linuwu-DAMX Installer
+# Acer thermal profile support - Archer Compatibility Suite
 # Enable Predator Sense v4 thermal profiles
 options acer_wmi predator_v4=1
 # Enable thermal profile cycling with mode button
@@ -54,17 +55,7 @@ options acer_wmi cycle_gaming_thermal_profile=1
 EOF
 
     # GRUB parameter injection
-    if [ -f /etc/default/grub ]; then
-        if ! grep -q "acer_wmi.predator_v4" /etc/default/grub; then
-            log "Adding thermal profile kernel parameter to GRUB..."
-            run_sudo sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="/GRUB_CMDLINE_LINUX_DEFAULT="acer_wmi.predator_v4=1 /' /etc/default/grub
-            run_sudo grub-mkconfig -o /boot/grub/grub.cfg
-        fi
-    elif [ -d /boot/loader/entries ]; then
-        log "systemd-boot detected. Please manually add this kernel parameter:"
-        log "  acer_wmi.predator_v4=1"
-        log "  Edit files in /boot/loader/entries/ and add to the 'options' line."
-    fi
+    add_grub_params "acer_wmi.predator_v4=1"
 
     INSTALLED_FILES+=" $_THERMAL_CONF"
     mark_reboot_required
@@ -80,13 +71,7 @@ module_uninstall() {
     sudo rm -f "$_THERMAL_CONF"
 
     # Revert GRUB parameter
-    if [ -f /etc/default/grub ]; then
-        if grep -q "acer_wmi.predator_v4" /etc/default/grub; then
-            log "Removing thermal profile kernel parameter from GRUB..."
-            sudo sed -i 's/acer_wmi\.predator_v4=1 //g' /etc/default/grub
-            sudo grub-mkconfig -o /boot/grub/grub.cfg
-        fi
-    fi
+    remove_grub_params "acer_wmi.predator_v4=1"
 }
 
 module_verify() {

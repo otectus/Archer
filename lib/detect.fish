@@ -44,8 +44,10 @@ set -g DISTRO_NAME ""
 set -g DISTRO_FAMILY "unknown"
 set -g AUR_HELPER ""
 
-# --- CachyOS ---
+# --- CachyOS / Clang ---
 set -g IS_CACHYOS 0
+set -g IS_CLANG_KERNEL 0
+set -g CLANG_BUILD_FLAGS ""
 set -g KERNEL_HEADERS "linux-headers"
 
 # --- Recommendations ---
@@ -84,7 +86,8 @@ function detect_model_family
 end
 
 function detect_gpu
-    set -l lspci_out (lspci 2>/dev/null; or echo "")
+    set -l lspci_out "$_CACHED_LSPCI"
+    test -z "$lspci_out"; and set lspci_out (lspci 2>/dev/null; or echo "")
 
     if echo "$lspci_out" | grep -qi "nvidia"
         set -g HAS_NVIDIA 1
@@ -105,7 +108,9 @@ function detect_gpu
 end
 
 function detect_wifi
-    set -g WIFI_DEVICE (lspci 2>/dev/null | grep -iE "network|wireless" | head -1; or echo "")
+    set -l lspci_out "$_CACHED_LSPCI"
+    test -z "$lspci_out"; and set lspci_out (lspci 2>/dev/null; or echo "")
+    set -g WIFI_DEVICE (echo "$lspci_out" | grep -iE "network|wireless" | head -1; or echo "")
 
     if string match -rqi 'MT7921|MT7902|MT7925|MT7922|MediaTek' "$WIFI_DEVICE"
         set -g WIFI_CHIPSET "mediatek"
@@ -126,7 +131,9 @@ function detect_audio
         set -g AUDIO_CODEC (cat /proc/asound/card*/codec* 2>/dev/null | grep "Codec:" | head -1 | sed 's/.*Codec: //'; or echo "")
     end
     set -g SOF_ACTIVE 0
-    if dmesg 2>/dev/null | grep -qi "sof.*firmware|sof-audio"
+    set -l dmesg_out "$_CACHED_DMESG"
+    test -z "$dmesg_out"; and set dmesg_out (dmesg 2>/dev/null; or echo "")
+    if echo "$dmesg_out" | grep -qi "sof.*firmware|sof-audio"
         set -g SOF_ACTIVE 1
     end
     set -g CPU_VENDOR (grep -m1 "vendor_id" /proc/cpuinfo 2>/dev/null | awk '{print $3}'; or echo "")
@@ -136,10 +143,12 @@ function detect_touchpad
     set -g HAS_I2C_TOUCHPAD 0
     set -g TOUCHPAD_ERRORS 0
 
-    if dmesg 2>/dev/null | grep -qi "i2c_hid_acpi.*ELAN|i2c_hid_acpi.*SYN|i2c_hid_acpi.*MSFT|i2c.*hid.*touchpad"
+    set -l dmesg_out "$_CACHED_DMESG"
+    test -z "$dmesg_out"; and set dmesg_out (dmesg 2>/dev/null; or echo "")
+    if echo "$dmesg_out" | grep -qi "i2c_hid_acpi.*ELAN|i2c_hid_acpi.*SYN|i2c_hid_acpi.*MSFT|i2c.*hid.*touchpad"
         set -g HAS_I2C_TOUCHPAD 1
     end
-    if dmesg 2>/dev/null | grep -qi "i2c_hid_acpi.*failed|i2c_hid_acpi.*error|i2c_hid.*timeout|i2c_hid.*weird size"
+    if echo "$dmesg_out" | grep -qi "i2c_hid_acpi.*failed|i2c_hid_acpi.*error|i2c_hid.*timeout|i2c_hid.*weird size"
         set -g TOUCHPAD_ERRORS 1
     end
 end
@@ -169,6 +178,14 @@ function detect_kernel
     if string match -q "*cachyos*" "$KERNEL_VERSION"
         set -g IS_CACHYOS 1
         set -g KERNEL_HEADERS "linux-cachyos-headers"
+    end
+
+    # Detect Clang-built kernel (CachyOS and other distros may build with Clang/LLVM)
+    set -g IS_CLANG_KERNEL 0
+    set -g CLANG_BUILD_FLAGS ""
+    if grep -q "clang" /proc/version 2>/dev/null
+        set -g IS_CLANG_KERNEL 1
+        set -g CLANG_BUILD_FLAGS "LLVM=1 CC=clang"
     end
 end
 
@@ -207,6 +224,10 @@ end
 
 # Run all detection functions
 function detect_all
+    # Cache expensive command outputs for reuse across detection functions
+    set -g _CACHED_DMESG (dmesg 2>/dev/null; or echo "")
+    set -g _CACHED_LSPCI (lspci 2>/dev/null; or echo "")
+
     detect_dmi
     detect_model_family
     detect_gpu
@@ -244,8 +265,13 @@ function print_hw_summary
     set -l bat_status "Not detected"
     test "$HAS_BATTERY" = 1; and set bat_status "Present"
 
+    set -l kernel_extra ""
+    if test "$IS_CLANG_KERNEL" = 1
+        set kernel_extra " [Clang]"
+    end
+
     echo (set_color --bold)"Detected:"(set_color normal)" $ACER_PRODUCT_NAME ($ACER_SYS_VENDOR)"
-    echo (set_color --bold)"Kernel:"(set_color normal)"   $KERNEL_VERSION | "(set_color --bold)"GPU:"(set_color normal)" $gpu_info"
+    echo (set_color --bold)"Kernel:"(set_color normal)"   $KERNEL_VERSION$kernel_extra | "(set_color --bold)"GPU:"(set_color normal)" $gpu_info"
     echo (set_color --bold)"WiFi:"(set_color normal)"     $wifi_info"
     echo (set_color --bold)"Battery:"(set_color normal)"  $bat_status"
 

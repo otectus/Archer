@@ -41,7 +41,7 @@ module_install() {
     # Write Acer-optimized config
     log "Applying Acer-optimized power settings..."
     run_sudo tee "$_TLP_CONF" > /dev/null <<'TLP_EOF'
-# Acer laptop optimizations - Linuwu-DAMX Installer
+# Acer laptop optimizations - Archer Compatibility Suite
 # CPU scaling
 CPU_SCALING_GOVERNOR_ON_AC=performance
 CPU_SCALING_GOVERNOR_ON_BAT=powersave

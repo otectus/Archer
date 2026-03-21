@@ -13,24 +13,58 @@ function write_manifest
     set -l dkms_str $argv[3]
     set -l packages_str $argv[4]
 
-    mkdir -p "$MANIFEST_DIR"
+    mkdir -p -m 700 "$MANIFEST_DIR"
 
-    python3 -c "
-import json, datetime
+    if has_cmd jq
+        jq -n \
+            --arg date (date -Iseconds) \
+            --arg version "$INSTALLER_VERSION" \
+            --arg model "$ACER_PRODUCT_NAME" \
+            --arg family "$MODEL_FAMILY" \
+            --arg kernel "$KERNEL_VERSION" \
+            --arg modules "$modules_str" \
+            --arg files "$files_str" \
+            --arg dkms "$dkms_str" \
+            --arg packages "$packages_str" \
+            '{
+                install_date: $date,
+                installer_version: $version,
+                acer_model: $model,
+                model_family: $family,
+                kernel_version: $kernel,
+                modules_installed: ($modules | split(" ") | map(select(. != ""))),
+                files_created: ($files | split(" ") | map(select(. != ""))),
+                dkms_modules: ($dkms | split(" ") | map(select(. != ""))),
+                packages_installed: ($packages | split(" ") | map(select(. != "")))
+            }' > "$MANIFEST_FILE"
+    else
+        # Python fallback: pass values via environment to prevent injection
+        set -lx DAMX_VERSION "$INSTALLER_VERSION"
+        set -lx DAMX_MODEL "$ACER_PRODUCT_NAME"
+        set -lx DAMX_FAMILY "$MODEL_FAMILY"
+        set -lx DAMX_KERNEL "$KERNEL_VERSION"
+        set -lx DAMX_MODULES "$modules_str"
+        set -lx DAMX_FILES "$files_str"
+        set -lx DAMX_DKMS "$dkms_str"
+        set -lx DAMX_PKGS "$packages_str"
+        set -lx DAMX_MANIFEST "$MANIFEST_FILE"
+        python3 -c "
+import json, datetime, os
 manifest = {
     'install_date': datetime.datetime.now().isoformat(),
-    'installer_version': '$INSTALLER_VERSION',
-    'acer_model': '$ACER_PRODUCT_NAME',
-    'model_family': '$MODEL_FAMILY',
-    'kernel_version': '$KERNEL_VERSION',
-    'modules_installed': '$modules_str'.split(),
-    'files_created': '$files_str'.split(),
-    'dkms_modules': '$dkms_str'.split(),
-    'packages_installed': '$packages_str'.split()
+    'installer_version': os.environ['DAMX_VERSION'],
+    'acer_model': os.environ['DAMX_MODEL'],
+    'model_family': os.environ['DAMX_FAMILY'],
+    'kernel_version': os.environ['DAMX_KERNEL'],
+    'modules_installed': os.environ['DAMX_MODULES'].split(),
+    'files_created': os.environ['DAMX_FILES'].split(),
+    'dkms_modules': os.environ['DAMX_DKMS'].split(),
+    'packages_installed': os.environ['DAMX_PKGS'].split()
 }
-with open('$MANIFEST_FILE', 'w') as f:
+with open(os.environ['DAMX_MANIFEST'], 'w') as f:
     json.dump(manifest, f, indent=2)
 "
+    end
     log "Install manifest written to $MANIFEST_FILE"
 end
 
@@ -40,12 +74,17 @@ function read_manifest_modules
         echo ""
         return 1
     end
-    python3 -c "
-import json
-with open('$MANIFEST_FILE') as f:
+    if has_cmd jq
+        jq -r '.modules_installed // [] | join(" ")' "$MANIFEST_FILE"
+    else
+        set -lx DAMX_MANIFEST "$MANIFEST_FILE"
+        python3 -c "
+import json, os
+with open(os.environ['DAMX_MANIFEST']) as f:
     data = json.load(f)
 print(' '.join(data.get('modules_installed', [])))
 "
+    end
 end
 
 # Read a specific field from manifest
@@ -55,16 +94,22 @@ function read_manifest_field
         echo ""
         return 1
     end
-    python3 -c "
-import json
-with open('$MANIFEST_FILE') as f:
+    if has_cmd jq
+        jq -r --arg f "$field" '.[$f] // "" | if type == "array" then join(" ") else tostring end' "$MANIFEST_FILE"
+    else
+        set -lx DAMX_MANIFEST "$MANIFEST_FILE"
+        set -lx DAMX_FIELD "$field"
+        python3 -c "
+import json, os
+with open(os.environ['DAMX_MANIFEST']) as f:
     data = json.load(f)
-val = data.get('$field', [])
+val = data.get(os.environ['DAMX_FIELD'], [])
 if isinstance(val, list):
     print(' '.join(val))
 else:
     print(val)
 "
+    end
 end
 
 # Check if manifest exists

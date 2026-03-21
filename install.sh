@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Linuwu-DAMX Installer v2.0
+# Archer Compatibility Suite v2.0
 # Comprehensive Acer laptop compatibility suite for Arch Linux
 # Supports: Nitro, Predator, Helios, Triton, Swift, Aspire, and more
 
@@ -35,6 +35,7 @@ SELECT_ALL_RECOMMENDED=0
 EXPLICIT_MODULES=""
 SHOW_HELP=0
 SHOW_VERSION=0
+VERIFY_ONLY=0
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
@@ -43,6 +44,7 @@ parse_args() {
             --modules)    EXPLICIT_MODULES="$2"; shift ;;
             --no-confirm) NO_CONFIRM=1 ;;
             --dry-run)    DRY_RUN=1 ;;
+            --verify)     VERIFY_ONLY=1 ;;
             --help|-h)    SHOW_HELP=1 ;;
             --version|-v) SHOW_VERSION=1 ;;
             *) error "Unknown option: $1. Use --help for usage." ;;
@@ -52,18 +54,28 @@ parse_args() {
 }
 
 show_help() {
-    echo "Linuwu-DAMX Installer v${INSTALLER_VERSION}"
+    echo "Archer Compatibility Suite v${INSTALLER_VERSION}"
     echo ""
     echo "Usage: ./install.sh [OPTIONS]"
     echo ""
     echo "Options:"
     echo "  --all            Install all recommended modules (non-interactive)"
     echo "  --modules LIST   Comma-separated list of modules to install"
-    echo "                   Available: ${MODULE_IDS[*]}"
+    echo "  --verify         Check status of previously installed modules"
     echo "  --no-confirm     Skip all confirmation prompts"
     echo "  --dry-run        Show what would be done without making changes"
     echo "  --help, -h       Show this help message"
     echo "  --version, -v    Show version"
+    echo ""
+    echo "Available modules:"
+    echo "  core-damx   Linuwu-Sense kernel driver and DAMX GUI for fan/RGB management"
+    echo "  battery     Limits battery charging to 80% via acer-wmi-battery"
+    echo "  gpu         EnvyControl for NVIDIA Optimus hybrid graphics switching"
+    echo "  touchpad    Fix I2C HID touchpad detection (module reload, kernel params)"
+    echo "  audio       SOF firmware, ALSA configuration, and audio codec fixes"
+    echo "  wifi        Diagnose and fix WiFi/Bluetooth issues for various chipsets"
+    echo "  power       TLP power management with Acer-optimized configuration"
+    echo "  thermal     Native kernel thermal profiles via acer_wmi (kernel 6.8+)"
     echo ""
     echo "Interactive mode (default): Detects hardware and presents a menu."
 }
@@ -71,7 +83,7 @@ show_help() {
 # --- Menu display and interaction ---
 display_menu() {
     echo ""
-    echo -e "${_BOLD}=== Linuwu-DAMX Installer v${INSTALLER_VERSION} ===${_RESET}"
+    echo -e "${_BOLD}=== Archer Compatibility Suite v${INSTALLER_VERSION} ===${_RESET}"
     echo ""
     print_hw_summary
     echo ""
@@ -177,7 +189,15 @@ run_menu() {
 # --- Module execution ---
 install_shared_deps() {
     log "Installing shared system dependencies..."
-    run_sudo pacman -Syu --needed --noconfirm base-devel dkms git curl "$KERNEL_HEADERS" python-pip
+    local deps=(base-devel dkms git curl "$KERNEL_HEADERS" python-pip)
+
+    # Clang-built kernels require clang/llvm toolchain for DKMS module compilation
+    if [ "$IS_CLANG_KERNEL" -eq 1 ]; then
+        log "Clang-built kernel detected — including LLVM toolchain for DKMS builds."
+        deps+=(clang llvm)
+    fi
+
+    run_sudo pacman -Syu --needed --noconfirm "${deps[@]}"
 }
 
 run_selected_modules() {
@@ -191,7 +211,10 @@ run_selected_modules() {
 
             section "Installing: $label"
             source "$SCRIPT_DIR/modules/${id}.sh"
-            module_install
+            if ! module_install; then
+                warn "Module $id failed to install. Continuing..."
+                continue
+            fi
         fi
     done
 
@@ -211,6 +234,8 @@ verify_modules() {
             local label="${MODULE_LABELS[$i]}"
             total=$((total + 1))
 
+            # Re-source to restore this module's function definitions (each module
+            # overrides the same names: module_verify, module_install, etc.)
             source "$SCRIPT_DIR/modules/${id}.sh"
             if module_verify; then
                 success "$label"
@@ -230,11 +255,41 @@ main() {
     parse_args "$@"
 
     if [ "$SHOW_VERSION" -eq 1 ]; then
-        echo "Linuwu-DAMX Installer v${INSTALLER_VERSION}"
+        echo "Archer Compatibility Suite v${INSTALLER_VERSION}"
         exit 0
     fi
     if [ "$SHOW_HELP" -eq 1 ]; then
         show_help
+        exit 0
+    fi
+
+    # Standalone verify mode: check installed modules from manifest
+    if [ "$VERIFY_ONLY" -eq 1 ]; then
+        if ! has_manifest; then
+            error "No install manifest found. Nothing to verify."
+        fi
+        section "Verifying Installed Modules"
+        local mods
+        mods=$(read_manifest_modules)
+        local total=0
+        local passed=0
+        for id in $mods; do
+            local mod_file="$SCRIPT_DIR/modules/${id}.sh"
+            if [ -f "$mod_file" ]; then
+                total=$((total + 1))
+                source "$mod_file"
+                if module_verify; then
+                    success "$MODULE_NAME"
+                    passed=$((passed + 1))
+                else
+                    warn "$MODULE_NAME (check warnings above)"
+                fi
+            else
+                warn "Module file not found: $mod_file"
+            fi
+        done
+        echo ""
+        log "Verification: $passed/$total modules passed"
         exit 0
     fi
 
@@ -271,11 +326,16 @@ main() {
         done
         IFS=',' read -ra explicit_list <<< "$EXPLICIT_MODULES"
         for mod in "${explicit_list[@]}"; do
+            local found=0
             for i in "${!MODULE_IDS[@]}"; do
                 if [ "${MODULE_IDS[$i]}" = "$mod" ]; then
                     MODULE_SELECTED[$i]=1
+                    found=1
                 fi
             done
+            if [ "$found" -eq 0 ]; then
+                warn "Unknown module: '$mod' (available: ${MODULE_IDS[*]})"
+            fi
         done
         if ! check_conflicts; then
             error "Module conflict detected. Aborting."

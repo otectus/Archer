@@ -45,6 +45,13 @@ function module_install
         set -l src_dir "/usr/src/$_BATTERY_DKMS_NAME-$_BATTERY_DKMS_VERSION"
         run_sudo rm -rf $src_dir
         run_sudo git clone $_BATTERY_REPO $src_dir
+
+        # Inject Clang build flags into DKMS config if kernel was built with Clang
+        if test "$IS_CLANG_KERNEL" = 1; and test -f "$src_dir/dkms.conf"
+            log "Patching dkms.conf with Clang/LLVM build flags..."
+            run_sudo sed -i "s|^MAKE\[0\]=.*|& $CLANG_BUILD_FLAGS|" "$src_dir/dkms.conf"
+        end
+
         run_sudo dkms add -m $_BATTERY_DKMS_NAME -v $_BATTERY_DKMS_VERSION 2>/dev/null; or true
         run_sudo dkms install -m $_BATTERY_DKMS_NAME -v $_BATTERY_DKMS_VERSION
     end
@@ -72,7 +79,7 @@ function _install_udev_rule
     log "Creating udev rule for persistent battery health mode..."
     run_sudo tee "$_BATTERY_UDEV_RULE" > /dev/null <<'UDEV_EOF'
 # Acer battery health mode - limit charge to 80%
-# Installed by Linuwu-DAMX Installer
+# Installed by Archer Compatibility Suite
 ACTION=="add", SUBSYSTEM=="wmi", DRIVER=="acer-wmi-battery", RUN+="/bin/sh -c 'echo 1 > /sys/bus/wmi/drivers/acer-wmi-battery/health_mode'"
 UDEV_EOF
 end

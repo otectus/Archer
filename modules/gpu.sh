@@ -52,11 +52,36 @@ module_install() {
     fi
 
     log "Setting GPU mode to: $gpu_mode"
+    # EnvyControl internally calls 'mkinitcpio -P' via subprocess.run, which
+    # hangs on CachyOS due to the Limine wrapper's interactive prompt and
+    # multi-kernel preset rebuilds. We temporarily replace mkinitcpio with a
+    # no-op shim so envycontrol skips it, then do our own rebuild afterwards.
+    local _shim_path="/usr/local/bin/mkinitcpio"
+    local _had_existing=0
+    if [ -f "$_shim_path" ]; then
+        _had_existing=1
+        run_sudo mv "$_shim_path" "$_shim_path.archer-bak"
+    fi
+    run_sudo tee "$_shim_path" > /dev/null <<'SHIM'
+#!/bin/sh
+exit 0
+SHIM
+    run_sudo chmod 755 "$_shim_path"
+
     if [ "$gpu_mode" = "hybrid" ]; then
         run_sudo envycontrol -s hybrid --rtd3 2
     else
         run_sudo envycontrol -s "$gpu_mode"
     fi
+
+    # Restore original wrapper or remove shim
+    run_sudo rm -f "$_shim_path"
+    if [ "$_had_existing" -eq 1 ]; then
+        run_sudo mv "$_shim_path.archer-bak" "$_shim_path"
+    fi
+
+    # Now rebuild initramfs properly (single preset, with timeout, bypasses wrapper)
+    rebuild_initramfs
 
     INSTALLED_PACKAGES+=" envycontrol"
     mark_reboot_required
@@ -66,7 +91,24 @@ module_install() {
 module_uninstall() {
     log "Resetting GPU configuration..."
     if has_cmd envycontrol; then
+        # envycontrol --reset also calls mkinitcpio -P internally; use same shim trick
+        local _shim_path="/usr/local/bin/mkinitcpio"
+        local _had_existing=0
+        if [ -f "$_shim_path" ]; then
+            _had_existing=1
+            sudo mv "$_shim_path" "$_shim_path.archer-bak"
+        fi
+        printf '#!/bin/sh\nexit 0\n' | sudo tee "$_shim_path" > /dev/null
+        sudo chmod 755 "$_shim_path"
+
         sudo envycontrol --reset 2>/dev/null || true
+
+        sudo rm -f "$_shim_path"
+        if [ "$_had_existing" -eq 1 ]; then
+            sudo mv "$_shim_path.archer-bak" "$_shim_path"
+        fi
+
+        rebuild_initramfs
     fi
     log "EnvyControl package retained (remove manually if desired)."
 }

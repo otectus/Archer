@@ -28,7 +28,7 @@ module_install() {
         log "AMD platform detected. Configuring SOF audio driver..."
         run_sudo tee "$_AUDIO_AMD_CONF" > /dev/null <<'EOF'
 # AMD audio configuration for Acer laptops
-# Installed by Linuwu-DAMX Installer
+# Installed by Archer Compatibility Suite
 
 # Enable SOF driver for AMD ACP
 options snd_pci_acp3x enable=1
@@ -49,8 +49,7 @@ EOF
     fi
 
     if [ "$rebuild_initramfs" -eq 1 ]; then
-        log "Rebuilding initramfs to include audio driver configuration..."
-        run_sudo mkinitcpio -P
+        rebuild_initramfs
     fi
 
     # Display current audio status
@@ -78,8 +77,7 @@ module_uninstall() {
     log "Removing audio configuration..."
     if [ -f "$_AUDIO_AMD_CONF" ]; then
         sudo rm -f "$_AUDIO_AMD_CONF"
-        log "Rebuilding initramfs..."
-        sudo mkinitcpio -P
+        rebuild_initramfs
     fi
     log "Audio packages retained as they are standard system components."
 }
