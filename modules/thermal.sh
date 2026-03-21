@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Module: Kernel Thermal Profiles
 # Enables native acer_wmi thermal profile support on kernel 6.8+
-# WARNING: Conflicts with core-damx (Linuwu-Sense blacklists acer_wmi)
+# WARNING: Conflicts with driver module (Linuwu-Sense blacklists acer_wmi)
 
 MODULE_NAME="Kernel Thermal Profiles"
 MODULE_ID="thermal"
@@ -32,9 +32,9 @@ module_install() {
 
     # Conflict check
     if [ -f /etc/modprobe.d/blacklist-acer-wmi.conf ]; then
-        warn "acer_wmi is currently blacklisted (likely by Linuwu-Sense / DAMX)."
+        warn "acer_wmi is currently blacklisted (by the Linuwu-Sense driver)."
         warn "Native thermal profiles require acer_wmi to be loaded."
-        warn "Using this module alongside DAMX may cause conflicts."
+        warn "Using this module alongside the Linuwu-Sense driver may cause conflicts."
         if ! confirm "Continue anyway?"; then
             log "Skipping thermal profile setup."
             return 0

@@ -51,7 +51,7 @@ module_install() {
     # Start daemon (may fail if Linuwu-Sense not yet loaded)
     if ! run_sudo systemctl start archer-daemon.service 2>/dev/null; then
         warn "Daemon did not start — Linuwu-Sense driver may not be loaded yet."
-        warn "It will start automatically after reboot if core-damx is installed."
+        warn "It will start automatically after reboot if the driver module is installed."
     fi
 
     # Install desktop entry
@@ -74,7 +74,7 @@ LAUNCHER_EOF
     # Check for Linuwu-Sense driver
     if ! dkms status 2>/dev/null | grep -q "linuwu-sense"; then
         warn "Linuwu-Sense driver not detected. The daemon will have limited functionality."
-        warn "Install the 'core-damx' module for full hardware control."
+        warn "Install the 'driver' module for full hardware control."
     fi
 
     log "Archer GUI installed."

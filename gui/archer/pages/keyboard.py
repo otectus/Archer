@@ -1,8 +1,7 @@
 """
 Keyboard Lighting page — 4-zone RGB control and effects.
 
-Mirrors the Keyboard Lighting tab from DAMX with per-zone colour
-picking, effect modes, and a backlight timeout toggle.
+Per-zone colour picking, effect modes, and a backlight timeout toggle.
 """
 
 import threading

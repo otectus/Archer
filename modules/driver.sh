@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+# Module: Linuwu-Sense Kernel Driver
+# Installs the Linuwu-Sense DKMS kernel driver for Acer fan/RGB/battery hardware access.
+# Blacklists acer_wmi for exclusive control.
+
+MODULE_NAME="Linuwu-Sense Kernel Driver"
+MODULE_ID="driver"
+MODULE_DESCRIPTION="Linuwu-Sense kernel driver for fan/RGB hardware access (DKMS)"
+
+REPO_DRIVER="https://github.com/0x7375646F/Linuwu-Sense.git"
+DRIVER_MODULE="linuwu_sense"
+DKMS_NAME="linuwu-sense"
+DKMS_VERSION="1.0"
+
+module_detect() {
+    # Relevant for gaming Acer models; usable on others with warning
+    case "$MODEL_FAMILY" in
+        nitro|predator|helios|triton) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+module_check_installed() {
+    if dkms status 2>/dev/null | grep -q "$DKMS_NAME"; then
+        return 0
+    fi
+    return 1
+}
+
+module_install() {
+    local src_dir="/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
+
+    # --- Kernel Module (Linuwu-Sense) via DKMS ---
+    log "Setting up $DRIVER_MODULE via DKMS..."
+    run_sudo rm -rf "$src_dir"
+    run_sudo git clone "$REPO_DRIVER" "$src_dir"
+
+    # Use centralized Clang detection from detect_kernel()
+    local make_flags="$CLANG_BUILD_FLAGS"
+    if [ "$IS_CLANG_KERNEL" -eq 1 ]; then
+        log "Clang-built kernel detected. Using LLVM build flags."
+    fi
+
+    # Create DKMS config
+    run_sudo tee "$src_dir/dkms.conf" > /dev/null <<DKMS_EOF
+PACKAGE_NAME="$DKMS_NAME"
+PACKAGE_VERSION="$DKMS_VERSION"
+CLEAN="make clean"
+MAKE[0]="make KVERSION=\\\$kernelver $make_flags"
+BUILT_MODULE_NAME[0]="$DRIVER_MODULE"
+BUILT_MODULE_LOCATION[0]="src/"
+DEST_MODULE_LOCATION[0]="/kernel/drivers/platform/x86"
+AUTOINSTALL="yes"
+DKMS_EOF
+
+    run_sudo dkms add -m "$DKMS_NAME" -v "$DKMS_VERSION" || true
+    log "Building DKMS module (this may take a few minutes)..."
+    run_sudo dkms install -m "$DKMS_NAME" -v "$DKMS_VERSION"
+
+    # Blacklist acer_wmi
+    log "Blacklisting acer_wmi..."
+    echo "blacklist acer_wmi" | run_sudo tee /etc/modprobe.d/blacklist-acer-wmi.conf > /dev/null
+
+    mark_reboot_required
+
+    INSTALLED_FILES+=" /etc/modprobe.d/blacklist-acer-wmi.conf"
+    INSTALLED_DKMS+=" ${DKMS_NAME}/${DKMS_VERSION}"
+}
+
+module_uninstall() {
+    log "Removing Linuwu-Sense DKMS module..."
+    sudo dkms remove -m "$DKMS_NAME" -v "$DKMS_VERSION" --all 2>/dev/null || true
+    sudo rm -rf "/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
+
+    log "Restoring acer_wmi (removing blacklist)..."
+    sudo rm -f /etc/modprobe.d/blacklist-acer-wmi.conf
+}
+
+module_verify() {
+    local failures=0
+
+    if ! dkms status 2>/dev/null | grep -q "$DKMS_NAME.*installed"; then
+        warn "DKMS module $DKMS_NAME not showing as installed"
+        failures=$((failures + 1))
+    fi
+
+    if ! lsmod 2>/dev/null | grep -q "$DRIVER_MODULE"; then
+        warn "$DRIVER_MODULE not loaded (may require reboot)"
+    fi
+
+    return $(( failures > 0 ? 1 : 0 ))
+}

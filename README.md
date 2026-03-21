@@ -4,11 +4,11 @@ Have an Acer laptop running Arch Linux? You're in the right place.
 
 ![Archer Compatibility Suite](https://i.imgur.com/KvbGFQw.png)
 
-A comprehensive, modular compatibility suite for Acer laptops running Arch Linux and Arch-based distributions. Originally built for Linuwu-Sense and DAMX (Div Acer Manager Max), the installer now provides hardware-aware detection and targeted fixes for a broad range of Acer laptop issues on Linux.
+A modular compatibility suite for Acer laptops running Arch Linux and Arch-based distributions. Provides hardware-aware detection, kernel driver installation, and targeted fixes for a broad range of Acer laptop issues on Linux — from fan control and RGB keyboards to GPU switching and power management.
 
 ## Supported Hardware
 
-| Model Family | Fan/RGB (DAMX) | Battery Limit | GPU Switching | Touchpad Fix | Audio Fix | WiFi/BT | Power Mgmt | Thermal Profiles |
+| Model Family | Fan/RGB (Driver) | Battery Limit | GPU Switching | Touchpad Fix | Audio Fix | WiFi/BT | Power Mgmt | Thermal Profiles |
 |-------------|:-:|:-:|:-:|:-:|:-:|:-:|:-:|:-:|
 | **Nitro**       | R | R | R | O | O | O | O | O |
 | **Predator**    | R | R | R | O | O | O | O | O |
@@ -30,8 +30,8 @@ A comprehensive, modular compatibility suite for Acer laptops running Arch Linux
 
 ## Available Modules
 
-### 1. DAMX Fan & RGB Control (core-damx)
-Installs the [Linuwu-Sense](https://github.com/0x7375646F/Linuwu-Sense) kernel driver via DKMS and the [DAMX](https://github.com/PXDiv/Div-Acer-Manager-Max) GUI daemon for fan speed control and RGB keyboard management. Blacklists the default `acer_wmi` module for exclusive hardware access.
+### 1. Linuwu-Sense Kernel Driver (driver)
+Installs the [Linuwu-Sense](https://github.com/0x7375646F/Linuwu-Sense) kernel driver via DKMS for fan speed control, RGB keyboard access, and battery management at the hardware level. Blacklists the default `acer_wmi` module for exclusive hardware access.
 
 ### 2. Battery Charge Limit (battery)
 Installs the [acer-wmi-battery](https://github.com/frederik-h/acer-wmi-battery) DKMS module to limit charging to 80%, extending battery lifespan. Persists across reboots via a udev rule. Prefers AUR installation when `paru` or `yay` is available.
@@ -69,20 +69,20 @@ Installs [TLP](https://linrunner.de/tlp/) with an Acer-optimized configuration:
 ### 8. Kernel Thermal Profiles (thermal)
 Enables native `acer_wmi` thermal profile support on kernel 6.8+. Provides access to Eco, Silent, Balanced, Performance, and Turbo modes via the standard `platform_profile` sysfs interface and the physical mode button.
 
-> **Conflict Warning**: This module requires `acer_wmi` to be loaded, which conflicts with the DAMX module (Linuwu-Sense blacklists `acer_wmi`). You cannot use both simultaneously.
+> **Conflict Warning**: This module requires `acer_wmi` to be loaded, which conflicts with the driver module (Linuwu-Sense blacklists `acer_wmi`). You cannot use both simultaneously.
 
 ### 9. Archer GUI (gui)
 A GTK4/Adwaita control panel with a root daemon for real-time hardware management. Provides a dashboard with CPU/GPU monitoring, fan speed control, battery charge limiting, RGB keyboard configuration, and thermal profile switching. Communicates with the Linuwu-Sense kernel driver via a Unix socket daemon.
 
-> **Note**: This module requires a display server (X11 or Wayland). For full functionality, install the DAMX module (`core-damx`) first — the GUI daemon uses the Linuwu-Sense driver for hardware control.
+> **Note**: This module requires a display server (X11 or Wayland). For full functionality, install the driver module first — the GUI daemon uses the Linuwu-Sense driver for hardware control.
 
 ## Installation
 
 Clone the repository and run the installer:
 
 ```bash
-git clone https://github.com/otectus/Linuwu-DAMX-Installer.git
-cd Linuwu-DAMX-Installer
+git clone https://github.com/otectus/Archer.git
+cd Archer
 ./install.sh
 ```
 
@@ -100,13 +100,16 @@ The installer will:
 ./install.sh --all
 
 # Install specific modules
-./install.sh --modules "core-damx,battery,gpu"
+./install.sh --modules "driver,battery,gpu"
 
 # Skip confirmation prompts
 ./install.sh --all --no-confirm
 
 # Preview without making changes
 ./install.sh --dry-run
+
+# Check status of installed modules
+./install.sh --verify
 
 # Show help
 ./install.sh --help
@@ -118,6 +121,7 @@ The installer will:
 |------|-------------|
 | `--all` | Install all recommended modules (non-interactive) |
 | `--modules LIST` | Comma-separated list of module IDs to install |
+| `--verify` | Check status of previously installed modules |
 | `--no-confirm` | Skip all confirmation prompts |
 | `--dry-run` | Show what would be done without making changes |
 | `--help`, `-h` | Show help message |
@@ -128,10 +132,13 @@ The installer will:
 After installation, verify the state of installed modules:
 
 ```bash
-# DAMX / Linuwu-Sense
+# Linuwu-Sense Driver
 dkms status                                    # linuwu-sense should show 'installed'
 lsmod | grep linuwu_sense                      # Module should be loaded
-systemctl --user status damx-daemon            # Daemon should be active
+
+# Archer GUI
+sudo systemctl status archer-daemon            # Daemon should be active
+archer-gui                                     # Launch the control panel
 
 # Battery
 cat /sys/bus/wmi/drivers/acer-wmi-battery/health_mode  # Should read '1'
@@ -154,12 +161,12 @@ The uninstaller reads the install manifest to selectively remove only what was i
 ./uninstall.sh
 ```
 
-If no manifest is found (v1 installation), a legacy fallback removes all known components.
+If no manifest is found (legacy installation), a fallback removes all known components.
 
 ## Project Structure
 
 ```
-Linuwu-DAMX-Installer/
+Archer/
   install.sh                    # Main entry point with interactive menu
   uninstall.sh                  # Manifest-aware uninstaller
   lib/
@@ -167,7 +174,7 @@ Linuwu-DAMX-Installer/
     detect.sh                   # Hardware detection and recommendation engine
     manifest.sh                 # Install state tracking (JSON manifest)
   modules/
-    core-damx.sh                # Linuwu-Sense + DAMX fan/RGB control
+    driver.sh                   # Linuwu-Sense kernel driver (DKMS)
     battery.sh                  # acer-wmi-battery charge limiting
     gpu.sh                      # EnvyControl GPU switching
     touchpad.sh                 # I2C HID touchpad fixes
@@ -175,7 +182,7 @@ Linuwu-DAMX-Installer/
     wifi.sh                     # WiFi/Bluetooth troubleshooting
     power.sh                    # TLP power management
     thermal.sh                  # Kernel thermal profiles
-    gui.sh                      # GTK4/Adwaita control panel + daemon
+    gui.sh                      # Archer GUI module (control panel + daemon)
   gui/                          # GUI application source files
     archer_daemon.py            # Root daemon (Unix socket, sysfs control)
     archer_gui.py               # GTK4 application launcher
@@ -189,7 +196,7 @@ Linuwu-DAMX-Installer/
 - **BIOS Configuration**: Some Acer laptops ship with RAID storage mode enabled. Switch to AHCI mode in BIOS for Linux compatibility. Disable Fast Startup for dual-boot setups.
 - **CachyOS**: The installer automatically detects CachyOS kernels and installs the correct `-cachyos-headers` package. Clang/LLVM compiler flags are applied when a Clang-built kernel is detected.
 - **AUR Helpers**: Modules that install AUR packages (battery, GPU) prefer `paru` or `yay` if available, with manual fallback otherwise. The installer never installs an AUR helper for you.
-- **Install Manifest**: Stored at `~/.local/share/damx/install-manifest.json`. Tracks installed modules, files, DKMS modules, and packages for clean uninstallation.
+- **Install Manifest**: Stored at `~/.local/share/archer/install-manifest.json`. Tracks installed modules, files, DKMS modules, and packages for clean uninstallation. Legacy manifests from previous versions are migrated automatically.
 
 ## Contributing
 

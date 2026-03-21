@@ -14,9 +14,9 @@ source "$SCRIPT_DIR/lib/detect.sh"
 source "$SCRIPT_DIR/lib/manifest.sh"
 
 # --- Module registry ---
-MODULE_IDS=("core-damx" "battery" "gpu" "touchpad" "audio" "wifi" "power" "thermal" "gui")
+MODULE_IDS=("driver" "battery" "gpu" "touchpad" "audio" "wifi" "power" "thermal" "gui")
 MODULE_LABELS=(
-    "DAMX Fan & RGB Control"
+    "Linuwu-Sense Kernel Driver"
     "Battery Charge Limit (80%)"
     "GPU Switching (EnvyControl)"
     "Touchpad Fix (I2C HID)"
@@ -69,7 +69,7 @@ show_help() {
     echo "  --version, -v    Show version"
     echo ""
     echo "Available modules:"
-    echo "  core-damx   Linuwu-Sense kernel driver and DAMX GUI for fan/RGB management"
+    echo "  driver      Linuwu-Sense kernel driver for fan/RGB hardware access (DKMS)"
     echo "  battery     Limits battery charging to 80% via acer-wmi-battery"
     echo "  gpu         EnvyControl for NVIDIA Optimus hybrid graphics switching"
     echo "  touchpad    Fix I2C HID touchpad detection (module reload, kernel params)"
@@ -109,13 +109,13 @@ display_menu() {
         if [ "$id" = "thermal" ] && [ "${MODULE_SELECTED[0]}" -eq 1 ]; then
             tag="${_RED}[CONFLICTS WITH #1]${_RESET}"
         fi
-        if [ "$id" = "core-damx" ] && [ "${MODULE_SELECTED[7]}" -eq 1 ]; then
+        if [ "$id" = "driver" ] && [ "${MODULE_SELECTED[7]}" -eq 1 ]; then
             tag="${_RED}[CONFLICTS WITH #8]${_RESET}"
         fi
 
         # GUI dependency hint
         if [ "$id" = "gui" ] && [ "${MODULE_SELECTED[0]}" -eq 0 ]; then
-            tag="${tag} ${_YELLOW}(needs #1 DAMX)${_RESET}"
+            tag="${tag} ${_YELLOW}(needs #1 Linuwu-Sense)${_RESET}"
         fi
 
         # Selection marker
@@ -149,9 +149,9 @@ init_selections() {
 }
 
 check_conflicts() {
-    # core-damx (#0) and thermal (#7) conflict
+    # driver (#0) and thermal (#7) conflict
     if [ "${MODULE_SELECTED[0]}" -eq 1 ] && [ "${MODULE_SELECTED[7]}" -eq 1 ]; then
-        warn "DAMX (Linuwu-Sense) and Kernel Thermal Profiles both selected."
+        warn "Linuwu-Sense driver and Kernel Thermal Profiles both selected."
         warn "These conflict: Linuwu-Sense blacklists acer_wmi, which thermal profiles require."
         warn "Please deselect one of them."
         return 1
@@ -218,10 +218,10 @@ run_selected_modules() {
 
             # GUI dependency warning
             if [ "$id" = "gui" ]; then
-                if ! is_in_list "core-damx" "${selected_names[*]}" && \
+                if ! is_in_list "driver" "${selected_names[*]}" && \
                    ! dkms status 2>/dev/null | grep -q "linuwu-sense"; then
                     warn "Linuwu-Sense driver not installed. The daemon will have limited functionality."
-                    warn "Consider installing the 'core-damx' module for full hardware control."
+                    warn "Consider installing the 'driver' module for full hardware control."
                 fi
             fi
 

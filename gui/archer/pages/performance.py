@@ -1,8 +1,7 @@
 """
 Performance & Power management page.
 
-Mirrors DAMX's Power & Performance tab: thermal profile selection,
-fan control modes, and power-source awareness.
+Thermal profile selection, fan control modes, and power-source awareness.
 """
 
 import threading

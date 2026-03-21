@@ -262,13 +262,13 @@ build_recommendations() {
     RECOMMENDED_MODULES=()
     OPTIONAL_MODULES=()
 
-    # Core DAMX: recommended for gaming models
+    # Driver (Linuwu-Sense): recommended for gaming models
     case "$MODEL_FAMILY" in
         nitro|predator|helios|triton)
-            RECOMMENDED_MODULES+=("core-damx")
+            RECOMMENDED_MODULES+=("driver")
             ;;
         *)
-            OPTIONAL_MODULES+=("core-damx")
+            OPTIONAL_MODULES+=("driver")
             ;;
     esac
 

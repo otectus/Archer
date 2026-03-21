@@ -70,8 +70,8 @@ else
     echo ""
 
     # Legacy uninstall: same as original v1 behavior
-    # 1. Disable Services
-    log "Stopping and disabling DAMX Daemon..."
+    # 1. Disable Services (legacy DAMX daemon cleanup)
+    log "Checking for legacy DAMX daemon..."
     run systemctl --user disable --now damx-daemon.service 2>/dev/null || true
     run rm -f "$HOME/.config/systemd/user/damx-daemon.service"
     run systemctl --user daemon-reload
@@ -104,8 +104,9 @@ else
     run_sudo rm -rf "/usr/src/acer-wmi-battery-0.1.0"
 
     # 5. Clean application files
-    log "Removing DAMX files..."
+    log "Removing application data..."
     run rm -rf "$HOME/.local/share/damx"
+    run rm -rf "$HOME/.local/share/archer"
 
     # 6. Remove Archer GUI if installed
     if [ -d /opt/archer ]; then

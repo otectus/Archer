@@ -2,11 +2,21 @@
 # Install manifest tracking (Bash)
 # Tracks what modules were installed for clean uninstallation
 
-MANIFEST_DIR="$HOME/.local/share/damx"
+MANIFEST_DIR="$HOME/.local/share/archer"
 MANIFEST_FILE="$MANIFEST_DIR/install-manifest.json"
 
+# Migrate legacy DAMX manifest location
+_LEGACY_MANIFEST="$HOME/.local/share/damx/install-manifest.json"
+if [ ! -f "$MANIFEST_FILE" ] && [ -f "$_LEGACY_MANIFEST" ]; then
+    mkdir -p "$MANIFEST_DIR"
+    cp "$_LEGACY_MANIFEST" "$MANIFEST_FILE"
+    if has_cmd sed; then
+        sed -i 's/"core-damx"/"driver"/g' "$MANIFEST_FILE"
+    fi
+fi
+
 # Write the install manifest after installation
-# Usage: write_manifest "core-damx battery gpu" "file1 file2" "linuwu-sense/1.0" "envycontrol tlp"
+# Usage: write_manifest "driver battery gpu" "file1 file2" "linuwu-sense/1.0" "envycontrol tlp"
 write_manifest() {
     local modules_str="$1"
     local files_str="$2"
@@ -39,29 +49,29 @@ write_manifest() {
             }' > "$MANIFEST_FILE"
     else
         # Python fallback: pass values via environment to prevent injection
-        DAMX_VERSION="$INSTALLER_VERSION" \
-        DAMX_MODEL="$ACER_PRODUCT_NAME" \
-        DAMX_FAMILY="$MODEL_FAMILY" \
-        DAMX_KERNEL="$KERNEL_VERSION" \
-        DAMX_MODULES="$modules_str" \
-        DAMX_FILES="$files_str" \
-        DAMX_DKMS="$dkms_str" \
-        DAMX_PKGS="$packages_str" \
-        DAMX_MANIFEST="$MANIFEST_FILE" \
+        ARCHER_VERSION="$INSTALLER_VERSION" \
+        ARCHER_MODEL="$ACER_PRODUCT_NAME" \
+        ARCHER_FAMILY="$MODEL_FAMILY" \
+        ARCHER_KERNEL="$KERNEL_VERSION" \
+        ARCHER_MODULES="$modules_str" \
+        ARCHER_FILES="$files_str" \
+        ARCHER_DKMS="$dkms_str" \
+        ARCHER_PKGS="$packages_str" \
+        ARCHER_MANIFEST="$MANIFEST_FILE" \
         python3 -c "
 import json, datetime, os
 manifest = {
     'install_date': datetime.datetime.now().isoformat(),
-    'installer_version': os.environ['DAMX_VERSION'],
-    'acer_model': os.environ['DAMX_MODEL'],
-    'model_family': os.environ['DAMX_FAMILY'],
-    'kernel_version': os.environ['DAMX_KERNEL'],
-    'modules_installed': os.environ['DAMX_MODULES'].split(),
-    'files_created': os.environ['DAMX_FILES'].split(),
-    'dkms_modules': os.environ['DAMX_DKMS'].split(),
-    'packages_installed': os.environ['DAMX_PKGS'].split()
+    'installer_version': os.environ['ARCHER_VERSION'],
+    'acer_model': os.environ['ARCHER_MODEL'],
+    'model_family': os.environ['ARCHER_FAMILY'],
+    'kernel_version': os.environ['ARCHER_KERNEL'],
+    'modules_installed': os.environ['ARCHER_MODULES'].split(),
+    'files_created': os.environ['ARCHER_FILES'].split(),
+    'dkms_modules': os.environ['ARCHER_DKMS'].split(),
+    'packages_installed': os.environ['ARCHER_PKGS'].split()
 }
-with open(os.environ['DAMX_MANIFEST'], 'w') as f:
+with open(os.environ['ARCHER_MANIFEST'], 'w') as f:
     json.dump(manifest, f, indent=2)
 "
     fi
@@ -78,9 +88,9 @@ read_manifest_modules() {
     if has_cmd jq; then
         jq -r '.modules_installed // [] | join(" ")' "$MANIFEST_FILE"
     else
-        DAMX_MANIFEST="$MANIFEST_FILE" python3 -c "
+        ARCHER_MANIFEST="$MANIFEST_FILE" python3 -c "
 import json, os
-with open(os.environ['DAMX_MANIFEST']) as f:
+with open(os.environ['ARCHER_MANIFEST']) as f:
     data = json.load(f)
 print(' '.join(data.get('modules_installed', [])))
 "
@@ -97,11 +107,11 @@ read_manifest_field() {
     if has_cmd jq; then
         jq -r --arg f "$field" '.[$f] // "" | if type == "array" then join(" ") else tostring end' "$MANIFEST_FILE"
     else
-        DAMX_MANIFEST="$MANIFEST_FILE" DAMX_FIELD="$field" python3 -c "
+        ARCHER_MANIFEST="$MANIFEST_FILE" ARCHER_FIELD="$field" python3 -c "
 import json, os
-with open(os.environ['DAMX_MANIFEST']) as f:
+with open(os.environ['ARCHER_MANIFEST']) as f:
     data = json.load(f)
-val = data.get(os.environ['DAMX_FIELD'], [])
+val = data.get(os.environ['ARCHER_FIELD'], [])
 if isinstance(val, list):
     print(' '.join(val))
 else:
