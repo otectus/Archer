@@ -78,8 +78,7 @@ Clone the repository and run the installer:
 ```bash
 git clone https://github.com/otectus/Linuwu-DAMX-Installer.git
 cd Linuwu-DAMX-Installer
-./install.sh        # Bash
-./setup.fish         # Fish
+./install.sh
 ```
 
 The installer will:
@@ -147,8 +146,7 @@ cat /sys/firmware/acpi/platform_profile        # Should show current profile
 The uninstaller reads the install manifest to selectively remove only what was installed:
 
 ```bash
-./uninstall.sh       # Bash
-./uninstall.fish     # Fish
+./uninstall.sh
 ```
 
 If no manifest is found (v1 installation), a legacy fallback removes all known components.
@@ -157,21 +155,21 @@ If no manifest is found (v1 installation), a legacy fallback removes all known c
 
 ```
 Linuwu-DAMX-Installer/
-  install.sh / setup.fish       # Main entry points with interactive menu
-  uninstall.sh / uninstall.fish # Manifest-aware uninstallers
+  install.sh                    # Main entry point with interactive menu
+  uninstall.sh                  # Manifest-aware uninstaller
   lib/
-    utils.sh / .fish            # Shared logging, error handling, helpers
-    detect.sh / .fish           # Hardware detection and recommendation engine
-    manifest.sh / .fish         # Install state tracking (JSON manifest)
+    utils.sh                    # Shared logging, error handling, helpers
+    detect.sh                   # Hardware detection and recommendation engine
+    manifest.sh                 # Install state tracking (JSON manifest)
   modules/
-    core-damx.sh / .fish        # Linuwu-Sense + DAMX fan/RGB control
-    battery.sh / .fish          # acer-wmi-battery charge limiting
-    gpu.sh / .fish              # EnvyControl GPU switching
-    touchpad.sh / .fish         # I2C HID touchpad fixes
-    audio.sh / .fish            # SOF firmware and audio config
-    wifi.sh / .fish             # WiFi/Bluetooth troubleshooting
-    power.sh / .fish            # TLP power management
-    thermal.sh / .fish          # Kernel thermal profiles
+    core-damx.sh                # Linuwu-Sense + DAMX fan/RGB control
+    battery.sh                  # acer-wmi-battery charge limiting
+    gpu.sh                      # EnvyControl GPU switching
+    touchpad.sh                 # I2C HID touchpad fixes
+    audio.sh                    # SOF firmware and audio config
+    wifi.sh                     # WiFi/Bluetooth troubleshooting
+    power.sh                    # TLP power management
+    thermal.sh                  # Kernel thermal profiles
 ```
 
 ## Technical Notes
@@ -184,7 +182,7 @@ Linuwu-DAMX-Installer/
 
 ## Contributing
 
-To add a new module, create `modules/<id>.sh` and `modules/<id>.fish` implementing the module interface:
+To add a new module, create `modules/<id>.sh` implementing the module interface:
 
 ```bash
 MODULE_NAME="Display Name"
@@ -198,7 +196,7 @@ module_uninstall()       # Reverse installation
 module_verify()          # Return 0 if working correctly
 ```
 
-Then add the module ID and label to the `MODULE_IDS` and `MODULE_LABELS` arrays in `install.sh` and `setup.fish`, and update the recommendation logic in `lib/detect.sh` / `lib/detect.fish`.
+Then add the module ID and label to the `MODULE_IDS` and `MODULE_LABELS` arrays in `install.sh`, and update the recommendation logic in `lib/detect.sh`.
 
 ---
 
