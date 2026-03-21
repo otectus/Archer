@@ -17,6 +17,10 @@ from archer.pages.battery import BatteryPage
 from archer.pages.keyboard import KeyboardPage
 from archer.pages.system import SystemPage
 from archer.pages.internals import InternalsPage
+from archer.pages.display import DisplayPage
+from archer.pages.gamemode import GameModePage
+from archer.pages.audio_enhance import AudioEnhancePage
+from archer.pages.firmware import FirmwarePage
 
 
 class ArcherWindow(Adw.ApplicationWindow):
@@ -92,6 +96,10 @@ class ArcherWindow(Adw.ApplicationWindow):
         self.keyboard_page = KeyboardPage(self.client)
         self.system_page = SystemPage(self.client)
         self.internals_page = InternalsPage(self.client)
+        self.display_page = DisplayPage(self.client)
+        self.gamemode_page = GameModePage(self.client)
+        self.audio_enhance_page = AudioEnhancePage(self.client)
+        self.firmware_page = FirmwarePage(self.client)
 
         # Add pages to stack
         self.view_stack.add_titled_with_icon(
@@ -111,6 +119,18 @@ class ArcherWindow(Adw.ApplicationWindow):
         )
         self.view_stack.add_titled_with_icon(
             self.internals_page, "internals", "Internals", "applications-engineering-symbolic"
+        )
+        self.view_stack.add_titled_with_icon(
+            self.display_page, "display", "Display Mode", "video-display-symbolic"
+        )
+        self.view_stack.add_titled_with_icon(
+            self.gamemode_page, "gamemode", "Game Mode", "applications-games-symbolic"
+        )
+        self.view_stack.add_titled_with_icon(
+            self.audio_enhance_page, "audio_enhance", "Audio", "audio-input-microphone-symbolic"
+        )
+        self.view_stack.add_titled_with_icon(
+            self.firmware_page, "firmware", "Firmware", "computer-symbolic"
         )
 
         main_box.append(self.view_stack)
@@ -141,6 +161,10 @@ class ArcherWindow(Adw.ApplicationWindow):
             self.keyboard_page.load_settings(data)
             self.system_page.load_settings(data)
             self.internals_page.load_settings(data)
+            self.display_page.load_settings(data)
+            self.gamemode_page.load_settings(data)
+            self.audio_enhance_page.load_settings(data)
+            self.firmware_page.load_settings(data)
 
             # Start monitoring timer
             self._start_monitoring()

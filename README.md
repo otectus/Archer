@@ -76,6 +76,18 @@ A GTK4/Adwaita control panel with a root daemon for real-time hardware managemen
 
 > **Note**: This module requires a display server (X11 or Wayland). For full functionality, install the driver module first — the GUI daemon uses the Linuwu-Sense driver for hardware control.
 
+### 10. Game Mode (gamemode)
+Installs [GameMode](https://github.com/FeralInteractive/gamemode) for automatic performance optimization during gaming. Switches CPU governor to performance, adjusts GPU power mode, and applies I/O priority tuning. The Archer daemon also provides a Game Mode toggle for manual activation.
+
+### 11. Audio Enhancement (audio-enhance)
+Sets up real-time microphone noise suppression via PipeWire and [rnnoise](https://github.com/xiph/rnnoise). Creates an "Archer Noise Suppression" virtual audio source that can be selected in any application for clean, noise-free input.
+
+### 12. Camera Enhancement (camera-enhance)
+Installs [v4l2loopback](https://github.com/umlaeute/v4l2loopback) to create an "Archer Camera" virtual device for background blur and camera effects. Provides the foundation for AI-powered camera processing.
+
+### 13. Firmware Advisor (firmware)
+Installs [fwupd](https://fwupd.org/) for firmware update detection. Displays current BIOS version and checks the Linux Vendor Firmware Service (LVFS) for available updates. Advisory only — never performs automatic updates.
+
 ## Installation
 
 Clone the repository and run the installer:
@@ -183,6 +195,10 @@ Archer/
     power.sh                    # TLP power management
     thermal.sh                  # Kernel thermal profiles
     gui.sh                      # Archer GUI module (control panel + daemon)
+    gamemode.sh                 # Game Mode (GameMode + governor switching)
+    audio-enhance.sh            # Audio noise suppression (PipeWire/rnnoise)
+    camera-enhance.sh           # Virtual camera (v4l2loopback)
+    firmware.sh                 # Firmware update advisor (fwupd)
   gui/                          # GUI application source files
     archer_daemon.py            # Root daemon (Unix socket, sysfs control)
     archer_gui.py               # GTK4 application launcher

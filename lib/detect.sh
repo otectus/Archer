@@ -326,4 +326,20 @@ build_recommendations() {
                 ;;
         esac
     fi
+
+    # Game Mode: optional for gaming models
+    case "$MODEL_FAMILY" in
+        nitro|predator|helios|triton)
+            OPTIONAL_MODULES+=("gamemode")
+            ;;
+    esac
+
+    # Audio Enhancement: always optional
+    OPTIONAL_MODULES+=("audio-enhance")
+
+    # Camera Enhancement: always optional
+    OPTIONAL_MODULES+=("camera-enhance")
+
+    # Firmware Advisor: always optional
+    OPTIONAL_MODULES+=("firmware")
 }

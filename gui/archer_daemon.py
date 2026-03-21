@@ -22,7 +22,7 @@ SOCKET_PATH = "/var/run/archer.sock"
 PID_FILE = "/var/run/archer-daemon.pid"
 LOG_FILE = "/var/log/archer-daemon.log"
 SETTINGS_FILE = "/etc/archer/settings.json"
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 
 # Linuwu-Sense sysfs base paths (tried in order)
 DRIVER_BASE_PATHS = [
@@ -129,6 +129,109 @@ class SettingsStore:
         return dict(self._data)
 
 
+# --- Fan Curve Engine ---
+class FanCurveEngine:
+    """Runs a 2Hz control loop to drive fan speed along a temperature curve."""
+
+    def __init__(self, get_temp_fn, set_fan_fn, restore_auto_fn):
+        self._get_temp = get_temp_fn
+        self._set_fan = set_fan_fn
+        self._restore_auto = restore_auto_fn
+        self._curves = {}  # "cpu" and/or "gpu" -> [(temp_c, fan_pct), ...]
+        self._active = {}  # "cpu" -> bool, "gpu" -> bool
+        self._fail_counts = {"cpu": 0, "gpu": 0}
+        self._lock = threading.Lock()
+        self._curve_thread = None
+        self._running = False
+
+    def start(self, target, points):
+        """Start a fan curve for target ('cpu' or 'gpu')."""
+        sorted_pts = sorted(points, key=lambda p: p[0])
+        with self._lock:
+            self._curves[target] = sorted_pts
+            self._active[target] = True
+            self._fail_counts[target] = 0
+        self._ensure_thread()
+
+    def stop(self, target=None):
+        """Stop fan curve for target, or both if None."""
+        targets = [target] if target else ["cpu", "gpu"]
+        with self._lock:
+            for t in targets:
+                self._active[t] = False
+                self._fail_counts[t] = 0
+        # Restore EC auto control
+        self._restore_auto()
+        # Stop thread if nothing is active
+        with self._lock:
+            if not any(self._active.get(t) for t in ["cpu", "gpu"]):
+                self._running = False
+
+    def get_state(self):
+        with self._lock:
+            return {
+                "cpu": {
+                    "active": self._active.get("cpu", False),
+                    "points": self._curves.get("cpu", []),
+                },
+                "gpu": {
+                    "active": self._active.get("gpu", False),
+                    "points": self._curves.get("gpu", []),
+                },
+            }
+
+    def _ensure_thread(self):
+        if self._running:
+            return
+        self._running = True
+        self._curve_thread = threading.Thread(target=self._loop, daemon=True)
+        self._curve_thread.start()
+
+    def _loop(self):
+        while self._running:
+            with self._lock:
+                targets = {t: self._curves.get(t) for t in ["cpu", "gpu"]
+                           if self._active.get(t) and self._curves.get(t)}
+            for target, points in targets.items():
+                try:
+                    temp = self._get_temp(target)
+                    pct = self._interpolate(points, temp)
+                    pct = max(30, min(100, pct))
+                    self._set_fan(target, pct)
+                    with self._lock:
+                        self._fail_counts[target] = 0
+                except Exception as e:
+                    logger.error(f"Fan curve tick failed for {target}: {e}")
+                    with self._lock:
+                        self._fail_counts[target] += 1
+                        if self._fail_counts[target] >= 3:
+                            logger.warning(f"Fan curve watchdog: 3 consecutive failures for {target}, restoring EC auto")
+                            self._active[target] = False
+                            self._fail_counts[target] = 0
+                    if self._fail_counts.get(target, 0) == 0 and not self._active.get(target, False):
+                        self._restore_auto()
+            time.sleep(0.5)  # 2 Hz
+
+    @staticmethod
+    def _interpolate(points, temp):
+        """Linearly interpolate fan percentage from curve points."""
+        if not points:
+            return 30
+        if temp <= points[0][0]:
+            return points[0][1]
+        if temp >= points[-1][0]:
+            return points[-1][1]
+        for i in range(len(points) - 1):
+            t0, p0 = points[i]
+            t1, p1 = points[i + 1]
+            if t0 <= temp <= t1:
+                if t1 == t0:
+                    return p0
+                frac = (temp - t0) / (t1 - t0)
+                return p0 + frac * (p1 - p0)
+        return points[-1][1]
+
+
 # --- Hardware Detection ---
 class HardwareManager:
     """Manages hardware detection and control via sysfs."""
@@ -139,6 +242,13 @@ class HardwareManager:
         self.laptop_type = "unknown"
         self.features = []
         self.settings = settings_store or SettingsStore()
+        self._game_mode_active = False
+        self._game_mode_saved = {}
+        self._fan_curve_engine = FanCurveEngine(
+            get_temp_fn=self._fan_curve_get_temp,
+            set_fan_fn=self._fan_curve_set_fan,
+            restore_auto_fn=self._fan_curve_restore_auto,
+        )
         self._detect_driver()
         self._detect_laptop_type()
         self._detect_features()
@@ -212,6 +322,16 @@ class HardwareManager:
         ] if os.path.isdir(POWER_SUPPLY_DIR) else []
         if bat_paths:
             self.features.append("battery_info")
+        # Display mode (envycontrol)
+        if run_cmd("which envycontrol 2>/dev/null"):
+            self.features.append("display_mode")
+        # Game mode (always available)
+        self.features.append("game_mode")
+        # USB wake policy
+        if os.path.exists("/proc/acpi/wakeup"):
+            self.features.append("usb_wake_policy")
+        # Firmware info (always available)
+        self.features.append("firmware_info")
 
     def _restore_saved_settings(self):
         """Re-apply any previously saved settings on daemon startup."""
@@ -287,6 +407,19 @@ class HardwareManager:
             ok = self.set_boot_animation_sound(boot)
             if ok:
                 restored.append("boot_animation_sound")
+
+        # Fan curves
+        for target in ("cpu", "gpu"):
+            key = f"fan_curve_{target}"
+            curve_data = self.settings.get(key)
+            if curve_data and curve_data.get("enabled") and curve_data.get("points"):
+                self.start_fan_curve(target, curve_data["points"])
+                restored.append(key)
+
+        # Game mode
+        if self.settings.get("game_mode_active"):
+            self.activate_game_mode()
+            restored.append("game_mode")
 
         if restored:
             logger.info(f"Restored saved settings: {restored}")
@@ -583,6 +716,10 @@ class HardwareManager:
             "battery_info": self.get_battery_info(),
             "power_source_ac": self.get_power_source(),
             "system_info": self.get_system_info(),
+            "fan_curve": self.get_fan_curve_state(),
+            "display_mode": self.get_display_mode() if "display_mode" in self.features else None,
+            "game_mode": self.get_game_mode(),
+            "firmware_info": self.get_firmware_info(),
             "saved_settings": self.settings.data,
         }
 
@@ -599,6 +736,187 @@ class HardwareManager:
             "battery_info": self.get_battery_info(),
             "power_source_ac": self.get_power_source(),
         }
+
+    # --- Fan Curve Methods ---
+    def _fan_curve_get_temp(self, target):
+        if target == "cpu":
+            return self.get_cpu_temp()
+        else:
+            return self.get_gpu_temp()
+
+    def _fan_curve_set_fan(self, target, pct):
+        cpu_fan, gpu_fan = self.get_fan_speed()
+        cpu_fan = cpu_fan or 0
+        gpu_fan = gpu_fan or 0
+        if target == "cpu":
+            self.set_fan_speed(int(pct), gpu_fan)
+        else:
+            self.set_fan_speed(cpu_fan, int(pct))
+
+    def _fan_curve_restore_auto(self):
+        path = self._sense_path("fan_speed")
+        if path:
+            write_sysfs(path, "0,0")
+
+    def start_fan_curve(self, target, points):
+        """Start a fan curve for 'cpu' or 'gpu'."""
+        self._fan_curve_engine.start(target, points)
+        self.settings.set(f"fan_curve_{target}", {"enabled": True, "points": points})
+        logger.info(f"Fan curve started for {target} with {len(points)} points")
+
+    def stop_fan_curve(self, target=None):
+        """Stop fan curve. None stops both."""
+        self._fan_curve_engine.stop(target)
+        targets = [target] if target else ["cpu", "gpu"]
+        for t in targets:
+            self.settings.set(f"fan_curve_{t}", {"enabled": False, "points": self.settings.get(f"fan_curve_{t}", {}).get("points", [])})
+        logger.info(f"Fan curve stopped for {targets}")
+
+    def get_fan_curve_state(self):
+        return self._fan_curve_engine.get_state()
+
+    def shutdown_fan_curves(self):
+        """Stop all fan curves and restore EC auto control. Called on daemon shutdown."""
+        self._fan_curve_engine.stop()
+
+    # --- Display Mode ---
+    def get_display_mode(self):
+        mode = run_cmd("envycontrol --query 2>/dev/null")
+        available_modes = ["integrated", "hybrid", "nvidia"]
+        return {
+            "mode": mode if mode in available_modes else "unknown",
+            "available_modes": available_modes,
+            "reboot_required": False,
+        }
+
+    def set_display_mode(self, mode):
+        valid_modes = ["integrated", "hybrid", "nvidia"]
+        if mode not in valid_modes:
+            return {"success": False, "error": f"Invalid mode '{mode}'. Available: {valid_modes}"}
+        result = run_cmd(f"envycontrol -s {mode} 2>&1")
+        logger.info(f"Display mode set to {mode}: {result}")
+        return {"success": True, "mode": mode, "reboot_required": True, "output": result}
+
+    def detect_mux(self):
+        """Check DRM topology to see if internal panel is on iGPU or dGPU."""
+        mux_info = {"has_mux": False, "active_gpu": "unknown"}
+        try:
+            drm_path = Path("/sys/class/drm")
+            for card in sorted(drm_path.glob("card*-*")):
+                status = read_sysfs(card / "status")
+                if status and status.lower() == "connected":
+                    card_name = card.name
+                    if "eDP" in card_name or "LVDS" in card_name:
+                        # Determine which GPU the internal panel is on
+                        device_link = card / "device"
+                        if device_link.exists():
+                            vendor = read_sysfs(device_link / "vendor")
+                            if vendor:
+                                if vendor == "0x10de":
+                                    mux_info["active_gpu"] = "nvidia"
+                                    mux_info["has_mux"] = True
+                                elif vendor in ("0x8086", "0x1002"):
+                                    mux_info["active_gpu"] = "igpu"
+                        break
+        except Exception as e:
+            logger.error(f"MUX detection error: {e}")
+        return mux_info
+
+    # --- Game Mode ---
+    def activate_game_mode(self):
+        """Save current profile/EPP and set everything to performance."""
+        if self._game_mode_active:
+            return
+        # Save current state
+        self._game_mode_saved["platform_profile"] = self.get_thermal_profile()
+        epp_path = "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference"
+        self._game_mode_saved["epp"] = read_sysfs(epp_path) or "balance_performance"
+        # Apply performance settings
+        self.set_thermal_profile("performance")
+        write_sysfs(epp_path, "performance")
+        # Start nvidia persistence mode
+        run_cmd("nvidia-smi -pm 1 2>/dev/null")
+        self._game_mode_active = True
+        self.settings.set("game_mode_active", True)
+        logger.info("Game mode activated")
+
+    def deactivate_game_mode(self):
+        """Restore saved profile and EPP values."""
+        if not self._game_mode_active:
+            return
+        saved_profile = self._game_mode_saved.get("platform_profile", "balanced")
+        saved_epp = self._game_mode_saved.get("epp", "balance_performance")
+        self.set_thermal_profile(saved_profile)
+        epp_path = "/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference"
+        write_sysfs(epp_path, saved_epp)
+        run_cmd("nvidia-smi -pm 0 2>/dev/null")
+        self._game_mode_active = False
+        self._game_mode_saved = {}
+        self.settings.set("game_mode_active", False)
+        logger.info("Game mode deactivated")
+
+    def get_game_mode(self):
+        return {"active": self._game_mode_active}
+
+    # --- USB Wake Policy ---
+    def get_usb_wake_sources(self):
+        """Parse /proc/acpi/wakeup for USB controller entries."""
+        sources = []
+        try:
+            with open("/proc/acpi/wakeup") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        device = parts[0]
+                        # Filter for USB-related entries
+                        sysfs_node = parts[-1] if len(parts) >= 4 else ""
+                        enabled = parts[2].strip("*").lower() == "enabled"
+                        sources.append({
+                            "device": device,
+                            "enabled": enabled,
+                            "sysfs_node": sysfs_node,
+                        })
+        except (OSError, FileNotFoundError) as e:
+            logger.error(f"Failed to read /proc/acpi/wakeup: {e}")
+        return sources
+
+    def set_usb_wake(self, device, enabled):
+        """Toggle a wakeup device by writing its name to /proc/acpi/wakeup."""
+        # /proc/acpi/wakeup toggles state when device name is written
+        # First check current state
+        sources = self.get_usb_wake_sources()
+        current = None
+        for s in sources:
+            if s["device"] == device:
+                current = s["enabled"]
+                break
+        if current is None:
+            return False
+        if current == enabled:
+            return True  # already in desired state
+        try:
+            with open("/proc/acpi/wakeup", "w") as f:
+                f.write(device)
+            return True
+        except OSError as e:
+            logger.error(f"Failed to set USB wake for {device}: {e}")
+            return False
+
+    # --- Firmware Info ---
+    def get_firmware_info(self):
+        """Get BIOS version and firmware update info."""
+        info = {}
+        info["bios_version"] = read_sysfs("/sys/class/dmi/id/bios_version") or "Unknown"
+        info["fwupd_available"] = bool(run_cmd("which fwupdmgr 2>/dev/null"))
+        info["updates"] = []
+        if info["fwupd_available"]:
+            try:
+                raw = run_cmd("fwupdmgr get-updates --json 2>/dev/null", timeout=30)
+                if raw:
+                    info["updates"] = json.loads(raw).get("Devices", [])
+            except (json.JSONDecodeError, Exception) as e:
+                logger.error(f"Failed to parse fwupd updates: {e}")
+        return info
 
     # --- Driver Management ---
     def restart_daemon(self):
@@ -720,6 +1038,15 @@ class DaemonServer:
             "restart_drivers_and_daemon": self._cmd_restart_drivers_and_daemon,
             "set_modprobe_parameter": self._cmd_set_modprobe_parameter,
             "remove_modprobe_parameter": self._cmd_remove_modprobe_parameter,
+            "set_fan_curve": self._cmd_set_fan_curve,
+            "get_fan_curve": self._cmd_get_fan_curve,
+            "get_display_mode": self._cmd_get_display_mode,
+            "set_display_mode": self._cmd_set_display_mode,
+            "set_game_mode": self._cmd_set_game_mode,
+            "get_game_mode": self._cmd_get_game_mode,
+            "get_usb_power_policy": self._cmd_get_usb_power_policy,
+            "set_usb_wake": self._cmd_set_usb_wake,
+            "get_firmware_info": self._cmd_get_firmware_info,
         }
 
         handler = handlers.get(command)
@@ -853,6 +1180,61 @@ class DaemonServer:
         ok = self.hw.remove_modprobe_parameter()
         return {"success": ok}
 
+    def _cmd_set_fan_curve(self, params):
+        target = params.get("target")
+        if target not in ("cpu", "gpu"):
+            return {"success": False, "error": "target must be 'cpu' or 'gpu'"}
+        enabled = params.get("enabled", True)
+        points = params.get("points", [])
+        if enabled:
+            if not points or len(points) < 2:
+                return {"success": False, "error": "Need at least 2 curve points"}
+            self.hw.start_fan_curve(target, points)
+        else:
+            self.hw.stop_fan_curve(target)
+        return {"success": True, "data": self.hw.get_fan_curve_state()}
+
+    def _cmd_get_fan_curve(self, params):
+        return {"success": True, "data": self.hw.get_fan_curve_state()}
+
+    def _cmd_get_display_mode(self, params):
+        return {"success": True, "data": self.hw.get_display_mode()}
+
+    def _cmd_set_display_mode(self, params):
+        mode = params.get("mode")
+        if not mode:
+            return {"success": False, "error": "mode parameter required"}
+        result = self.hw.set_display_mode(mode)
+        return {"success": result.get("success", False), "data": result}
+
+    def _cmd_set_game_mode(self, params):
+        enabled = params.get("enabled", False)
+        if enabled:
+            self.hw.activate_game_mode()
+        else:
+            self.hw.deactivate_game_mode()
+        return {"success": True, "data": self.hw.get_game_mode()}
+
+    def _cmd_get_game_mode(self, params):
+        return {"success": True, "data": self.hw.get_game_mode()}
+
+    def _cmd_get_usb_power_policy(self, params):
+        return {"success": True, "data": {
+            "charging_level": self.hw.get_usb_charging(),
+            "wake_sources": self.hw.get_usb_wake_sources(),
+        }}
+
+    def _cmd_set_usb_wake(self, params):
+        device = params.get("device")
+        enabled = params.get("enabled")
+        if not device or enabled is None:
+            return {"success": False, "error": "device and enabled parameters required"}
+        ok = self.hw.set_usb_wake(device, enabled)
+        return {"success": ok}
+
+    def _cmd_get_firmware_info(self, params):
+        return {"success": True, "data": self.hw.get_firmware_info()}
+
 
 # --- Main ---
 def write_pid():
@@ -878,6 +1260,8 @@ def main():
 
     def signal_handler(sig, frame):
         logger.info("Shutting down...")
+        hw.shutdown_fan_curves()
+        hw.deactivate_game_mode()
         server.stop()
         cleanup_pid()
         sys.exit(0)
@@ -890,6 +1274,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        hw.shutdown_fan_curves()
+        hw.deactivate_game_mode()
         server.stop()
         cleanup_pid()
         logger.info("Daemon stopped.")

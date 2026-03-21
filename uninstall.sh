@@ -120,6 +120,12 @@ else
         run_sudo rm -f /usr/local/bin/archer-gui
         run_sudo rm -rf /etc/archer
     fi
+
+    # 7. Remove enhancement configs if present
+    run_sudo rm -f /etc/gamemode.d/archer.ini
+    run_sudo rm -f /etc/pipewire/filter-chain.conf.d/archer-noise-suppress.conf
+    run_sudo rm -f /etc/modprobe.d/archer-v4l2loopback.conf
+    run_sudo systemctl disable --now fwupd.service 2>/dev/null || true
 fi
 
 section "Cleanup Complete"

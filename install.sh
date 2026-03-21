@@ -14,7 +14,7 @@ source "$SCRIPT_DIR/lib/detect.sh"
 source "$SCRIPT_DIR/lib/manifest.sh"
 
 # --- Module registry ---
-MODULE_IDS=("driver" "battery" "gpu" "touchpad" "audio" "wifi" "power" "thermal" "gui")
+MODULE_IDS=("driver" "battery" "gpu" "touchpad" "audio" "wifi" "power" "thermal" "gui" "gamemode" "audio-enhance" "camera-enhance" "firmware")
 MODULE_LABELS=(
     "Linuwu-Sense Kernel Driver"
     "Battery Charge Limit (80%)"
@@ -25,6 +25,10 @@ MODULE_LABELS=(
     "Power Management (TLP)"
     "Kernel Thermal Profiles"
     "Archer GUI (Control Panel)"
+    "Game Mode Support"
+    "Audio Enhancement (Noise Suppression)"
+    "Camera Enhancement (Virtual Camera)"
+    "Firmware Update Advisor"
 )
 MODULE_SELECTED=()
 INSTALLED_FILES=""
@@ -78,6 +82,10 @@ show_help() {
     echo "  power       TLP power management with Acer-optimized configuration"
     echo "  thermal     Native kernel thermal profiles via acer_wmi (kernel 6.8+)"
     echo "  gui         GTK4/Adwaita control panel and hardware daemon"
+    echo "  gamemode    Linux Game Mode with performance governor switching"
+    echo "  audio-enhance  Noise suppression via PipeWire/rnnoise"
+    echo "  camera-enhance Virtual camera with background blur (v4l2loopback)"
+    echo "  firmware    Firmware update advisor via fwupd"
     echo ""
     echo "Interactive mode (default): Detects hardware and presents a menu."
 }
@@ -165,12 +173,16 @@ run_menu() {
         read -rp "> " choice
 
         case "$choice" in
-            [1-9])
-                local idx=$((choice - 1))
-                if [ "${MODULE_SELECTED[$idx]}" -eq 1 ]; then
-                    MODULE_SELECTED[$idx]=0
+            [0-9]|[0-9][0-9])
+                if [ "$choice" -ge 1 ] && [ "$choice" -le "${#MODULE_IDS[@]}" ] 2>/dev/null; then
+                    local idx=$((choice - 1))
+                    if [ "${MODULE_SELECTED[$idx]}" -eq 1 ]; then
+                        MODULE_SELECTED[$idx]=0
+                    else
+                        MODULE_SELECTED[$idx]=1
+                    fi
                 else
-                    MODULE_SELECTED[$idx]=1
+                    warn "Invalid number. Enter 1-${#MODULE_IDS[@]}, a, n, or c."
                 fi
                 ;;
             a|A)
