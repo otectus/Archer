@@ -1,0 +1,215 @@
+/*
+ * Archer Compatibility Suite - Custom Theme
+ * Dark theme with blue accent, matching DAMX aesthetic
+ */
+
+/* === Global === */
+window {
+    background-color: #0e0e11;
+}
+
+/* === Status Label === */
+.status-connected {
+    color: #4ade80;
+    font-weight: bold;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    background-color: alpha(#4ade80, 0.15);
+}
+
+.status-disconnected {
+    color: #f87171;
+    font-weight: bold;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    background-color: alpha(#f87171, 0.15);
+}
+
+.status-label {
+    font-size: 12px;
+    padding: 4px 10px;
+    opacity: 0.7;
+}
+
+/* === Cards === */
+.card {
+    background-color: #18181b;
+    border: 1px solid #27272a;
+    border-radius: 12px;
+    padding: 16px;
+}
+
+.card-content {
+    padding: 8px;
+}
+
+/* === Profile Buttons === */
+.profile-button {
+    min-width: 100px;
+    min-height: 80px;
+    padding: 12px;
+    border-radius: 12px;
+    background-color: #27272a;
+    border: 2px solid #3f3f46;
+    font-weight: bold;
+    font-size: 13px;
+    transition: all 200ms ease;
+}
+
+.profile-button:hover {
+    background-color: #3f3f46;
+    border-color: #52525b;
+}
+
+.profile-button-active {
+    background-color: alpha(#1B89D8, 0.25);
+    border-color: #1B89D8;
+    color: #93c5fd;
+}
+
+.profile-button-active:hover {
+    background-color: alpha(#1B89D8, 0.35);
+}
+
+/* === Stat Cards (Dashboard) === */
+.stat-card {
+    background: linear-gradient(180deg, #18181b, #1f1f24);
+    border: 1px solid #27272a;
+    border-radius: 12px;
+    padding: 16px;
+    min-height: 100px;
+}
+
+.stat-card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #a1a1aa;
+    letter-spacing: 1px;
+}
+
+.stat-card-value {
+    font-size: 32px;
+    font-weight: bold;
+    color: #f4f4f5;
+}
+
+.stat-card-subtitle {
+    font-size: 12px;
+    color: #71717a;
+}
+
+/* === Fan RPM === */
+.fan-rpm-value {
+    font-size: 24px;
+    font-weight: bold;
+    color: #60a5fa;
+}
+
+.fan-label {
+    font-size: 13px;
+    color: #a1a1aa;
+}
+
+/* === Temperature Level Bars === */
+levelbar.temp-low trough block.filled {
+    background-color: #4ade80;
+}
+
+levelbar.temp-medium trough block.filled {
+    background-color: #facc15;
+}
+
+levelbar.temp-high trough block.filled {
+    background-color: #ef4444;
+}
+
+/* === Battery Level Bar === */
+levelbar.battery-bar trough block.filled {
+    background-color: #4ade80;
+}
+
+/* === Chart Area === */
+.chart-area {
+    background-color: #0f0f17;
+    border-radius: 8px;
+    border: 1px solid #27272a;
+}
+
+/* === Section Headers === */
+.section-title {
+    font-size: 18px;
+    font-weight: bold;
+    color: #e4e4e7;
+    margin-bottom: 8px;
+}
+
+/* === Zone Color Grid === */
+.zone-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: #d4d4d8;
+    margin-bottom: 4px;
+}
+
+/* === Keyboard Color Zones === */
+.color-zone-card {
+    background-color: #1f1f24;
+    border: 1px solid #27272a;
+    border-radius: 10px;
+    padding: 12px;
+    min-width: 160px;
+    min-height: 80px;
+}
+
+/* === Warning rows === */
+row.warning {
+    background-color: alpha(#f59e0b, 0.1);
+}
+
+/* === Accent overrides === */
+.accent-blue {
+    color: #60a5fa;
+}
+
+.accent-green {
+    color: #4ade80;
+}
+
+.accent-red {
+    color: #ef4444;
+}
+
+.accent-yellow {
+    color: #facc15;
+}
+
+/* === Tab styling === */
+viewswitcher button {
+    min-height: 40px;
+    font-weight: 600;
+}
+
+/* === Scale/Slider tweaks === */
+scale trough highlight {
+    background-color: #1B89D8;
+}
+
+scale slider {
+    background-color: #3b82f6;
+    border-color: #2563eb;
+}
+
+/* === Banner === */
+banner {
+    background-color: alpha(#f59e0b, 0.15);
+    color: #fbbf24;
+}
+
+/* === Preferences Group Headers === */
+preferencesgroup > box > label.title {
+    font-size: 18px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+}

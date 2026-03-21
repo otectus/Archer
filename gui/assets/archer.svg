@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- White circle outline -->
+  <circle cx="256" cy="256" r="230" fill="none" stroke="#ffffff" stroke-width="16"/>
+  <!-- Arch Linux "A" logo -->
+  <path d="M256 100
+    C248 120, 230 170, 210 220
+    C200 245, 190 270, 180 295
+    C205 280, 225 260, 256 245
+    C287 260, 307 280, 332 295
+    C322 270, 312 245, 302 220
+    C282 170, 264 120, 256 100Z"
+    fill="#ffffff"/>
+  <path d="M155 360
+    C170 325, 185 295, 200 265
+    C220 280, 238 290, 256 296
+    C274 290, 292 280, 312 265
+    C327 295, 342 325, 357 360
+    C330 340, 300 310, 256 310
+    C212 310, 182 340, 155 360Z"
+    fill="#ffffff"/>
+</svg>

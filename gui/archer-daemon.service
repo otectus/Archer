@@ -1,0 +1,20 @@
+[Unit]
+Description=Archer Compatibility Suite - System Daemon
+After=multi-user.target
+Wants=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/archer/archer_daemon.py
+Restart=on-failure
+RestartSec=5
+PIDFile=/var/run/archer-daemon.pid
+
+# Security hardening
+ProtectSystem=full
+ProtectHome=read-only
+NoNewPrivileges=false
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
