@@ -14,7 +14,7 @@ source "$SCRIPT_DIR/lib/detect.sh"
 source "$SCRIPT_DIR/lib/manifest.sh"
 
 # --- Module registry ---
-MODULE_IDS=("core-damx" "battery" "gpu" "touchpad" "audio" "wifi" "power" "thermal")
+MODULE_IDS=("core-damx" "battery" "gpu" "touchpad" "audio" "wifi" "power" "thermal" "gui")
 MODULE_LABELS=(
     "DAMX Fan & RGB Control"
     "Battery Charge Limit (80%)"
@@ -24,6 +24,7 @@ MODULE_LABELS=(
     "WiFi/Bluetooth Troubleshooting"
     "Power Management (TLP)"
     "Kernel Thermal Profiles"
+    "Archer GUI (Control Panel)"
 )
 MODULE_SELECTED=()
 INSTALLED_FILES=""
@@ -76,6 +77,7 @@ show_help() {
     echo "  wifi        Diagnose and fix WiFi/Bluetooth issues for various chipsets"
     echo "  power       TLP power management with Acer-optimized configuration"
     echo "  thermal     Native kernel thermal profiles via acer_wmi (kernel 6.8+)"
+    echo "  gui         GTK4/Adwaita control panel and hardware daemon"
     echo ""
     echo "Interactive mode (default): Detects hardware and presents a menu."
 }
@@ -109,6 +111,11 @@ display_menu() {
         fi
         if [ "$id" = "core-damx" ] && [ "${MODULE_SELECTED[7]}" -eq 1 ]; then
             tag="${_RED}[CONFLICTS WITH #8]${_RESET}"
+        fi
+
+        # GUI dependency hint
+        if [ "$id" = "gui" ] && [ "${MODULE_SELECTED[0]}" -eq 0 ]; then
+            tag="${tag} ${_YELLOW}(needs #1 DAMX)${_RESET}"
         fi
 
         # Selection marker
@@ -158,7 +165,7 @@ run_menu() {
         read -rp "> " choice
 
         case "$choice" in
-            [1-8])
+            [1-9])
                 local idx=$((choice - 1))
                 if [ "${MODULE_SELECTED[$idx]}" -eq 1 ]; then
                     MODULE_SELECTED[$idx]=0
@@ -208,6 +215,15 @@ run_selected_modules() {
             local id="${MODULE_IDS[$i]}"
             local label="${MODULE_LABELS[$i]}"
             selected_names+=("$id")
+
+            # GUI dependency warning
+            if [ "$id" = "gui" ]; then
+                if ! is_in_list "core-damx" "${selected_names[*]}" && \
+                   ! dkms status 2>/dev/null | grep -q "linuwu-sense"; then
+                    warn "Linuwu-Sense driver not installed. The daemon will have limited functionality."
+                    warn "Consider installing the 'core-damx' module for full hardware control."
+                fi
+            fi
 
             section "Installing: $label"
             source "$SCRIPT_DIR/modules/${id}.sh"

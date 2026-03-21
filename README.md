@@ -71,6 +71,11 @@ Enables native `acer_wmi` thermal profile support on kernel 6.8+. Provides acces
 
 > **Conflict Warning**: This module requires `acer_wmi` to be loaded, which conflicts with the DAMX module (Linuwu-Sense blacklists `acer_wmi`). You cannot use both simultaneously.
 
+### 9. Archer GUI (gui)
+A GTK4/Adwaita control panel with a root daemon for real-time hardware management. Provides a dashboard with CPU/GPU monitoring, fan speed control, battery charge limiting, RGB keyboard configuration, and thermal profile switching. Communicates with the Linuwu-Sense kernel driver via a Unix socket daemon.
+
+> **Note**: This module requires a display server (X11 or Wayland). For full functionality, install the DAMX module (`core-damx`) first — the GUI daemon uses the Linuwu-Sense driver for hardware control.
+
 ## Installation
 
 Clone the repository and run the installer:
@@ -170,6 +175,12 @@ Linuwu-DAMX-Installer/
     wifi.sh                     # WiFi/Bluetooth troubleshooting
     power.sh                    # TLP power management
     thermal.sh                  # Kernel thermal profiles
+    gui.sh                      # GTK4/Adwaita control panel + daemon
+  gui/                          # GUI application source files
+    archer_daemon.py            # Root daemon (Unix socket, sysfs control)
+    archer_gui.py               # GTK4 application launcher
+    archer/                     # GUI modules (pages, widgets, client, tray)
+    assets/                     # Icons and images
 ```
 
 ## Technical Notes

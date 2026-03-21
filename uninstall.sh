@@ -106,6 +106,19 @@ else
     # 5. Clean application files
     log "Removing DAMX files..."
     run rm -rf "$HOME/.local/share/damx"
+
+    # 6. Remove Archer GUI if installed
+    if [ -d /opt/archer ]; then
+        log "Removing Archer GUI..."
+        run_sudo systemctl disable --now archer-daemon.service 2>/dev/null || true
+        run_sudo rm -f /etc/systemd/system/archer-daemon.service
+        run_sudo systemctl daemon-reload
+        run_sudo rm -rf /opt/archer
+        run_sudo rm -f /usr/share/applications/io.github.archer.desktop
+        run_sudo rm -f /usr/share/icons/hicolor/scalable/apps/io.github.archer.svg
+        run_sudo rm -f /usr/local/bin/archer-gui
+        run_sudo rm -rf /etc/archer
+    fi
 fi
 
 section "Cleanup Complete"

@@ -314,4 +314,16 @@ build_recommendations() {
                 ;;
         esac
     fi
+
+    # GUI: recommended on gaming models with display server, optional otherwise
+    if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+        case "$MODEL_FAMILY" in
+            nitro|predator|helios|triton)
+                RECOMMENDED_MODULES+=("gui")
+                ;;
+            *)
+                OPTIONAL_MODULES+=("gui")
+                ;;
+        esac
+    fi
 }
