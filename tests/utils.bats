@@ -4,6 +4,9 @@
 setup() {
     DRY_RUN=0
     NO_CONFIRM=0
+    VERBOSE=0
+    LOG_FILE=""
+    REBOOT_REQUIRED=0
     source "$BATS_TEST_DIRNAME/../lib/utils.sh"
 }
 

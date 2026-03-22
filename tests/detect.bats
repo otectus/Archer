@@ -2,11 +2,16 @@
 # Tests for lib/detect.sh — hardware detection and recommendation engine
 
 setup() {
+    # Initialize variables before sourcing (prevents unbound variable errors)
+    DRY_RUN=1
+    NO_CONFIRM=1
+    VERBOSE=0
+    LOG_FILE=""
+    REBOOT_REQUIRED=0
     # Source utils first (detect.sh depends on it)
     source "$BATS_TEST_DIRNAME/../lib/utils.sh"
     # Override error() to not exit during tests
     error() { echo "ERROR: $*"; return 1; }
-    DRY_RUN=1
 }
 
 @test "detect_kernel parses kernel version correctly" {

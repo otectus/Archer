@@ -19,17 +19,18 @@ REBOOT_REQUIRED=0
 # Internal logging helper: writes to stdout and optionally to a log file
 _emit() {
     echo -e "$*"
-    if [[ -n "$LOG_FILE" ]]; then
+    if [[ -n "${LOG_FILE:-}" ]]; then
         # Strip ANSI color codes for log file
-        echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE"
+        echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE" 2>/dev/null || true
     fi
+    return 0
 }
 
-log()     { _emit "${_CYAN}>>>${_RESET} $*"; }
-warn()    { _emit "${_YELLOW}\u26a0${_RESET}  $*"; }
+log()     { _emit "${_CYAN}>>>${_RESET} $*"; return 0; }
+warn()    { _emit "${_YELLOW}\u26a0${_RESET}  $*"; return 0; }
 error()   { _emit "${_RED}\u274c${_RESET} $*"; exit 1; }
-success() { _emit "${_GREEN}\u2705${_RESET} $*"; }
-debug()   { [[ "$VERBOSE" -eq 1 ]] && _emit "${_BOLD}[DEBUG]${_RESET} $*"; return 0; }
+success() { _emit "${_GREEN}\u2705${_RESET} $*"; return 0; }
+debug()   { [[ "${VERBOSE:-0}" -eq 1 ]] && _emit "${_BOLD}[DEBUG]${_RESET} $*"; return 0; }
 
 # Execute a command, or print it in dry-run mode
 run() {

@@ -6,6 +6,8 @@ MODULES_DIR="$BATS_TEST_DIRNAME/../modules"
 setup() {
     DRY_RUN=1
     NO_CONFIRM=1
+    VERBOSE=0
+    LOG_FILE=""
     REBOOT_REQUIRED=0
     INSTALLED_FILES=""
     INSTALLED_DKMS=""
