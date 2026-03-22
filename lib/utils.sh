@@ -26,16 +26,21 @@ _emit() {
     return 0
 }
 
-log()     { _emit "${_CYAN}>>>${_RESET} $*"; return 0; }
-warn()    { _emit "${_YELLOW}\u26a0${_RESET}  $*"; return 0; }
-error()   { _emit "${_RED}\u274c${_RESET} $*"; exit 1; }
-success() { _emit "${_GREEN}\u2705${_RESET} $*"; return 0; }
-debug()   { [[ "${VERBOSE:-0}" -eq 1 ]] && _emit "${_BOLD}[DEBUG]${_RESET} $*"; return 0; }
+log()     { _emit "${_CYAN:-}>>>${_RESET:-} $*"; return 0; }
+warn()    { _emit "${_YELLOW:-}\u26a0${_RESET:-}  $*"; return 0; }
+error()   { _emit "${_RED:-}\u274c${_RESET:-} $*"; exit 1; }
+success() { _emit "${_GREEN:-}\u2705${_RESET:-} $*"; return 0; }
+debug() {
+    if [[ "${VERBOSE:-0}" -eq 1 ]]; then
+        _emit "${_BOLD:-}[DEBUG]${_RESET:-} $*"
+    fi
+    return 0
+}
 
 # Execute a command, or print it in dry-run mode
 run() {
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-        echo -e "${_YELLOW}[DRY RUN]${_RESET} $*"
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        echo -e "${_YELLOW:-}[DRY RUN]${_RESET:-} $*"
         return 0
     fi
     "$@"
@@ -43,8 +48,8 @@ run() {
 
 # Execute a command with sudo, or print it in dry-run mode
 run_sudo() {
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-        echo -e "${_YELLOW}[DRY RUN]${_RESET} sudo $*"
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        echo -e "${_YELLOW:-}[DRY RUN]${_RESET:-} sudo $*"
         return 0
     fi
     sudo "$@"
@@ -55,8 +60,8 @@ run_sudo() {
 run_sudo_timeout() {
     local timeout_secs="${1:-300}"
     shift
-    if [[ "$DRY_RUN" -eq 1 ]]; then
-        echo -e "${_YELLOW}[DRY RUN]${_RESET} sudo (timeout ${timeout_secs}s) $*"
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        echo -e "${_YELLOW:-}[DRY RUN]${_RESET:-} sudo (timeout ${timeout_secs}s) $*"
         return 0
     fi
     timeout --signal=TERM --kill-after=30 "$timeout_secs" sudo "$@"
@@ -122,7 +127,7 @@ rebuild_initramfs() {
 # Prompt for confirmation (respects --no-confirm)
 confirm() {
     local prompt="${1:-Continue?}"
-    if [[ "$NO_CONFIRM" -eq 1 ]]; then
+    if [[ "${NO_CONFIRM:-0}" -eq 1 ]]; then
         return 0
     fi
     read -rp "$prompt [y/N]: " answer
@@ -144,6 +149,7 @@ section() {
     echo ""
     echo -e "${_BOLD}=== $* ===${_RESET}"
     echo ""
+    return 0
 }
 
 # Check if a command exists

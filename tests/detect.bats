@@ -139,9 +139,9 @@ EOF
     pacman() { echo ""; }
     export -f pacman
     # Mock /proc/version to contain "clang"
+    # grep -q "clang" /proc/version -> $1=-q, $2=clang, $3=/proc/version
     grep() {
-        if [[ "$2" == "/proc/version" ]]; then
-            echo "clang version 17"
+        if [[ "${*}" == *"/proc/version"* ]]; then
             return 0
         fi
         command grep "$@"
