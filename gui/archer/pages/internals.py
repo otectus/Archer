@@ -81,13 +81,15 @@ class InternalsPage(Gtk.Box):
         self.override_combo.set_selected(0)
         permanent_group.add(self.override_combo)
 
-        apply_override_btn = Gtk.Button(label="Apply Override", halign=Gtk.Align.CENTER,
-                                         margin_top=8, margin_bottom=8)
+        apply_override_btn = Gtk.Button(
+            label="Apply Override", halign=Gtk.Align.CENTER,
+            margin_top=8, margin_bottom=8)
         apply_override_btn.add_css_class("suggested-action")
         apply_override_btn.connect("clicked", self._on_apply_override)
         override_row = Adw.PreferencesRow()
-        override_inner = Gtk.Box(margin_start=12, margin_end=12, margin_bottom=12,
-                                  halign=Gtk.Align.CENTER)
+        override_inner = Gtk.Box(
+            margin_start=12, margin_end=12, margin_bottom=12,
+            halign=Gtk.Align.CENTER)
         override_inner.append(apply_override_btn)
         override_row.set_child(override_inner)
         permanent_group.add(override_row)

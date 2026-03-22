@@ -1315,7 +1315,7 @@ def main():
 
     # Try D-Bus first, fall back to Unix socket
     use_dbus = False
-    dbus_service = None
+    _dbus_service = None
     main_loop = None
     server = None
 
