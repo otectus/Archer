@@ -154,7 +154,6 @@ class ArcherWindow(Adw.ApplicationWindow):
             self.status_label.add_css_class("status-connected")
 
             # Push settings to all pages
-            features = data.get("features", [])
             self.dashboard_page.load_settings(data)
             self.performance_page.load_settings(data)
             self.battery_page.load_settings(data)

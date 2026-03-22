@@ -10,7 +10,7 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 
-from gi.repository import Adw
+from gi.repository import Adw  # noqa: F401 — required to init Adw before use
 
 from archer.application import ArcherApplication
 

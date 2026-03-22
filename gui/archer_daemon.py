@@ -1325,7 +1325,7 @@ def main():
         from archer_dbus import ArcherDBusService
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-        dbus_service = ArcherDBusService(hw)
+        _dbus_service = ArcherDBusService(hw)  # noqa: F841 — prevent GC
         main_loop = GLib.MainLoop()
         use_dbus = True
         logger.info("D-Bus service registered (io.otectus.Archer1)")
