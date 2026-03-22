@@ -5,7 +5,7 @@ Battery Controls page - calibration, charge limit, USB power delivery.
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw
 
 import threading
 
@@ -27,8 +27,9 @@ class BatteryPage(Gtk.Box):
         self.status_group = Adw.PreferencesGroup(title="Battery Status")
 
         self.bat_percentage_row = Adw.ActionRow(title="Charge Level", subtitle="--")
-        self.bat_percentage_bar = Gtk.LevelBar(min_value=0, max_value=100, hexpand=True,
-                                                valign=Gtk.Align.CENTER)
+        self.bat_percentage_bar = Gtk.LevelBar(
+            min_value=0, max_value=100, hexpand=True,
+            valign=Gtk.Align.CENTER)
         self.bat_percentage_bar.set_size_request(200, -1)
         self.bat_percentage_row.add_suffix(self.bat_percentage_bar)
         self.status_group.add(self.bat_percentage_row)
@@ -67,8 +68,9 @@ class BatteryPage(Gtk.Box):
         self.calibration_group.add(self.calibration_status_row)
 
         # Calibration buttons
-        cal_button_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
-                                  halign=Gtk.Align.CENTER, margin_top=12)
+        cal_button_box = Gtk.Box(
+            orientation=Gtk.Orientation.HORIZONTAL, spacing=12,
+            halign=Gtk.Align.CENTER, margin_top=12)
 
         self.start_cal_button = Gtk.Button(label="Start Calibration")
         self.start_cal_button.add_css_class("suggested-action")
