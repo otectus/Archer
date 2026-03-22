@@ -54,7 +54,8 @@ AUTOINSTALL="yes"
 DKMS_EOF
 
     # Verify kernel headers are available before building
-    local build_dir="/usr/lib/modules/$(uname -r)/build"
+    local build_dir
+    build_dir="/usr/lib/modules/$(uname -r)/build"
     if [[ ! -d "$build_dir" ]]; then
         warn "Kernel headers not found at $build_dir"
         warn "Running kernel $(uname -r) may not match installed headers."

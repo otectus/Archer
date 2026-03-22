@@ -181,9 +181,9 @@ run_menu() {
                 if [[ "$choice" -le "${#MODULE_IDS[@]}" ]] 2>/dev/null; then
                     local idx=$((choice - 1))
                     if [[ "${MODULE_SELECTED[$idx]}" -eq 1 ]]; then
-                        MODULE_SELECTED[$idx]=0
+                        MODULE_SELECTED[idx]=0
                     else
-                        MODULE_SELECTED[$idx]=1
+                        MODULE_SELECTED[idx]=1
                     fi
                 else
                     warn "Invalid number. Enter 1-${#MODULE_IDS[@]}, a, n, or c."
@@ -194,7 +194,7 @@ run_menu() {
                 ;;
             n|N)
                 for i in "${!MODULE_SELECTED[@]}"; do
-                    MODULE_SELECTED[$i]=0
+                    MODULE_SELECTED[i]=0
                 done
                 ;;
             c|C)
@@ -362,14 +362,14 @@ main() {
     if [[ -n "$EXPLICIT_MODULES" ]]; then
         # Reset all, then select explicit modules
         for i in "${!MODULE_SELECTED[@]}"; do
-            MODULE_SELECTED[$i]=0
+            MODULE_SELECTED[i]=0
         done
         IFS=',' read -ra explicit_list <<< "$EXPLICIT_MODULES"
         for mod in "${explicit_list[@]}"; do
             local found=0
             for i in "${!MODULE_IDS[@]}"; do
                 if [[ "${MODULE_IDS[$i]}" = "$mod" ]]; then
-                    MODULE_SELECTED[$i]=1
+                    MODULE_SELECTED[i]=1
                     found=1
                 fi
             done
