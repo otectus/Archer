@@ -1312,13 +1312,35 @@ def main():
     write_pid()
     settings = SettingsStore()
     hw = HardwareManager(settings_store=settings)
-    server = DaemonServer(hw)
+
+    # Try D-Bus first, fall back to Unix socket
+    use_dbus = False
+    dbus_service = None
+    main_loop = None
+    server = None
+
+    try:
+        import dbus.mainloop.glib
+        from gi.repository import GLib
+        from archer_dbus import ArcherDBusService
+
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        dbus_service = ArcherDBusService(hw)
+        main_loop = GLib.MainLoop()
+        use_dbus = True
+        logger.info("D-Bus service registered (io.otectus.Archer1)")
+    except Exception as e:
+        logger.warning(f"D-Bus unavailable ({e}), falling back to Unix socket (DEPRECATED)")
+        server = DaemonServer(hw)
 
     def signal_handler(sig, frame):
         logger.info("Shutting down...")
         hw.shutdown_fan_curves()
         hw.deactivate_game_mode()
-        server.stop()
+        if use_dbus and main_loop:
+            main_loop.quit()
+        elif server:
+            server.stop()
         cleanup_pid()
         sys.exit(0)
 
@@ -1326,13 +1348,17 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
 
     try:
-        server.start()
+        if use_dbus:
+            main_loop.run()
+        else:
+            server.start()
     except KeyboardInterrupt:
         pass
     finally:
         hw.shutdown_fan_curves()
         hw.deactivate_game_mode()
-        server.stop()
+        if server:
+            server.stop()
         cleanup_pid()
         logger.info("Daemon stopped.")
 

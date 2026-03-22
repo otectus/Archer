@@ -25,7 +25,7 @@ module_check_installed() {
 module_install() {
     # Install dependencies
     log "Installing GUI dependencies..."
-    run_sudo pacman -S --needed --noconfirm python-gobject gtk4 libadwaita python python-pillow
+    run_sudo pacman -S --needed --noconfirm python-gobject gtk4 libadwaita python python-pillow python-dbus
 
     # Create directories
     run_sudo mkdir -p "$_GUI_INSTALL_DIR"
@@ -34,9 +34,15 @@ module_install() {
     # Copy application files
     log "Installing Archer GUI to $_GUI_INSTALL_DIR..."
     run_sudo cp "$SCRIPT_DIR/gui/archer_daemon.py" "$_GUI_INSTALL_DIR/"
+    run_sudo cp "$SCRIPT_DIR/gui/archer_dbus.py" "$_GUI_INSTALL_DIR/"
     run_sudo cp "$SCRIPT_DIR/gui/archer_gui.py" "$_GUI_INSTALL_DIR/"
     run_sudo cp -r "$SCRIPT_DIR/gui/archer" "$_GUI_INSTALL_DIR/"
     run_sudo cp -r "$SCRIPT_DIR/gui/assets" "$_GUI_INSTALL_DIR/"
+
+    # Install D-Bus service configuration
+    log "Installing D-Bus and polkit configuration..."
+    run_sudo cp "$SCRIPT_DIR/gui/io.otectus.Archer1.conf" /etc/dbus-1/system.d/
+    run_sudo cp "$SCRIPT_DIR/gui/io.otectus.Archer1.policy" /usr/share/polkit-1/actions/
 
     # Set permissions
     run_sudo chmod 755 "$_GUI_INSTALL_DIR/archer_daemon.py"
@@ -81,8 +87,8 @@ LAUNCHER_EOF
     log "Start the GUI:  archer-gui"
     log "Daemon status:  sudo systemctl status archer-daemon"
 
-    INSTALLED_FILES+=" $_GUI_INSTALL_DIR $_GUI_SERVICE $_GUI_DESKTOP $_GUI_ICON $_GUI_LAUNCHER $_GUI_SETTINGS_DIR"
-    INSTALLED_PACKAGES+=" python-gobject gtk4 libadwaita python-pillow"
+    INSTALLED_FILES+=" $_GUI_INSTALL_DIR $_GUI_SERVICE $_GUI_DESKTOP $_GUI_ICON $_GUI_LAUNCHER $_GUI_SETTINGS_DIR /etc/dbus-1/system.d/io.otectus.Archer1.conf /usr/share/polkit-1/actions/io.otectus.Archer1.policy"
+    INSTALLED_PACKAGES+=" python-gobject gtk4 libadwaita python-pillow python-dbus"
 }
 
 module_uninstall() {
@@ -97,6 +103,10 @@ module_uninstall() {
     sudo rm -f "$_GUI_ICON"
     sudo rm -f "$_GUI_LAUNCHER"
     sudo rm -rf "$_GUI_SETTINGS_DIR"
+
+    log "Removing D-Bus and polkit configuration..."
+    sudo rm -f /etc/dbus-1/system.d/io.otectus.Archer1.conf
+    sudo rm -f /usr/share/polkit-1/actions/io.otectus.Archer1.policy
 
     # Clean up socket/PID if lingering
     sudo rm -f /var/run/archer.sock 2>/dev/null || true

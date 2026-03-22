@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1.0/policyconfig.dtd">
+<policyconfig>
+  <vendor>Archer Compatibility Suite</vendor>
+  <vendor_url>https://github.com/otectus/Archer</vendor_url>
+
+  <action id="io.otectus.archer1.set-profile">
+    <description>Change thermal/performance profile</description>
+    <message>Authentication is required to change the thermal profile.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.otectus.archer1.set-fan">
+    <description>Control fan speed or curves</description>
+    <message>Authentication is required to change fan settings.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.otectus.archer1.set-hardware">
+    <description>Change hardware settings (battery, keyboard, USB, audio)</description>
+    <message>Authentication is required to change hardware settings.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.otectus.archer1.set-display">
+    <description>Switch GPU display mode</description>
+    <message>Authentication is required to switch the display mode. A reboot will be needed.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.otectus.archer1.set-gamemode">
+    <description>Toggle game mode performance optimization</description>
+    <message>Authentication is required to toggle game mode.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+  </action>
+
+  <action id="io.otectus.archer1.system-control">
+    <description>Restart daemon or modify kernel driver parameters</description>
+    <message>Authentication is required for system-level operations.</message>
+    <defaults>
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+</policyconfig>
