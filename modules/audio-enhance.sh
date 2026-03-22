@@ -13,7 +13,7 @@ module_detect() {
 }
 
 module_check_installed() {
-    [ -f "$_FILTER_CONF" ]
+    [[ -f "$_FILTER_CONF" ]]
 }
 
 module_install() {
@@ -86,7 +86,7 @@ module_uninstall() {
 }
 
 module_verify() {
-    [ -f "$_FILTER_CONF" ] && return 0
+    [[ -f "$_FILTER_CONF" ]] && return 0
     warn "Noise suppression config not found at $_FILTER_CONF"
     return 1
 }

@@ -14,7 +14,7 @@ module_detect() {
 }
 
 module_check_installed() {
-    [ -f "$_AUDIO_AMD_CONF" ] || pacman -Qi sof-firmware &>/dev/null
+    [[ -f "$_AUDIO_AMD_CONF" ]] || pacman -Qi sof-firmware &>/dev/null
 }
 
 module_install() {
@@ -24,7 +24,7 @@ module_install() {
 
     local rebuild_initramfs=0
 
-    if [ "$CPU_VENDOR" = "AuthenticAMD" ]; then
+    if [[ "$CPU_VENDOR" = "AuthenticAMD" ]]; then
         log "AMD platform detected. Configuring SOF audio driver..."
         run_sudo tee "$_AUDIO_AMD_CONF" > /dev/null <<'EOF'
 # AMD audio configuration for Acer laptops
@@ -48,7 +48,7 @@ EOF
         fi
     fi
 
-    if [ "$rebuild_initramfs" -eq 1 ]; then
+    if [[ "$rebuild_initramfs" -eq 1 ]]; then
         rebuild_initramfs
     fi
 

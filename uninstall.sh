@@ -33,7 +33,7 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-if [ "$DRY_RUN" -eq 1 ]; then
+if [[ "$DRY_RUN" -eq 1 ]]; then
     log "DRY RUN mode enabled. No changes will be made."
 fi
 
@@ -49,7 +49,7 @@ if has_manifest; then
 
     for mod in $INSTALLED_MODS; do
         local_mod_file="$SCRIPT_DIR/modules/${mod}.sh"
-        if [ -f "$local_mod_file" ]; then
+        if [[ -f "$local_mod_file" ]]; then
             log "Uninstalling: $mod"
             source "$local_mod_file"
             module_uninstall
@@ -93,7 +93,7 @@ else
     run_sudo rm -f /etc/tlp.d/01-acer-optimize.conf
 
     # Remove touchpad service if present
-    if [ -f /etc/systemd/system/touchpad-fix.service ]; then
+    if [[ -f /etc/systemd/system/touchpad-fix.service ]]; then
         run_sudo systemctl disable touchpad-fix.service 2>/dev/null || true
         run_sudo rm -f /etc/systemd/system/touchpad-fix.service
         run_sudo systemctl daemon-reload
@@ -109,7 +109,7 @@ else
     run rm -rf "$HOME/.local/share/archer"
 
     # 6. Remove Archer GUI if installed
-    if [ -d /opt/archer ]; then
+    if [[ -d /opt/archer ]]; then
         log "Removing Archer GUI..."
         run_sudo systemctl disable --now archer-daemon.service 2>/dev/null || true
         run_sudo rm -f /etc/systemd/system/archer-daemon.service

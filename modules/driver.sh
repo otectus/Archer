@@ -37,7 +37,7 @@ module_install() {
 
     # Use centralized Clang detection from detect_kernel()
     local make_flags="$CLANG_BUILD_FLAGS"
-    if [ "$IS_CLANG_KERNEL" -eq 1 ]; then
+    if [[ "$IS_CLANG_KERNEL" -eq 1 ]]; then
         log "Clang-built kernel detected. Using LLVM build flags."
     fi
 
@@ -55,7 +55,7 @@ DKMS_EOF
 
     # Verify kernel headers are available before building
     local build_dir="/usr/lib/modules/$(uname -r)/build"
-    if [ ! -d "$build_dir" ]; then
+    if [[ ! -d "$build_dir" ]]; then
         warn "Kernel headers not found at $build_dir"
         warn "Running kernel $(uname -r) may not match installed headers."
         warn "If you recently updated your kernel, reboot first, then re-run the installer."

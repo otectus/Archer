@@ -94,7 +94,7 @@ detect_gpu() {
         HAS_AMD_IGPU=1
     fi
     # Fallback: detect AMD iGPU by VGA class if not caught above
-    if [ "$HAS_AMD_IGPU" -eq 0 ] && echo "$lspci_out" | grep -qiE "AMD.*VGA.*Radeon"; then
+    if [[ "$HAS_AMD_IGPU" -eq 0 ]] && echo "$lspci_out" | grep -qiE "AMD.*VGA.*Radeon"; then
         HAS_AMD_IGPU=1
     fi
 }
@@ -119,7 +119,7 @@ detect_wifi() {
 
 detect_audio() {
     AUDIO_CODEC=""
-    if [ -d /proc/asound ]; then
+    if [[ -d /proc/asound ]]; then
         AUDIO_CODEC=$(cat /proc/asound/card*/codec* 2>/dev/null | grep "Codec:" | head -1 | sed 's/.*Codec: //' || echo "")
     fi
     SOF_ACTIVE=0
@@ -145,7 +145,7 @@ detect_touchpad() {
 
 detect_battery() {
     HAS_BATTERY=0
-    if [ -d /sys/class/power_supply/BAT0 ] || [ -d /sys/class/power_supply/BAT1 ]; then
+    if [[ -d /sys/class/power_supply/BAT0 ]] || [[ -d /sys/class/power_supply/BAT1 ]]; then
         HAS_BATTERY=1
     fi
     BATTERY_WMI_LOADED=0
@@ -160,7 +160,7 @@ detect_kernel() {
     KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
     debug "Kernel: $KERNEL_VERSION (major=$KERNEL_MAJOR, minor=$KERNEL_MINOR)"
     SUPPORTS_THERMAL_PROFILES=0
-    if [ "$KERNEL_MAJOR" -gt 6 ] || { [ "$KERNEL_MAJOR" -eq 6 ] && [ "$KERNEL_MINOR" -ge 8 ]; }; then
+    if [[ "$KERNEL_MAJOR" -gt 6 ]] || { [[ "$KERNEL_MAJOR" -eq 6 ]] && [[ "$KERNEL_MINOR" -ge 8 ]]; }; then
         SUPPORTS_THERMAL_PROFILES=1
     fi
 
@@ -210,7 +210,7 @@ detect_kernel() {
 detect_distro() {
     DISTRO_ID=""
     DISTRO_NAME=""
-    if [ -f /etc/os-release ]; then
+    if [[ -f /etc/os-release ]]; then
         DISTRO_ID=$(grep "^ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
         DISTRO_NAME=$(grep "^NAME=" /etc/os-release | cut -d= -f2 | tr -d '"')
     fi
@@ -258,36 +258,36 @@ detect_all() {
 # Print a summary of detected hardware
 print_hw_summary() {
     local gpu_info=""
-    if [ "$HAS_NVIDIA" -eq 1 ]; then
+    if [[ "$HAS_NVIDIA" -eq 1 ]]; then
         gpu_info="$NVIDIA_MODEL"
     fi
-    if [ "$HAS_INTEL_IGPU" -eq 1 ]; then
-        [ -n "$gpu_info" ] && gpu_info="$gpu_info + "
+    if [[ "$HAS_INTEL_IGPU" -eq 1 ]]; then
+        [[ -n "$gpu_info" ]] && gpu_info="$gpu_info + "
         gpu_info="${gpu_info}Intel iGPU"
     fi
-    if [ "$HAS_AMD_IGPU" -eq 1 ]; then
-        [ -n "$gpu_info" ] && gpu_info="$gpu_info + "
+    if [[ "$HAS_AMD_IGPU" -eq 1 ]]; then
+        [[ -n "$gpu_info" ]] && gpu_info="$gpu_info + "
         gpu_info="${gpu_info}AMD iGPU"
     fi
-    if [ "$HAS_AMD_DGPU" -eq 1 ]; then
-        [ -n "$gpu_info" ] && gpu_info="$gpu_info + "
+    if [[ "$HAS_AMD_DGPU" -eq 1 ]]; then
+        [[ -n "$gpu_info" ]] && gpu_info="$gpu_info + "
         gpu_info="${gpu_info}AMD dGPU"
     fi
-    [ -z "$gpu_info" ] && gpu_info="Unknown"
+    [[ -z "$gpu_info" ]] && gpu_info="Unknown"
 
     local wifi_info="$WIFI_CHIPSET"
-    [ -n "$WIFI_DEVICE" ] && wifi_info="$WIFI_DEVICE"
+    [[ -n "$WIFI_DEVICE" ]] && wifi_info="$WIFI_DEVICE"
 
     local kernel_extra=""
-    if [ "$IS_CLANG_KERNEL" -eq 1 ]; then
+    if [[ "$IS_CLANG_KERNEL" -eq 1 ]]; then
         kernel_extra=" [Clang]"
     fi
 
     echo -e "${_BOLD}Detected:${_RESET} $ACER_PRODUCT_NAME ($ACER_SYS_VENDOR)"
     echo -e "${_BOLD}Kernel:${_RESET}   ${KERNEL_VERSION}${kernel_extra} | ${_BOLD}GPU:${_RESET} $gpu_info"
     echo -e "${_BOLD}WiFi:${_RESET}     $wifi_info"
-    echo -e "${_BOLD}Battery:${_RESET}  $([ "$HAS_BATTERY" -eq 1 ] && echo "Present" || echo "Not detected")"
-    echo -e "${_BOLD}Distro:${_RESET}   ${DISTRO_NAME:-Unknown} ($DISTRO_FAMILY)$([ -n "$AUR_HELPER" ] && echo " | AUR: $AUR_HELPER")"
+    echo -e "${_BOLD}Battery:${_RESET}  $([[ "$HAS_BATTERY" -eq 1 ]] && echo "Present" || echo "Not detected")"
+    echo -e "${_BOLD}Distro:${_RESET}   ${DISTRO_NAME:-Unknown} ($DISTRO_FAMILY)$([[ -n "$AUR_HELPER" ]] && echo " | AUR: $AUR_HELPER")"
 }
 
 # Build recommended and optional module lists based on hardware
@@ -306,21 +306,21 @@ build_recommendations() {
     esac
 
     # Battery: recommended if battery present
-    if [ "$HAS_BATTERY" -eq 1 ]; then
+    if [[ "$HAS_BATTERY" -eq 1 ]]; then
         RECOMMENDED_MODULES+=("battery")
     fi
 
     # GPU: recommended if hybrid graphics (NVIDIA + integrated)
-    if [ "$HAS_NVIDIA" -eq 1 ] && { [ "$HAS_INTEL_IGPU" -eq 1 ] || [ "$HAS_AMD_IGPU" -eq 1 ]; }; then
+    if [[ "$HAS_NVIDIA" -eq 1 ]] && { [[ "$HAS_INTEL_IGPU" -eq 1 ]] || [[ "$HAS_AMD_IGPU" -eq 1 ]]; }; then
         RECOMMENDED_MODULES+=("gpu")
-    elif [ "$HAS_NVIDIA" -eq 1 ]; then
+    elif [[ "$HAS_NVIDIA" -eq 1 ]]; then
         OPTIONAL_MODULES+=("gpu")
     fi
 
     # Touchpad: recommended if errors detected, optional if I2C present
-    if [ "$TOUCHPAD_ERRORS" -eq 1 ]; then
+    if [[ "$TOUCHPAD_ERRORS" -eq 1 ]]; then
         RECOMMENDED_MODULES+=("touchpad")
-    elif [ "$HAS_I2C_TOUCHPAD" -eq 1 ]; then
+    elif [[ "$HAS_I2C_TOUCHPAD" -eq 1 ]]; then
         OPTIONAL_MODULES+=("touchpad")
     else
         OPTIONAL_MODULES+=("touchpad")
@@ -330,7 +330,7 @@ build_recommendations() {
     OPTIONAL_MODULES+=("audio")
 
     # WiFi: recommended for MediaTek, optional otherwise
-    if [ "$WIFI_CHIPSET" = "mediatek" ]; then
+    if [[ "$WIFI_CHIPSET" = "mediatek" ]]; then
         RECOMMENDED_MODULES+=("wifi")
     else
         OPTIONAL_MODULES+=("wifi")
@@ -340,7 +340,7 @@ build_recommendations() {
     OPTIONAL_MODULES+=("power")
 
     # Thermal: recommended for gaming models on 6.8+
-    if [ "$SUPPORTS_THERMAL_PROFILES" -eq 1 ]; then
+    if [[ "$SUPPORTS_THERMAL_PROFILES" -eq 1 ]]; then
         case "$MODEL_FAMILY" in
             nitro|predator|helios|triton)
                 OPTIONAL_MODULES+=("thermal")
@@ -349,7 +349,7 @@ build_recommendations() {
     fi
 
     # GUI: recommended on gaming models with display server, optional otherwise
-    if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    if [[ -n "${DISPLAY:-}" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
         case "$MODEL_FAMILY" in
             nitro|predator|helios|triton)
                 RECOMMENDED_MODULES+=("gui")

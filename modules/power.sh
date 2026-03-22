@@ -9,7 +9,7 @@ MODULE_DESCRIPTION="TLP power management with Acer-optimized configuration"
 _TLP_CONF="/etc/tlp.d/01-acer-optimize.conf"
 
 module_detect() {
-    [ "$HAS_BATTERY" -eq 1 ]
+    [[ "$HAS_BATTERY" -eq 1 ]]
 }
 
 module_check_installed() {

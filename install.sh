@@ -118,20 +118,20 @@ display_menu() {
         fi
 
         # Check conflicts
-        if [ "$id" = "thermal" ] && [ "${MODULE_SELECTED[0]}" -eq 1 ]; then
+        if [[ "$id" = "thermal" ]] && [[ "${MODULE_SELECTED[0]}" -eq 1 ]]; then
             tag="${_RED}[CONFLICTS WITH #1]${_RESET}"
         fi
-        if [ "$id" = "driver" ] && [ "${MODULE_SELECTED[7]}" -eq 1 ]; then
+        if [[ "$id" = "driver" ]] && [[ "${MODULE_SELECTED[7]}" -eq 1 ]]; then
             tag="${_RED}[CONFLICTS WITH #8]${_RESET}"
         fi
 
         # GUI dependency hint
-        if [ "$id" = "gui" ] && [ "${MODULE_SELECTED[0]}" -eq 0 ]; then
+        if [[ "$id" = "gui" ]] && [[ "${MODULE_SELECTED[0]}" -eq 0 ]]; then
             tag="${tag} ${_YELLOW}(needs #1 Linuwu-Sense)${_RESET}"
         fi
 
         # Selection marker
-        if [ "${MODULE_SELECTED[$i]}" -eq 1 ]; then
+        if [[ "${MODULE_SELECTED[$i]}" -eq 1 ]]; then
             marker="${_GREEN}*${_RESET}"
         fi
 
@@ -162,7 +162,7 @@ init_selections() {
 
 check_conflicts() {
     # driver (#0) and thermal (#7) conflict
-    if [ "${MODULE_SELECTED[0]}" -eq 1 ] && [ "${MODULE_SELECTED[7]}" -eq 1 ]; then
+    if [[ "${MODULE_SELECTED[0]}" -eq 1 ]] && [[ "${MODULE_SELECTED[7]}" -eq 1 ]]; then
         warn "Linuwu-Sense driver and Kernel Thermal Profiles both selected."
         warn "These conflict: Linuwu-Sense blacklists acer_wmi, which thermal profiles require."
         warn "Please deselect one of them."
@@ -178,9 +178,9 @@ run_menu() {
 
         case "$choice" in
             [1-9]|[1-9][0-9])
-                if [ "$choice" -le "${#MODULE_IDS[@]}" ] 2>/dev/null; then
+                if [[ "$choice" -le "${#MODULE_IDS[@]}" ]] 2>/dev/null; then
                     local idx=$((choice - 1))
-                    if [ "${MODULE_SELECTED[$idx]}" -eq 1 ]; then
+                    if [[ "${MODULE_SELECTED[$idx]}" -eq 1 ]]; then
                         MODULE_SELECTED[$idx]=0
                     else
                         MODULE_SELECTED[$idx]=1
@@ -223,7 +223,7 @@ install_shared_deps() {
     local deps=(base-devel dkms git curl "$KERNEL_HEADERS" python-pip)
 
     # Clang-built kernels require clang/llvm toolchain for DKMS module compilation
-    if [ "$IS_CLANG_KERNEL" -eq 1 ]; then
+    if [[ "$IS_CLANG_KERNEL" -eq 1 ]]; then
         log "Clang-built kernel detected — including LLVM toolchain for DKMS builds."
         deps+=(clang llvm)
     fi
@@ -235,13 +235,13 @@ run_selected_modules() {
     local selected_names=()
 
     for i in "${!MODULE_IDS[@]}"; do
-        if [ "${MODULE_SELECTED[$i]}" -eq 1 ]; then
+        if [[ "${MODULE_SELECTED[$i]}" -eq 1 ]]; then
             local id="${MODULE_IDS[$i]}"
             local label="${MODULE_LABELS[$i]}"
             selected_names+=("$id")
 
             # GUI dependency warning
-            if [ "$id" = "gui" ]; then
+            if [[ "$id" = "gui" ]]; then
                 if ! is_in_list "driver" "${selected_names[*]}" && \
                    ! dkms status 2>/dev/null | grep -q "linuwu-sense"; then
                     warn "Linuwu-Sense driver not installed. The daemon will have limited functionality."
@@ -269,7 +269,7 @@ verify_modules() {
     local passed=0
 
     for i in "${!MODULE_IDS[@]}"; do
-        if [ "${MODULE_SELECTED[$i]}" -eq 1 ]; then
+        if [[ "${MODULE_SELECTED[$i]}" -eq 1 ]]; then
             local id="${MODULE_IDS[$i]}"
             local label="${MODULE_LABELS[$i]}"
             total=$((total + 1))
@@ -294,17 +294,17 @@ verify_modules() {
 main() {
     parse_args "$@"
 
-    if [ "$SHOW_VERSION" -eq 1 ]; then
+    if [[ "$SHOW_VERSION" -eq 1 ]]; then
         echo "Archer Compatibility Suite v${INSTALLER_VERSION}"
         exit 0
     fi
-    if [ "$SHOW_HELP" -eq 1 ]; then
+    if [[ "$SHOW_HELP" -eq 1 ]]; then
         show_help
         exit 0
     fi
 
     # Standalone verify mode: check installed modules from manifest
-    if [ "$VERIFY_ONLY" -eq 1 ]; then
+    if [[ "$VERIFY_ONLY" -eq 1 ]]; then
         if ! has_manifest; then
             error "No install manifest found. Nothing to verify."
         fi
@@ -315,7 +315,7 @@ main() {
         local passed=0
         for id in $mods; do
             local mod_file="$SCRIPT_DIR/modules/${id}.sh"
-            if [ -f "$mod_file" ]; then
+            if [[ -f "$mod_file" ]]; then
                 total=$((total + 1))
                 source "$mod_file"
                 if module_verify; then
@@ -333,7 +333,7 @@ main() {
         exit 0
     fi
 
-    if [ "$DRY_RUN" -eq 1 ]; then
+    if [[ "$DRY_RUN" -eq 1 ]]; then
         log "DRY RUN mode enabled. No changes will be made."
     fi
 
@@ -349,7 +349,7 @@ main() {
     fi
 
     # Distro check
-    if [ "$DISTRO_FAMILY" != "arch" ]; then
+    if [[ "$DISTRO_FAMILY" != "arch" ]]; then
         warn "This installer is designed for Arch-based distributions."
         warn "Detected: ${DISTRO_NAME:-Unknown} (family: $DISTRO_FAMILY)"
         confirm "Continue anyway?" || exit 0
@@ -359,7 +359,7 @@ main() {
     init_selections
 
     # Handle non-interactive modes
-    if [ -n "$EXPLICIT_MODULES" ]; then
+    if [[ -n "$EXPLICIT_MODULES" ]]; then
         # Reset all, then select explicit modules
         for i in "${!MODULE_SELECTED[@]}"; do
             MODULE_SELECTED[$i]=0
@@ -368,19 +368,19 @@ main() {
         for mod in "${explicit_list[@]}"; do
             local found=0
             for i in "${!MODULE_IDS[@]}"; do
-                if [ "${MODULE_IDS[$i]}" = "$mod" ]; then
+                if [[ "${MODULE_IDS[$i]}" = "$mod" ]]; then
                     MODULE_SELECTED[$i]=1
                     found=1
                 fi
             done
-            if [ "$found" -eq 0 ]; then
+            if [[ "$found" -eq 0 ]]; then
                 warn "Unknown module: '$mod' (available: ${MODULE_IDS[*]})"
             fi
         done
         if ! check_conflicts; then
             error "Module conflict detected. Aborting."
         fi
-    elif [ "$SELECT_ALL_RECOMMENDED" -eq 1 ]; then
+    elif [[ "$SELECT_ALL_RECOMMENDED" -eq 1 ]]; then
         # Already initialized with recommendations
         :
     else
@@ -393,7 +393,7 @@ main() {
     for sel in "${MODULE_SELECTED[@]}"; do
         count=$((count + sel))
     done
-    if [ "$count" -eq 0 ]; then
+    if [[ "$count" -eq 0 ]]; then
         log "No modules selected. Nothing to install."
         exit 0
     fi
@@ -401,13 +401,13 @@ main() {
     # Display selected modules
     section "Installation Plan"
     for i in "${!MODULE_IDS[@]}"; do
-        if [ "${MODULE_SELECTED[$i]}" -eq 1 ]; then
+        if [[ "${MODULE_SELECTED[$i]}" -eq 1 ]]; then
             echo "  - ${MODULE_LABELS[$i]}"
         fi
     done
     echo ""
 
-    if [ "$NO_CONFIRM" -eq 0 ] && [ "$SELECT_ALL_RECOMMENDED" -eq 0 ] && [ -z "$EXPLICIT_MODULES" ]; then
+    if [[ "$NO_CONFIRM" -eq 0 ]] && [[ "$SELECT_ALL_RECOMMENDED" -eq 0 ]] && [[ -z "$EXPLICIT_MODULES" ]]; then
         confirm "Proceed with installation?" || exit 0
     fi
 
@@ -424,7 +424,7 @@ main() {
     section "Installation Complete"
     success "All selected modules have been installed."
 
-    if [ "$REBOOT_REQUIRED" -eq 1 ]; then
+    if [[ "$REBOOT_REQUIRED" -eq 1 ]]; then
         echo ""
         warn "A reboot is required for some changes to take effect."
     fi

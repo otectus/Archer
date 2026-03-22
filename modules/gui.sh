@@ -15,11 +15,11 @@ _GUI_SETTINGS_DIR="/etc/archer"
 
 module_detect() {
     # Relevant if a display server is running (not headless/SSH)
-    [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]
+    [[ -n "${DISPLAY:-}" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]
 }
 
 module_check_installed() {
-    [ -f "$_GUI_INSTALL_DIR/archer_daemon.py" ] && [ -f "$_GUI_SERVICE" ]
+    [[ -f "$_GUI_INSTALL_DIR/archer_daemon.py" ]] && [[ -f "$_GUI_SERVICE" ]]
 }
 
 module_install() {
@@ -117,7 +117,7 @@ module_uninstall() {
 module_verify() {
     local ok=0
 
-    if [ ! -f "$_GUI_INSTALL_DIR/archer_daemon.py" ]; then
+    if [[ ! -f "$_GUI_INSTALL_DIR/archer_daemon.py" ]]; then
         warn "Daemon not found at $_GUI_INSTALL_DIR"
         ok=1
     fi
@@ -127,7 +127,7 @@ module_verify() {
         ok=1
     fi
 
-    if [ ! -f "$_GUI_DESKTOP" ]; then
+    if [[ ! -f "$_GUI_DESKTOP" ]]; then
         warn "Desktop entry not found"
         ok=1
     fi

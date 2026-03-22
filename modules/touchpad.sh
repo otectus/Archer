@@ -10,18 +10,18 @@ _TOUCHPAD_AMD_CONF="/etc/modprobe.d/touchpad-amd-fix.conf"
 _TOUCHPAD_SERVICE="/etc/systemd/system/touchpad-fix.service"
 
 module_detect() {
-    [ "$TOUCHPAD_ERRORS" -eq 1 ]
+    [[ "$TOUCHPAD_ERRORS" -eq 1 ]]
 }
 
 module_check_installed() {
-    [ -f "$_TOUCHPAD_SERVICE" ] || [ -f "$_TOUCHPAD_AMD_CONF" ]
+    [[ -f "$_TOUCHPAD_SERVICE" ]] || [[ -f "$_TOUCHPAD_AMD_CONF" ]]
 }
 
 module_install() {
     local fix_count=0
 
     # Strategy 1: AMD pinctrl module ordering
-    if [ "$CPU_VENDOR" = "AuthenticAMD" ]; then
+    if [[ "$CPU_VENDOR" = "AuthenticAMD" ]]; then
         log "AMD system detected. Applying pinctrl_amd load order fix..."
         run_sudo tee "$_TOUCHPAD_AMD_CONF" > /dev/null <<'EOF'
 # Ensure pinctrl_amd loads before i2c_hid_acpi to fix touchpad detection

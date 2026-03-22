@@ -7,7 +7,7 @@ MANIFEST_FILE="$MANIFEST_DIR/install-manifest.json"
 
 # Migrate legacy DAMX manifest location
 _LEGACY_MANIFEST="$HOME/.local/share/damx/install-manifest.json"
-if [ ! -f "$MANIFEST_FILE" ] && [ -f "$_LEGACY_MANIFEST" ]; then
+if [[ ! -f "$MANIFEST_FILE" ]] && [[ -f "$_LEGACY_MANIFEST" ]]; then
     mkdir -p "$MANIFEST_DIR"
     cp "$_LEGACY_MANIFEST" "$MANIFEST_FILE"
     if has_cmd sed; then
@@ -81,7 +81,7 @@ with open(os.environ['ARCHER_MANIFEST'], 'w') as f:
 # Read installed modules from manifest
 # Returns space-separated list of module IDs
 read_manifest_modules() {
-    if [ ! -f "$MANIFEST_FILE" ]; then
+    if [[ ! -f "$MANIFEST_FILE" ]]; then
         echo ""
         return 1
     fi
@@ -100,7 +100,7 @@ print(' '.join(data.get('modules_installed', [])))
 # Read a specific field from manifest
 read_manifest_field() {
     local field="$1"
-    if [ ! -f "$MANIFEST_FILE" ]; then
+    if [[ ! -f "$MANIFEST_FILE" ]]; then
         echo ""
         return 1
     fi
@@ -122,7 +122,7 @@ else:
 
 # Check if manifest exists
 has_manifest() {
-    [ -f "$MANIFEST_FILE" ]
+    [[ -f "$MANIFEST_FILE" ]]
 }
 
 # Remove the manifest file

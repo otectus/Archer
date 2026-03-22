@@ -13,11 +13,11 @@ _BATTERY_HEALTH_PATH="/sys/bus/wmi/drivers/acer-wmi-battery/health_mode"
 _BATTERY_UDEV_RULE="/etc/udev/rules.d/99-acer-battery-health.rules"
 
 module_detect() {
-    [ "$HAS_BATTERY" -eq 1 ]
+    [[ "$HAS_BATTERY" -eq 1 ]]
 }
 
 module_check_installed() {
-    if [ -f "$_BATTERY_HEALTH_PATH" ]; then
+    if [[ -f "$_BATTERY_HEALTH_PATH" ]]; then
         return 0
     fi
     if dkms status 2>/dev/null | grep -q "$_BATTERY_DKMS_NAME"; then
@@ -28,7 +28,7 @@ module_check_installed() {
 
 module_install() {
     # Check if the interface already exists natively (mainlined driver)
-    if [ -f "$_BATTERY_HEALTH_PATH" ]; then
+    if [[ -f "$_BATTERY_HEALTH_PATH" ]]; then
         log "Battery health mode interface already available (native driver)."
         log "Enabling 80% charge limit..."
         echo 1 | run_sudo tee "$_BATTERY_HEALTH_PATH" > /dev/null
@@ -37,7 +37,7 @@ module_install() {
     fi
 
     # Install via AUR helper or manual DKMS
-    if [ -n "$AUR_HELPER" ]; then
+    if [[ -n "$AUR_HELPER" ]]; then
         log "Installing acer-wmi-battery via $AUR_HELPER..."
         run $AUR_HELPER -S --needed --noconfirm acer-wmi-battery-dkms-git
     else
@@ -47,7 +47,7 @@ module_install() {
         run_sudo git clone "$_BATTERY_REPO" "$src_dir"
 
         # Inject Clang build flags into DKMS config if kernel was built with Clang
-        if [ "$IS_CLANG_KERNEL" -eq 1 ] && [ -f "$src_dir/dkms.conf" ]; then
+        if [[ "$IS_CLANG_KERNEL" -eq 1 ]] && [[ -f "$src_dir/dkms.conf" ]]; then
             log "Patching dkms.conf with Clang/LLVM build flags..."
             run_sudo sed -i "s|^MAKE\[0\]=.*|& $CLANG_BUILD_FLAGS|" "$src_dir/dkms.conf"
         fi
@@ -66,7 +66,7 @@ module_install() {
     run_sudo modprobe acer_wmi_battery || true
 
     # Enable health mode
-    if [ -f "$_BATTERY_HEALTH_PATH" ]; then
+    if [[ -f "$_BATTERY_HEALTH_PATH" ]]; then
         echo 1 | run_sudo tee "$_BATTERY_HEALTH_PATH" > /dev/null
         log "Battery health mode enabled (charge limit: 80%)"
     else
@@ -107,10 +107,10 @@ module_uninstall() {
 }
 
 module_verify() {
-    if [ -f "$_BATTERY_HEALTH_PATH" ]; then
+    if [[ -f "$_BATTERY_HEALTH_PATH" ]]; then
         local val
         val=$(cat "$_BATTERY_HEALTH_PATH" 2>/dev/null)
-        if [ "$val" = "1" ]; then
+        if [[ "$val" = "1" ]]; then
             return 0
         fi
     fi
