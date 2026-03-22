@@ -1,0 +1,15 @@
+# ShellCheck configuration for Archer Compatibility Suite
+# https://www.shellcheck.net/wiki/
+
+# We use Bash-specific features throughout (set via #!/usr/bin/env bash)
+shell=bash
+
+# Allow sourcing from paths relative to the script
+source-path=SCRIPTDIR
+source-path=SCRIPTDIR/lib
+
+# SC2034: Variable appears unused — module scripts set variables consumed by install.sh
+disable=SC2034
+
+# SC1091: Not following sourced file — shellcheck can't resolve dynamic paths
+disable=SC1091

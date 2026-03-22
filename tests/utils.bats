@@ -67,3 +67,44 @@ setup() {
     mark_reboot_required
     [ "$REBOOT_REQUIRED" -eq 1 ]
 }
+
+@test "debug outputs nothing when VERBOSE=0" {
+    VERBOSE=0
+    run debug "hidden message"
+    [ "$status" -eq 0 ]
+    [[ "$output" == "" ]]
+}
+
+@test "debug outputs when VERBOSE=1" {
+    VERBOSE=1
+    run debug "visible message"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"visible message"* ]]
+}
+
+@test "log writes to LOG_FILE when set" {
+    local tmplog
+    tmplog=$(mktemp)
+    LOG_FILE="$tmplog"
+    log "log file test"
+    [ -f "$tmplog" ]
+    grep -q "log file test" "$tmplog"
+    rm -f "$tmplog"
+}
+
+@test "LOG_FILE strips ANSI color codes" {
+    local tmplog
+    tmplog=$(mktemp)
+    LOG_FILE="$tmplog"
+    log "color test"
+    # Should not contain ANSI escape sequences
+    ! grep -qP '\x1b\[' "$tmplog"
+    rm -f "$tmplog"
+}
+
+@test "run_sudo_timeout skips in dry-run" {
+    DRY_RUN=1
+    run run_sudo_timeout 10 echo "test"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"DRY RUN"* ]]
+}

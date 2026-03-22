@@ -112,3 +112,88 @@ EOF
     is_in_list "driver" "driver battery gpu"
     ! is_in_list "thermal" "driver battery gpu"
 }
+
+@test "detect_kernel uses dynamic header detection for non-CachyOS" {
+    uname() { echo "6.12.1-zen1-1-zen"; }
+    export -f uname
+    pacman() {
+        case "$1" in
+            -Qoq) echo "linux-zen" ;;
+        esac
+    }
+    export -f pacman
+    source "$BATS_TEST_DIRNAME/../lib/detect.sh"
+    detect_kernel
+    [ "$IS_CACHYOS" -eq 0 ]
+    [ "$KERNEL_HEADERS" = "linux-zen-headers" ]
+}
+
+@test "detect_kernel detects clang-built kernel" {
+    uname() { echo "6.12.1-arch1-1"; }
+    export -f uname
+    pacman() { echo ""; }
+    export -f pacman
+    # Mock /proc/version to contain "clang"
+    grep() {
+        if [[ "$2" == "/proc/version" ]]; then
+            echo "clang version 17"
+            return 0
+        fi
+        command grep "$@"
+    }
+    export -f grep
+    source "$BATS_TEST_DIRNAME/../lib/detect.sh"
+    detect_kernel
+    [ "$IS_CLANG_KERNEL" -eq 1 ]
+    [ "$CLANG_BUILD_FLAGS" = "LLVM=1 CC=clang" ]
+}
+
+@test "detect_model_family recognizes all gaming families" {
+    source "$BATS_TEST_DIRNAME/../lib/detect.sh"
+
+    for model_pair in "Helios:helios" "Triton:triton" "Swift:swift" "Aspire:aspire" "Spin:spin"; do
+        local name="${model_pair%%:*}"
+        local expected="${model_pair##*:}"
+        ACER_PRODUCT_NAME="Acer $name 500"
+        detect_model_family
+        [ "$MODEL_FAMILY" = "$expected" ]
+    done
+}
+
+@test "build_recommendations includes driver for gaming models" {
+    source "$BATS_TEST_DIRNAME/../lib/detect.sh"
+    MODEL_FAMILY="nitro"
+    HAS_BATTERY=1
+    HAS_NVIDIA=1
+    HAS_INTEL_IGPU=1
+    HAS_AMD_IGPU=0
+    HAS_AMD_DGPU=0
+    TOUCHPAD_ERRORS=0
+    HAS_I2C_TOUCHPAD=0
+    WIFI_CHIPSET="intel"
+    SUPPORTS_THERMAL_PROFILES=1
+    DISPLAY=":0"
+    build_recommendations
+    [[ " ${RECOMMENDED_MODULES[*]} " == *" driver "* ]]
+    [[ " ${RECOMMENDED_MODULES[*]} " == *" battery "* ]]
+    [[ " ${RECOMMENDED_MODULES[*]} " == *" gpu "* ]]
+}
+
+@test "build_recommendations makes driver optional for non-gaming" {
+    source "$BATS_TEST_DIRNAME/../lib/detect.sh"
+    MODEL_FAMILY="swift"
+    HAS_BATTERY=1
+    HAS_NVIDIA=0
+    HAS_INTEL_IGPU=1
+    HAS_AMD_IGPU=0
+    HAS_AMD_DGPU=0
+    TOUCHPAD_ERRORS=0
+    HAS_I2C_TOUCHPAD=0
+    WIFI_CHIPSET="intel"
+    SUPPORTS_THERMAL_PROFILES=0
+    DISPLAY=""
+    WAYLAND_DISPLAY=""
+    build_recommendations
+    [[ " ${OPTIONAL_MODULES[*]} " == *" driver "* ]]
+    ! [[ " ${RECOMMENDED_MODULES[*]} " == *" driver "* ]]
+}

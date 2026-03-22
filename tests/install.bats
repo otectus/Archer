@@ -56,10 +56,40 @@ setup() {
     [ "$DRY_RUN" -eq 1 ]
 }
 
+@test "parse_args sets --verbose flag" {
+    VERBOSE=0
+    parse_args() {
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --verbose) VERBOSE=1 ;;
+                *) : ;;
+            esac
+            shift
+        done
+    }
+    parse_args --verbose
+    [ "$VERBOSE" -eq 1 ]
+}
+
+@test "parse_args sets --log flag with file" {
+    LOG_FILE=""
+    parse_args() {
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --log) LOG_FILE="$2"; shift ;;
+                *) : ;;
+            esac
+            shift
+        done
+    }
+    parse_args --log /tmp/test.log
+    [ "$LOG_FILE" = "/tmp/test.log" ]
+}
+
 @test "check_conflicts detects driver+thermal conflict" {
     MODULE_SELECTED=(1 0 0 0 0 0 0 1 0 0 0 0 0)
     check_conflicts() {
-        if [ "${MODULE_SELECTED[0]}" -eq 1 ] && [ "${MODULE_SELECTED[7]}" -eq 1 ]; then
+        if [[ "${MODULE_SELECTED[0]}" -eq 1 ]] && [[ "${MODULE_SELECTED[7]}" -eq 1 ]]; then
             return 1
         fi
         return 0
@@ -70,7 +100,7 @@ setup() {
 @test "check_conflicts passes when no conflict" {
     MODULE_SELECTED=(1 1 0 0 0 0 0 0 0 0 0 0 0)
     check_conflicts() {
-        if [ "${MODULE_SELECTED[0]}" -eq 1 ] && [ "${MODULE_SELECTED[7]}" -eq 1 ]; then
+        if [[ "${MODULE_SELECTED[0]}" -eq 1 ]] && [[ "${MODULE_SELECTED[7]}" -eq 1 ]]; then
             return 1
         fi
         return 0
