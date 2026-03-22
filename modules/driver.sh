@@ -53,7 +53,22 @@ DEST_MODULE_LOCATION[0]="/kernel/drivers/platform/x86"
 AUTOINSTALL="yes"
 DKMS_EOF
 
-    run_sudo dkms add -m "$DKMS_NAME" -v "$DKMS_VERSION" || true
+    # Verify kernel headers are available before building
+    local build_dir="/usr/lib/modules/$(uname -r)/build"
+    if [ ! -d "$build_dir" ]; then
+        warn "Kernel headers not found at $build_dir"
+        warn "Running kernel $(uname -r) may not match installed headers."
+        warn "If you recently updated your kernel, reboot first, then re-run the installer."
+        warn "Attempting to build for the installed kernel instead..."
+    fi
+
+    # Clean up existing DKMS entry before adding (handles re-runs)
+    if dkms status -m "$DKMS_NAME" -v "$DKMS_VERSION" 2>/dev/null | grep -q "$DKMS_NAME"; then
+        log "Removing existing DKMS entry for clean rebuild..."
+        run_sudo dkms remove -m "$DKMS_NAME" -v "$DKMS_VERSION" --all 2>/dev/null || true
+    fi
+
+    run_sudo dkms add -m "$DKMS_NAME" -v "$DKMS_VERSION"
     log "Building DKMS module (this may take a few minutes)..."
     run_sudo dkms install -m "$DKMS_NAME" -v "$DKMS_VERSION"
 

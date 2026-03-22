@@ -167,7 +167,21 @@ detect_kernel() {
     KERNEL_HEADERS="linux-headers"
     if [[ "$KERNEL_VERSION" == *"cachyos"* ]]; then
         IS_CACHYOS=1
-        KERNEL_HEADERS="linux-cachyos-headers"
+        # Dynamically detect the correct headers package for the installed kernel
+        local kernel_pkg
+        kernel_pkg=$(pacman -Qoq "/usr/lib/modules/${KERNEL_VERSION}/vmlinuz" 2>/dev/null || echo "")
+        if [ -n "$kernel_pkg" ]; then
+            KERNEL_HEADERS="${kernel_pkg}-headers"
+        else
+            # Running kernel may not match installed packages (reboot pending)
+            # Try to find the right CachyOS kernel package
+            kernel_pkg=$(pacman -Q 2>/dev/null | grep -oP 'linux-cachyos\S*(?=\s)' | grep -v headers | head -1)
+            if [ -n "$kernel_pkg" ]; then
+                KERNEL_HEADERS="${kernel_pkg}-headers"
+            else
+                KERNEL_HEADERS="linux-cachyos-headers"
+            fi
+        fi
     fi
 
     # Detect Clang-built kernel (CachyOS and other distros may build with Clang/LLVM)
