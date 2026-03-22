@@ -158,6 +158,7 @@ detect_kernel() {
     KERNEL_VERSION=$(uname -r)
     KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
     KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
+    debug "Kernel: $KERNEL_VERSION (major=$KERNEL_MAJOR, minor=$KERNEL_MINOR)"
     SUPPORTS_THERMAL_PROFILES=0
     if [ "$KERNEL_MAJOR" -gt 6 ] || { [ "$KERNEL_MAJOR" -eq 6 ] && [ "$KERNEL_MINOR" -ge 8 ]; }; then
         SUPPORTS_THERMAL_PROFILES=1
@@ -170,17 +171,30 @@ detect_kernel() {
         # Dynamically detect the correct headers package for the installed kernel
         local kernel_pkg
         kernel_pkg=$(pacman -Qoq "/usr/lib/modules/${KERNEL_VERSION}/vmlinuz" 2>/dev/null || echo "")
-        if [ -n "$kernel_pkg" ]; then
+        if [[ -n "$kernel_pkg" ]]; then
             KERNEL_HEADERS="${kernel_pkg}-headers"
+            debug "CachyOS kernel package detected: $kernel_pkg -> headers: $KERNEL_HEADERS"
         else
             # Running kernel may not match installed packages (reboot pending)
             # Try to find the right CachyOS kernel package
             kernel_pkg=$(pacman -Q 2>/dev/null | grep -oP 'linux-cachyos\S*(?=\s)' | grep -v headers | head -1)
-            if [ -n "$kernel_pkg" ]; then
+            if [[ -n "$kernel_pkg" ]]; then
                 KERNEL_HEADERS="${kernel_pkg}-headers"
+                debug "CachyOS headers resolved via pacman -Q fallback: $KERNEL_HEADERS"
             else
                 KERNEL_HEADERS="linux-cachyos-headers"
+                warn "Could not detect exact CachyOS kernel headers package."
+                warn "Defaulting to '$KERNEL_HEADERS'. If DKMS builds fail, install the correct headers manually:"
+                warn "  pacman -Ss linux-cachyos.*headers"
             fi
+        fi
+    else
+        # For non-CachyOS: try dynamic detection too
+        local kernel_pkg
+        kernel_pkg=$(pacman -Qoq "/usr/lib/modules/${KERNEL_VERSION}/vmlinuz" 2>/dev/null || echo "")
+        if [[ -n "$kernel_pkg" ]]; then
+            KERNEL_HEADERS="${kernel_pkg}-headers"
+            debug "Kernel headers resolved: $KERNEL_HEADERS"
         fi
     fi
 
@@ -227,13 +241,18 @@ detect_all() {
 
     detect_dmi
     detect_model_family
+    debug "Model family: $MODEL_FAMILY ($ACER_PRODUCT_NAME)"
     detect_gpu
+    debug "GPU: NVIDIA=$HAS_NVIDIA Intel_iGPU=$HAS_INTEL_IGPU AMD_iGPU=$HAS_AMD_IGPU AMD_dGPU=$HAS_AMD_DGPU"
     detect_wifi
+    debug "WiFi chipset: $WIFI_CHIPSET"
     detect_audio
     detect_touchpad
     detect_battery
+    debug "Battery: present=$HAS_BATTERY"
     detect_kernel
     detect_distro
+    debug "Distro: $DISTRO_NAME ($DISTRO_FAMILY) AUR=$AUR_HELPER"
 }
 
 # Print a summary of detected hardware

@@ -93,23 +93,23 @@ LAUNCHER_EOF
 
 module_uninstall() {
     log "Stopping Archer daemon..."
-    sudo systemctl disable --now archer-daemon.service 2>/dev/null || true
-    sudo rm -f "$_GUI_SERVICE"
-    sudo systemctl daemon-reload
+    run_sudo systemctl disable --now archer-daemon.service 2>/dev/null || true
+    run_sudo rm -f "$_GUI_SERVICE"
+    run_sudo systemctl daemon-reload
 
     log "Removing Archer GUI files..."
-    sudo rm -rf "$_GUI_INSTALL_DIR"
-    sudo rm -f "$_GUI_DESKTOP"
-    sudo rm -f "$_GUI_ICON"
-    sudo rm -f "$_GUI_LAUNCHER"
-    sudo rm -rf "$_GUI_SETTINGS_DIR"
+    run_sudo rm -rf "$_GUI_INSTALL_DIR"
+    run_sudo rm -f "$_GUI_DESKTOP"
+    run_sudo rm -f "$_GUI_ICON"
+    run_sudo rm -f "$_GUI_LAUNCHER"
+    run_sudo rm -rf "$_GUI_SETTINGS_DIR"
 
     log "Removing D-Bus and polkit configuration..."
-    sudo rm -f /etc/dbus-1/system.d/io.otectus.Archer1.conf
-    sudo rm -f /usr/share/polkit-1/actions/io.otectus.Archer1.policy
+    run_sudo rm -f /etc/dbus-1/system.d/io.otectus.Archer1.conf
+    run_sudo rm -f /usr/share/polkit-1/actions/io.otectus.Archer1.policy
 
     # Clean up socket/PID if lingering
-    sudo rm -f /var/run/archer.sock 2>/dev/null || true
+    run_sudo rm -f /var/run/archer.sock 2>/dev/null || true
 
     log "Archer GUI removed. Packages retained (remove manually with: sudo pacman -Rns python-gobject gtk4 libadwaita python-pillow)"
 }

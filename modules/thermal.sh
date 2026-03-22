@@ -68,7 +68,7 @@ EOF
 
 module_uninstall() {
     log "Removing thermal profile configuration..."
-    sudo rm -f "$_THERMAL_CONF"
+    run_sudo rm -f "$_THERMAL_CONF"
 
     # Revert GRUB parameter
     remove_grub_params "acer_wmi.predator_v4=1"

@@ -93,17 +93,17 @@ UDEV_EOF
 
 module_uninstall() {
     log "Disabling battery health mode..."
-    if [ -f "$_BATTERY_HEALTH_PATH" ]; then
-        echo 0 | sudo tee "$_BATTERY_HEALTH_PATH" > /dev/null 2>&1 || true
+    if [[ -f "$_BATTERY_HEALTH_PATH" ]]; then
+        echo 0 | run_sudo tee "$_BATTERY_HEALTH_PATH" > /dev/null 2>&1 || true
     fi
 
     log "Removing udev rule..."
-    sudo rm -f "$_BATTERY_UDEV_RULE"
+    run_sudo rm -f "$_BATTERY_UDEV_RULE"
 
     log "Removing acer-wmi-battery DKMS module..."
-    sudo dkms remove -m "$_BATTERY_DKMS_NAME" -v "$_BATTERY_DKMS_VERSION" --all 2>/dev/null || true
-    sudo rm -rf "/usr/src/${_BATTERY_DKMS_NAME}-${_BATTERY_DKMS_VERSION}"
-    sudo modprobe -r acer_wmi_battery 2>/dev/null || true
+    run_sudo dkms remove -m "$_BATTERY_DKMS_NAME" -v "$_BATTERY_DKMS_VERSION" --all 2>/dev/null || true
+    run_sudo rm -rf "/usr/src/${_BATTERY_DKMS_NAME}-${_BATTERY_DKMS_VERSION}"
+    run_sudo modprobe -r acer_wmi_battery 2>/dev/null || true
 }
 
 module_verify() {

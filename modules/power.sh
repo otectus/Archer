@@ -73,14 +73,14 @@ TLP_EOF
 
 module_uninstall() {
     log "Removing TLP configuration..."
-    sudo rm -f "$_TLP_CONF"
+    run_sudo rm -f "$_TLP_CONF"
 
     log "Disabling TLP..."
-    sudo systemctl disable --now tlp.service 2>/dev/null || true
+    run_sudo systemctl disable --now tlp.service 2>/dev/null || true
 
     # Unmask rfkill
-    sudo systemctl unmask systemd-rfkill.service 2>/dev/null || true
-    sudo systemctl unmask systemd-rfkill.socket 2>/dev/null || true
+    run_sudo systemctl unmask systemd-rfkill.service 2>/dev/null || true
+    run_sudo systemctl unmask systemd-rfkill.socket 2>/dev/null || true
 
     log "TLP config removed. Package retained (remove manually with: sudo pacman -Rns tlp tlp-rdw)"
 }

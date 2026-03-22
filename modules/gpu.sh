@@ -94,18 +94,18 @@ module_uninstall() {
         # envycontrol --reset also calls mkinitcpio -P internally; use same shim trick
         local _shim_path="/usr/local/bin/mkinitcpio"
         local _had_existing=0
-        if [ -f "$_shim_path" ]; then
+        if [[ -f "$_shim_path" ]]; then
             _had_existing=1
-            sudo mv "$_shim_path" "$_shim_path.archer-bak"
+            run_sudo mv "$_shim_path" "$_shim_path.archer-bak"
         fi
-        printf '#!/bin/sh\nexit 0\n' | sudo tee "$_shim_path" > /dev/null
-        sudo chmod 755 "$_shim_path"
+        printf '#!/bin/sh\nexit 0\n' | run_sudo tee "$_shim_path" > /dev/null
+        run_sudo chmod 755 "$_shim_path"
 
-        sudo envycontrol --reset 2>/dev/null || true
+        run_sudo envycontrol --reset 2>/dev/null || true
 
-        sudo rm -f "$_shim_path"
-        if [ "$_had_existing" -eq 1 ]; then
-            sudo mv "$_shim_path.archer-bak" "$_shim_path"
+        run_sudo rm -f "$_shim_path"
+        if [[ "$_had_existing" -eq 1 ]]; then
+            run_sudo mv "$_shim_path.archer-bak" "$_shim_path"
         fi
 
         rebuild_initramfs

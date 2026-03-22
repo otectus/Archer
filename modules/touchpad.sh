@@ -65,14 +65,14 @@ SERVICE_EOF
 module_uninstall() {
     log "Removing touchpad fixes..."
 
-    if [ -f "$_TOUCHPAD_AMD_CONF" ]; then
-        sudo rm -f "$_TOUCHPAD_AMD_CONF"
+    if [[ -f "$_TOUCHPAD_AMD_CONF" ]]; then
+        run_sudo rm -f "$_TOUCHPAD_AMD_CONF"
     fi
 
-    if [ -f "$_TOUCHPAD_SERVICE" ]; then
-        sudo systemctl disable touchpad-fix.service 2>/dev/null || true
-        sudo rm -f "$_TOUCHPAD_SERVICE"
-        sudo systemctl daemon-reload
+    if [[ -f "$_TOUCHPAD_SERVICE" ]]; then
+        run_sudo systemctl disable touchpad-fix.service 2>/dev/null || true
+        run_sudo rm -f "$_TOUCHPAD_SERVICE"
+        run_sudo systemctl daemon-reload
     fi
 
     # Revert GRUB params

@@ -12,12 +12,24 @@ _RESET="\033[0m"
 INSTALLER_VERSION="2.0.0"
 DRY_RUN="${DRY_RUN:-0}"
 NO_CONFIRM="${NO_CONFIRM:-0}"
+VERBOSE="${VERBOSE:-0}"
+LOG_FILE="${LOG_FILE:-}"
 REBOOT_REQUIRED=0
 
-log()   { echo -e "${_CYAN}>>>${_RESET} $*"; }
-warn()  { echo -e "${_YELLOW}\u26a0${_RESET}  $*"; }
-error() { echo -e "${_RED}\u274c${_RESET} $*"; exit 1; }
-success() { echo -e "${_GREEN}\u2705${_RESET} $*"; }
+# Internal logging helper: writes to stdout and optionally to a log file
+_emit() {
+    echo -e "$*"
+    if [[ -n "$LOG_FILE" ]]; then
+        # Strip ANSI color codes for log file
+        echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE"
+    fi
+}
+
+log()     { _emit "${_CYAN}>>>${_RESET} $*"; }
+warn()    { _emit "${_YELLOW}\u26a0${_RESET}  $*"; }
+error()   { _emit "${_RED}\u274c${_RESET} $*"; exit 1; }
+success() { _emit "${_GREEN}\u2705${_RESET} $*"; }
+debug()   { [[ "$VERBOSE" -eq 1 ]] && _emit "${_BOLD}[DEBUG]${_RESET} $*"; return 0; }
 
 # Execute a command, or print it in dry-run mode
 run() {

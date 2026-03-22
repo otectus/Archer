@@ -999,7 +999,7 @@ class DaemonServer:
 
         self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server_socket.bind(SOCKET_PATH)
-        os.chmod(SOCKET_PATH, 0o666)  # Allow non-root GUI to connect
+        os.chmod(SOCKET_PATH, 0o660)  # Restrict to root + group (GUI uses D-Bus for auth)
         self.server_socket.listen(5)
         self.server_socket.settimeout(1.0)
         self.running = True

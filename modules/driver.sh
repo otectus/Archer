@@ -84,11 +84,11 @@ DKMS_EOF
 
 module_uninstall() {
     log "Removing Linuwu-Sense DKMS module..."
-    sudo dkms remove -m "$DKMS_NAME" -v "$DKMS_VERSION" --all 2>/dev/null || true
-    sudo rm -rf "/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
+    run_sudo dkms remove -m "$DKMS_NAME" -v "$DKMS_VERSION" --all 2>/dev/null || true
+    run_sudo rm -rf "/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
 
     log "Restoring acer_wmi (removing blacklist)..."
-    sudo rm -f /etc/modprobe.d/blacklist-acer-wmi.conf
+    run_sudo rm -f /etc/modprobe.d/blacklist-acer-wmi.conf
 }
 
 module_verify() {

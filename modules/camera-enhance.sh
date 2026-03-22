@@ -42,8 +42,8 @@ MODPROBE_EOF
 }
 
 module_uninstall() {
-    sudo modprobe -r v4l2loopback 2>/dev/null || true
-    sudo rm -f "$_MODPROBE_CONF"
+    run_sudo modprobe -r v4l2loopback 2>/dev/null || true
+    run_sudo rm -f "$_MODPROBE_CONF"
 }
 
 module_verify() {

@@ -48,8 +48,8 @@ GAMEMODE_EOF
 
 module_uninstall() {
     log "Removing GameMode configuration..."
-    sudo rm -f /etc/gamemode.d/archer.ini
-    sudo rmdir /etc/gamemode.d 2>/dev/null || true
+    run_sudo rm -f /etc/gamemode.d/archer.ini
+    run_sudo rmdir /etc/gamemode.d 2>/dev/null || true
 }
 
 module_verify() {

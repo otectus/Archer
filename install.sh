@@ -49,6 +49,8 @@ parse_args() {
             --modules)    EXPLICIT_MODULES="$2"; shift ;;
             --no-confirm) NO_CONFIRM=1 ;;
             --dry-run)    DRY_RUN=1 ;;
+            --verbose)    VERBOSE=1 ;;
+            --log)        LOG_FILE="$2"; shift ;;
             --verify)     VERIFY_ONLY=1 ;;
             --help|-h)    SHOW_HELP=1 ;;
             --version|-v) SHOW_VERSION=1 ;;
@@ -69,6 +71,8 @@ show_help() {
     echo "  --verify         Check status of previously installed modules"
     echo "  --no-confirm     Skip all confirmation prompts"
     echo "  --dry-run        Show what would be done without making changes"
+    echo "  --verbose        Enable debug output for troubleshooting"
+    echo "  --log FILE       Write all output to FILE (in addition to console)"
     echo "  --help, -h       Show this help message"
     echo "  --version, -v    Show version"
     echo ""
@@ -208,6 +212,14 @@ run_menu() {
 # --- Module execution ---
 install_shared_deps() {
     log "Installing shared system dependencies..."
+    debug "Kernel headers package: $KERNEL_HEADERS"
+
+    # Verify the kernel headers package exists in repos before attempting install
+    if ! pacman -Si "$KERNEL_HEADERS" &>/dev/null && ! pacman -Qi "$KERNEL_HEADERS" &>/dev/null; then
+        warn "Kernel headers package '$KERNEL_HEADERS' not found in repos or installed."
+        warn "DKMS modules may fail to build. Check: pacman -Ss headers"
+    fi
+
     local deps=(base-devel dkms git curl "$KERNEL_HEADERS" python-pip)
 
     # Clang-built kernels require clang/llvm toolchain for DKMS module compilation

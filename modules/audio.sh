@@ -75,8 +75,8 @@ EOF
 
 module_uninstall() {
     log "Removing audio configuration..."
-    if [ -f "$_AUDIO_AMD_CONF" ]; then
-        sudo rm -f "$_AUDIO_AMD_CONF"
+    if [[ -f "$_AUDIO_AMD_CONF" ]]; then
+        run_sudo rm -f "$_AUDIO_AMD_CONF"
         rebuild_initramfs
     fi
     log "Audio packages retained as they are standard system components."
