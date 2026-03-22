@@ -5,7 +5,7 @@ Internals Manager page - debug tools, driver parameters, restart controls.
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw
 
 import threading
 
@@ -56,8 +56,9 @@ class InternalsPage(Gtk.Box):
         onetime_buttons.append(btn_all)
 
         onetime_row = Adw.PreferencesRow()
-        onetime_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
-                                 margin_start=12, margin_end=12, margin_bottom=12)
+        onetime_inner = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            margin_start=12, margin_end=12, margin_bottom=12)
         onetime_inner.append(onetime_buttons)
         onetime_row.set_child(onetime_inner)
         onetime_group.add(onetime_row)

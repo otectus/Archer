@@ -124,8 +124,9 @@ class BatteryPage(Gtk.Box):
             orientation=Gtk.Orientation.VERTICAL,
             valign=Gtk.Align.CENTER, vexpand=True, spacing=12,
         )
-        no_bat_icon = Gtk.Image(icon_name="battery-missing-symbolic", pixel_size=64,
-                                 opacity=0.5)
+        no_bat_icon = Gtk.Image(
+            icon_name="battery-missing-symbolic", pixel_size=64,
+            opacity=0.5)
         no_bat_label = Gtk.Label(label="No battery detected")
         no_bat_label.add_css_class("title-2")
         no_bat_label.set_opacity(0.5)
