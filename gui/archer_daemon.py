@@ -999,7 +999,7 @@ class DaemonServer:
 
         self.server_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         self.server_socket.bind(SOCKET_PATH)
-        os.chmod(SOCKET_PATH, 0o666)  # Allow non-root GUI to connect
+        os.chmod(SOCKET_PATH, 0o660)  # Restrict to root + group (GUI uses D-Bus for auth)
         self.server_socket.listen(5)
         self.server_socket.settimeout(1.0)
         self.running = True
@@ -1315,7 +1315,7 @@ def main():
 
     # Try D-Bus first, fall back to Unix socket
     use_dbus = False
-    dbus_service = None
+    _dbus_service = None
     main_loop = None
     server = None
 
@@ -1325,7 +1325,7 @@ def main():
         from archer_dbus import ArcherDBusService
 
         dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
-        dbus_service = ArcherDBusService(hw)
+        _dbus_service = ArcherDBusService(hw)  # noqa: F841 — prevent GC
         main_loop = GLib.MainLoop()
         use_dbus = True
         logger.info("D-Bus service registered (io.otectus.Archer1)")

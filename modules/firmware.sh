@@ -35,7 +35,7 @@ module_install() {
 }
 
 module_uninstall() {
-    sudo systemctl disable --now fwupd.service 2>/dev/null || true
+    run_sudo systemctl disable --now fwupd.service 2>/dev/null || true
     log "fwupd disabled. Package retained."
 }
 

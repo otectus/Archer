@@ -12,17 +12,35 @@ _RESET="\033[0m"
 INSTALLER_VERSION="2.0.0"
 DRY_RUN="${DRY_RUN:-0}"
 NO_CONFIRM="${NO_CONFIRM:-0}"
+VERBOSE="${VERBOSE:-0}"
+LOG_FILE="${LOG_FILE:-}"
 REBOOT_REQUIRED=0
 
-log()   { echo -e "${_CYAN}>>>${_RESET} $*"; }
-warn()  { echo -e "${_YELLOW}\u26a0${_RESET}  $*"; }
-error() { echo -e "${_RED}\u274c${_RESET} $*"; exit 1; }
-success() { echo -e "${_GREEN}\u2705${_RESET} $*"; }
+# Internal logging helper: writes to stdout and optionally to a log file
+_emit() {
+    echo -e "$*"
+    if [[ -n "${LOG_FILE:-}" ]]; then
+        # Strip ANSI color codes for log file
+        echo -e "$*" | sed 's/\x1b\[[0-9;]*m//g' >> "$LOG_FILE" 2>/dev/null || true
+    fi
+    return 0
+}
+
+log()     { _emit "${_CYAN:-}>>>${_RESET:-} $*"; return 0; }
+warn()    { _emit "${_YELLOW:-}\u26a0${_RESET:-}  $*"; return 0; }
+error()   { _emit "${_RED:-}\u274c${_RESET:-} $*"; exit 1; }
+success() { _emit "${_GREEN:-}\u2705${_RESET:-} $*"; return 0; }
+debug() {
+    if [[ "${VERBOSE:-0}" -eq 1 ]]; then
+        _emit "${_BOLD:-}[DEBUG]${_RESET:-} $*"
+    fi
+    return 0
+}
 
 # Execute a command, or print it in dry-run mode
 run() {
-    if [ "$DRY_RUN" -eq 1 ]; then
-        echo -e "${_YELLOW}[DRY RUN]${_RESET} $*"
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        echo -e "${_YELLOW:-}[DRY RUN]${_RESET:-} $*"
         return 0
     fi
     "$@"
@@ -30,8 +48,8 @@ run() {
 
 # Execute a command with sudo, or print it in dry-run mode
 run_sudo() {
-    if [ "$DRY_RUN" -eq 1 ]; then
-        echo -e "${_YELLOW}[DRY RUN]${_RESET} sudo $*"
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        echo -e "${_YELLOW:-}[DRY RUN]${_RESET:-} sudo $*"
         return 0
     fi
     sudo "$@"
@@ -42,8 +60,8 @@ run_sudo() {
 run_sudo_timeout() {
     local timeout_secs="${1:-300}"
     shift
-    if [ "$DRY_RUN" -eq 1 ]; then
-        echo -e "${_YELLOW}[DRY RUN]${_RESET} sudo (timeout ${timeout_secs}s) $*"
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        echo -e "${_YELLOW:-}[DRY RUN]${_RESET:-} sudo (timeout ${timeout_secs}s) $*"
         return 0
     fi
     timeout --signal=TERM --kill-after=30 "$timeout_secs" sudo "$@"
@@ -57,15 +75,15 @@ rebuild_initramfs() {
     local preset="/etc/mkinitcpio.d/${kernel_version%.*}.preset"
 
     # Try common preset naming patterns
-    if [ ! -f "$preset" ]; then
+    if [[ ! -f "$preset" ]]; then
         # Try exact kernel version match
         preset="/etc/mkinitcpio.d/${kernel_version}.preset"
     fi
-    if [ ! -f "$preset" ]; then
+    if [[ ! -f "$preset" ]]; then
         # Try matching by major version (e.g., linux, linux-lts, linux-cachyos)
         local found_preset=""
         for p in /etc/mkinitcpio.d/*.preset; do
-            [ -f "$p" ] || continue
+            [[ -f "$p" ]] || continue
             local pname
             pname="$(basename "$p" .preset)"
             if pacman -Qo "/usr/lib/modules/${kernel_version}" 2>/dev/null | grep -qF "$pname"; then
@@ -73,7 +91,7 @@ rebuild_initramfs() {
                 break
             fi
         done
-        if [ -n "$found_preset" ]; then
+        if [[ -n "$found_preset" ]]; then
             preset="$found_preset"
         fi
     fi
@@ -83,7 +101,7 @@ rebuild_initramfs() {
     # interactively and hangs non-interactive subprocess calls).
     local mkinitcpio_bin="/usr/bin/mkinitcpio"
 
-    if [ -f "$preset" ]; then
+    if [[ -f "$preset" ]]; then
         local preset_name
         preset_name="$(basename "$preset" .preset)"
         log "Regenerating initramfs for preset '$preset_name' (timeout 5min)..."
@@ -109,7 +127,7 @@ rebuild_initramfs() {
 # Prompt for confirmation (respects --no-confirm)
 confirm() {
     local prompt="${1:-Continue?}"
-    if [ "$NO_CONFIRM" -eq 1 ]; then
+    if [[ "${NO_CONFIRM:-0}" -eq 1 ]]; then
         return 0
     fi
     read -rp "$prompt [y/N]: " answer
@@ -131,6 +149,7 @@ section() {
     echo ""
     echo -e "${_BOLD}=== $* ===${_RESET}"
     echo ""
+    return 0
 }
 
 # Check if a command exists
@@ -142,7 +161,7 @@ has_cmd() {
 # Usage: add_grub_params "param1 param2"
 add_grub_params() {
     local params="$1"
-    if [ -f /etc/default/grub ]; then
+    if [[ -f /etc/default/grub ]]; then
         local current
         current=$(grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | sed 's/^GRUB_CMDLINE_LINUX_DEFAULT="//;s/"$//')
         # Only add params not already present
@@ -152,7 +171,7 @@ add_grub_params() {
                 new_params="$new_params $p"
             fi
         done
-        if [ -n "$new_params" ]; then
+        if [[ -n "$new_params" ]]; then
             log "Adding kernel parameters to GRUB:$new_params"
             local updated="$new_params $current"
             # Use awk for safe replacement (no sed delimiter issues)
@@ -162,7 +181,7 @@ add_grub_params() {
                 /etc/default/grub > "$tmpfile" && run_sudo mv "$tmpfile" /etc/default/grub
             run_sudo grub-mkconfig -o /boot/grub/grub.cfg
         fi
-    elif [ -d /boot/loader/entries ]; then
+    elif [[ -d /boot/loader/entries ]]; then
         log "systemd-boot detected. Please manually add these kernel parameters:"
         log "  $params"
         log "  Edit files in /boot/loader/entries/ and add to the 'options' line."
@@ -173,7 +192,7 @@ add_grub_params() {
 # Usage: remove_grub_params "param1 param2"
 remove_grub_params() {
     local params="$1"
-    if [ -f /etc/default/grub ]; then
+    if [[ -f /etc/default/grub ]]; then
         local needs_update=0
         for p in $params; do
             if grep -qF "$p" /etc/default/grub; then
@@ -181,7 +200,7 @@ remove_grub_params() {
                 break
             fi
         done
-        if [ "$needs_update" -eq 1 ]; then
+        if [[ "$needs_update" -eq 1 ]]; then
             log "Removing kernel parameters from GRUB: $params"
             local current
             current=$(grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | sed 's/^GRUB_CMDLINE_LINUX_DEFAULT="//;s/"$//')

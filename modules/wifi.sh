@@ -7,7 +7,7 @@ MODULE_ID="wifi"
 MODULE_DESCRIPTION="Diagnose and fix WiFi/Bluetooth issues for various chipsets"
 
 module_detect() {
-    [ "$WIFI_CHIPSET" = "mediatek" ]
+    [[ "$WIFI_CHIPSET" = "mediatek" ]]
 }
 
 module_check_installed() {
@@ -67,7 +67,7 @@ _fix_mediatek() {
 
         local pci_addr
         pci_addr=$(lspci -D 2>/dev/null | grep -i "mediatek.*network\|mediatek.*wireless" | awk '{print $1}')
-        if [ -n "$pci_addr" ]; then
+        if [[ -n "$pci_addr" ]]; then
             echo 1 | run_sudo tee "/sys/bus/pci/devices/$pci_addr/remove" > /dev/null 2>&1 || true
             sleep 2
             echo 1 | run_sudo tee /sys/bus/pci/rescan > /dev/null 2>&1 || true
@@ -81,7 +81,7 @@ _fix_mediatek() {
     if echo "$WIFI_DEVICE" | grep -qi "MT7921\|MT7922"; then
         log "MT7921/MT7922 detected. These chipsets require kernel 5.12+ for basic support."
         log "Kernel 6.2+ recommended for stability."
-        if [ "$KERNEL_MAJOR" -lt 6 ]; then
+        if [[ "$KERNEL_MAJOR" -lt 6 ]]; then
             warn "Your kernel ($KERNEL_VERSION) may not fully support this chipset."
         fi
     fi
@@ -122,7 +122,7 @@ _fix_realtek() {
     log "  - rtw89-dkms-git (for RTL8852/RTL8922 series)"
     log "  - rtl8821cu-morrownr-dkms-git (for RTL8821CU USB)"
 
-    if [ -n "$AUR_HELPER" ]; then
+    if [[ -n "$AUR_HELPER" ]]; then
         log "You can install these with: $AUR_HELPER -S <package-name>"
     else
         log "Install an AUR helper (yay or paru) to install these packages."

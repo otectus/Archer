@@ -163,6 +163,8 @@ The installer will:
 | `--verify` | Check status of previously installed modules |
 | `--no-confirm` | Skip all confirmation prompts |
 | `--dry-run` | Show what would be done without making changes |
+| `--verbose` | Enable debug output for troubleshooting |
+| `--log FILE` | Write all output to FILE (in addition to console) |
 | `--help`, `-h` | Show help message |
 | `--version`, `-v` | Show installer version |
 

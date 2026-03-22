@@ -13,7 +13,7 @@ module_detect() {
 }
 
 module_check_installed() {
-    [ -f "$_FILTER_CONF" ]
+    [[ -f "$_FILTER_CONF" ]]
 }
 
 module_install() {
@@ -28,8 +28,8 @@ module_install() {
         run yay -S --needed --noconfirm noise-suppression-for-voice
     else
         log "No AUR helper found. Building noise-suppression-for-voice from AUR..."
-        local _nsv_dir="/tmp/archer-nsv-build"
-        rm -rf "$_nsv_dir"
+        local _nsv_dir
+        _nsv_dir="$(mktemp -d /tmp/archer-nsv-XXXXXX)"
         if run git clone https://aur.archlinux.org/noise-suppression-for-voice.git "$_nsv_dir"; then
             (cd "$_nsv_dir" && makepkg -si --needed --noconfirm) || warn "makepkg failed. Install 'noise-suppression-for-voice' manually."
             rm -rf "$_nsv_dir"
@@ -81,12 +81,12 @@ FILTER_EOF
 }
 
 module_uninstall() {
-    sudo rm -f "$_FILTER_CONF"
+    run_sudo rm -f "$_FILTER_CONF"
     log "Filter config removed. Restart PipeWire to deactivate."
 }
 
 module_verify() {
-    [ -f "$_FILTER_CONF" ] && return 0
+    [[ -f "$_FILTER_CONF" ]] && return 0
     warn "Noise suppression config not found at $_FILTER_CONF"
     return 1
 }

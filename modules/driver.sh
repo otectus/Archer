@@ -37,7 +37,7 @@ module_install() {
 
     # Use centralized Clang detection from detect_kernel()
     local make_flags="$CLANG_BUILD_FLAGS"
-    if [ "$IS_CLANG_KERNEL" -eq 1 ]; then
+    if [[ "$IS_CLANG_KERNEL" -eq 1 ]]; then
         log "Clang-built kernel detected. Using LLVM build flags."
     fi
 
@@ -54,8 +54,9 @@ AUTOINSTALL="yes"
 DKMS_EOF
 
     # Verify kernel headers are available before building
-    local build_dir="/usr/lib/modules/$(uname -r)/build"
-    if [ ! -d "$build_dir" ]; then
+    local build_dir
+    build_dir="/usr/lib/modules/$(uname -r)/build"
+    if [[ ! -d "$build_dir" ]]; then
         warn "Kernel headers not found at $build_dir"
         warn "Running kernel $(uname -r) may not match installed headers."
         warn "If you recently updated your kernel, reboot first, then re-run the installer."
@@ -84,11 +85,11 @@ DKMS_EOF
 
 module_uninstall() {
     log "Removing Linuwu-Sense DKMS module..."
-    sudo dkms remove -m "$DKMS_NAME" -v "$DKMS_VERSION" --all 2>/dev/null || true
-    sudo rm -rf "/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
+    run_sudo dkms remove -m "$DKMS_NAME" -v "$DKMS_VERSION" --all 2>/dev/null || true
+    run_sudo rm -rf "/usr/src/${DKMS_NAME}-${DKMS_VERSION}"
 
     log "Restoring acer_wmi (removing blacklist)..."
-    sudo rm -f /etc/modprobe.d/blacklist-acer-wmi.conf
+    run_sudo rm -f /etc/modprobe.d/blacklist-acer-wmi.conf
 }
 
 module_verify() {

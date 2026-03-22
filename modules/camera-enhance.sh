@@ -28,7 +28,7 @@ MODPROBE_EOF
     run_sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="Archer Camera" exclusive_caps=1 2>/dev/null || \
         warn "Could not load v4l2loopback (may require reboot)."
 
-    if [ -e /dev/video10 ]; then
+    if [[ -e /dev/video10 ]]; then
         success "Virtual camera device created at /dev/video10"
     else
         mark_reboot_required
@@ -42,8 +42,8 @@ MODPROBE_EOF
 }
 
 module_uninstall() {
-    sudo modprobe -r v4l2loopback 2>/dev/null || true
-    sudo rm -f "$_MODPROBE_CONF"
+    run_sudo modprobe -r v4l2loopback 2>/dev/null || true
+    run_sudo rm -f "$_MODPROBE_CONF"
 }
 
 module_verify() {

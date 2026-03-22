@@ -8,7 +8,7 @@ MODULE_DESCRIPTION="EnvyControl for NVIDIA Optimus hybrid graphics switching"
 
 module_detect() {
     # Relevant if NVIDIA dGPU + an integrated GPU
-    if [ "$HAS_NVIDIA" -eq 1 ] && { [ "$HAS_INTEL_IGPU" -eq 1 ] || [ "$HAS_AMD_IGPU" -eq 1 ]; }; then
+    if [[ "$HAS_NVIDIA" -eq 1 ]] && { [[ "$HAS_INTEL_IGPU" -eq 1 ]] || [[ "$HAS_AMD_IGPU" -eq 1 ]]; }; then
         return 0
     fi
     return 1
@@ -27,7 +27,7 @@ module_install() {
     fi
 
     # Install EnvyControl
-    if [ -n "$AUR_HELPER" ]; then
+    if [[ -n "$AUR_HELPER" ]]; then
         log "Installing EnvyControl via $AUR_HELPER..."
         run $AUR_HELPER -S --needed --noconfirm envycontrol
     else
@@ -42,7 +42,7 @@ module_install() {
     log "  3) integrated   - Disable NVIDIA entirely (best battery life)"
 
     local gpu_mode="hybrid"
-    if [ "$NO_CONFIRM" -eq 0 ]; then
+    if [[ "$NO_CONFIRM" -eq 0 ]]; then
         read -rp "Select mode [1]: " gpu_choice
         case "${gpu_choice:-1}" in
             2) gpu_mode="nvidia" ;;
@@ -58,7 +58,7 @@ module_install() {
     # no-op shim so envycontrol skips it, then do our own rebuild afterwards.
     local _shim_path="/usr/local/bin/mkinitcpio"
     local _had_existing=0
-    if [ -f "$_shim_path" ]; then
+    if [[ -f "$_shim_path" ]]; then
         _had_existing=1
         run_sudo mv "$_shim_path" "$_shim_path.archer-bak"
     fi
@@ -68,7 +68,7 @@ exit 0
 SHIM
     run_sudo chmod 755 "$_shim_path"
 
-    if [ "$gpu_mode" = "hybrid" ]; then
+    if [[ "$gpu_mode" = "hybrid" ]]; then
         run_sudo envycontrol -s hybrid --rtd3 2
     else
         run_sudo envycontrol -s "$gpu_mode"
@@ -76,7 +76,7 @@ SHIM
 
     # Restore original wrapper or remove shim
     run_sudo rm -f "$_shim_path"
-    if [ "$_had_existing" -eq 1 ]; then
+    if [[ "$_had_existing" -eq 1 ]]; then
         run_sudo mv "$_shim_path.archer-bak" "$_shim_path"
     fi
 
@@ -94,18 +94,18 @@ module_uninstall() {
         # envycontrol --reset also calls mkinitcpio -P internally; use same shim trick
         local _shim_path="/usr/local/bin/mkinitcpio"
         local _had_existing=0
-        if [ -f "$_shim_path" ]; then
+        if [[ -f "$_shim_path" ]]; then
             _had_existing=1
-            sudo mv "$_shim_path" "$_shim_path.archer-bak"
+            run_sudo mv "$_shim_path" "$_shim_path.archer-bak"
         fi
-        printf '#!/bin/sh\nexit 0\n' | sudo tee "$_shim_path" > /dev/null
-        sudo chmod 755 "$_shim_path"
+        printf '#!/bin/sh\nexit 0\n' | run_sudo tee "$_shim_path" > /dev/null
+        run_sudo chmod 755 "$_shim_path"
 
-        sudo envycontrol --reset 2>/dev/null || true
+        run_sudo envycontrol --reset 2>/dev/null || true
 
-        sudo rm -f "$_shim_path"
-        if [ "$_had_existing" -eq 1 ]; then
-            sudo mv "$_shim_path.archer-bak" "$_shim_path"
+        run_sudo rm -f "$_shim_path"
+        if [[ "$_had_existing" -eq 1 ]]; then
+            run_sudo mv "$_shim_path.archer-bak" "$_shim_path"
         fi
 
         rebuild_initramfs

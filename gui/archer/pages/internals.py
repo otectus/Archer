@@ -5,7 +5,7 @@ Internals Manager page - debug tools, driver parameters, restart controls.
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Gtk, Adw, GLib
+from gi.repository import Gtk, Adw
 
 import threading
 
@@ -56,8 +56,9 @@ class InternalsPage(Gtk.Box):
         onetime_buttons.append(btn_all)
 
         onetime_row = Adw.PreferencesRow()
-        onetime_inner = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,
-                                 margin_start=12, margin_end=12, margin_bottom=12)
+        onetime_inner = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            margin_start=12, margin_end=12, margin_bottom=12)
         onetime_inner.append(onetime_buttons)
         onetime_row.set_child(onetime_inner)
         onetime_group.add(onetime_row)
@@ -81,13 +82,15 @@ class InternalsPage(Gtk.Box):
         self.override_combo.set_selected(0)
         permanent_group.add(self.override_combo)
 
-        apply_override_btn = Gtk.Button(label="Apply Override", halign=Gtk.Align.CENTER,
-                                         margin_top=8, margin_bottom=8)
+        apply_override_btn = Gtk.Button(
+            label="Apply Override", halign=Gtk.Align.CENTER,
+            margin_top=8, margin_bottom=8)
         apply_override_btn.add_css_class("suggested-action")
         apply_override_btn.connect("clicked", self._on_apply_override)
         override_row = Adw.PreferencesRow()
-        override_inner = Gtk.Box(margin_start=12, margin_end=12, margin_bottom=12,
-                                  halign=Gtk.Align.CENTER)
+        override_inner = Gtk.Box(
+            margin_start=12, margin_end=12, margin_bottom=12,
+            halign=Gtk.Align.CENTER)
         override_inner.append(apply_override_btn)
         override_row.set_child(override_inner)
         permanent_group.add(override_row)
