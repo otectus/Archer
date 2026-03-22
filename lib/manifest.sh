@@ -23,7 +23,8 @@ write_manifest() {
     local dkms_str="$3"
     local packages_str="$4"
 
-    mkdir -p -m 700 "$MANIFEST_DIR"
+    mkdir -p "$MANIFEST_DIR"
+    chmod 700 "$MANIFEST_DIR"
 
     if has_cmd jq; then
         jq -n \
