@@ -17,6 +17,9 @@ venv/
 .idea/
 *.log
 
+# Working documents
+ARCHER_2.0.md
+
 # Driver build leftovers
 *.o
 *.ko

@@ -4,7 +4,7 @@ Have an Acer laptop running Arch Linux? You're in the right place.
 
 ![Archer Compatibility Suite](https://i.imgur.com/KvbGFQw.png)
 
-A modular compatibility suite for Acer laptops running Arch Linux and Arch-based distributions. Provides hardware-aware detection, kernel driver installation, and targeted fixes for a broad range of Acer laptop issues on Linux — from fan control and RGB keyboards to GPU switching and power management.
+A modular compatibility suite for Acer laptops running Arch Linux and Arch-based distributions. Provides hardware-aware detection, kernel driver installation, a GTK4 control panel with D-Bus IPC and polkit authorization, and targeted fixes for a broad range of Acer laptop issues on Linux.
 
 ## Supported Hardware
 
@@ -27,6 +27,22 @@ A modular compatibility suite for Acer laptops running Arch Linux and Arch-based
 - EndeavourOS
 - Manjaro
 - Garuda Linux
+
+## Architecture
+
+Archer uses a root daemon with a D-Bus system service for secure hardware control:
+
+```
+Archer GUI (GTK4/Adwaita)  ──  D-Bus (io.otectus.Archer1)  ──  Archer Daemon (root)
+       │                              │                              │
+  11 pages                     polkit auth                    sysfs / hwmon
+  system tray               session-cached                  Linuwu-Sense driver
+```
+
+- **Daemon** (`archer-daemon.service`): Runs as root, communicates with hardware via sysfs/hwmon, exposes a D-Bus interface with polkit-protected methods.
+- **D-Bus service** (`io.otectus.Archer1`): Read-only methods (telemetry, settings) are unprivileged. Mutating methods (fan control, profile switching, display mode) require polkit authorization, cached per session.
+- **GUI**: GTK4/Adwaita application with system tray support (close-to-tray via D-Bus StatusNotifierItem). Connects to daemon exclusively through D-Bus.
+- **Installer**: Bash-based modular system with 13 modules, hardware detection, manifest tracking, and interactive menu.
 
 ## Available Modules
 
@@ -72,9 +88,20 @@ Enables native `acer_wmi` thermal profile support on kernel 6.8+. Provides acces
 > **Conflict Warning**: This module requires `acer_wmi` to be loaded, which conflicts with the driver module (Linuwu-Sense blacklists `acer_wmi`). You cannot use both simultaneously.
 
 ### 9. Archer GUI (gui)
-A GTK4/Adwaita control panel with a root daemon for real-time hardware management. Provides a dashboard with CPU/GPU monitoring, fan speed control, battery charge limiting, RGB keyboard configuration, and thermal profile switching. Communicates with the Linuwu-Sense kernel driver via a Unix socket daemon.
+GTK4/Adwaita control panel with a root daemon for real-time hardware management. The daemon exposes a D-Bus service (`io.otectus.Archer1`) with polkit authorization for secure access. Features include:
+- **Dashboard** — CPU/GPU temperatures, usage, fan RPM, battery status with live charts
+- **Performance** — Thermal profile selection, fan control (automatic/manual/custom curves)
+- **Battery** — Charge limit toggle, battery calibration, USB charging levels
+- **Keyboard** — 4-zone RGB color pickers, lighting effects, backlight timeout
+- **Display** — GPU mode switching (integrated/hybrid/nvidia) with reboot gating
+- **Game Mode** — One-click performance optimization (governor, EPP, NVIDIA persistence)
+- **Audio** — Noise suppression toggle for the PipeWire virtual source
+- **Firmware** — BIOS version display, fwupd update status
+- **System** — LCD override, boot sound, system info, driver version
+- **Internals** — Driver parameter forcing, daemon/driver restart controls
+- **System tray** — Close-to-tray via D-Bus StatusNotifierItem, works on Wayland
 
-> **Note**: This module requires a display server (X11 or Wayland). For full functionality, install the driver module first — the GUI daemon uses the Linuwu-Sense driver for hardware control.
+> **Note**: Requires a display server (X11 or Wayland). Install the driver module first for full hardware control.
 
 ### 10. Game Mode (gamemode)
 Installs [GameMode](https://github.com/FeralInteractive/gamemode) for automatic performance optimization during gaming. Switches CPU governor to performance, adjusts GPU power mode, and applies I/O priority tuning. The Archer daemon also provides a Game Mode toggle for manual activation.
@@ -101,7 +128,7 @@ cd Archer
 The installer will:
 1. Detect your hardware (model, GPU, WiFi chipset, battery, kernel, distro)
 2. Recommend modules based on detected hardware
-3. Present an interactive menu for module selection
+3. Present an interactive menu for module selection (13 modules)
 4. Install shared dependencies and selected modules
 5. Verify each installation and report results
 
@@ -112,7 +139,7 @@ The installer will:
 ./install.sh --all
 
 # Install specific modules
-./install.sh --modules "driver,battery,gpu"
+./install.sh --modules "driver,battery,gpu,gui"
 
 # Skip confirmation prompts
 ./install.sh --all --no-confirm
@@ -148,8 +175,11 @@ After installation, verify the state of installed modules:
 dkms status                                    # linuwu-sense should show 'installed'
 lsmod | grep linuwu_sense                      # Module should be loaded
 
-# Archer GUI
+# Archer Daemon (D-Bus)
 sudo systemctl status archer-daemon            # Daemon should be active
+busctl introspect io.otectus.Archer1 /io/otectus/Archer1  # D-Bus methods visible
+
+# Archer GUI
 archer-gui                                     # Launch the control panel
 
 # Battery
@@ -163,7 +193,27 @@ sudo tlp-stat -s                               # Should show TLP active
 
 # Thermal Profiles
 cat /sys/firmware/acpi/platform_profile        # Should show current profile
+
+# Audio Enhancement
+pactl list sources | grep "Archer Noise"       # Virtual source should appear
+
+# Firmware
+fwupdmgr get-devices                           # Should list detected devices
 ```
+
+## Configuration
+
+The Archer daemon persists user settings to `/etc/archer/settings.json`. This file is managed automatically and survives reboots. Settings include:
+
+- Thermal profile selection
+- Fan speed and custom curve definitions
+- Keyboard RGB colors and effect modes
+- Battery charge limit and USB charging level
+- Game mode state
+- Audio enhancement toggles
+- LCD override and boot sound preferences
+
+Settings are restored automatically when the daemon starts.
 
 ## Uninstallation
 
@@ -179,31 +229,36 @@ If no manifest is found (legacy installation), a fallback removes all known comp
 
 ```
 Archer/
-  install.sh                    # Main entry point with interactive menu
-  uninstall.sh                  # Manifest-aware uninstaller
+  install.sh                      # Main entry point with interactive menu
+  uninstall.sh                    # Manifest-aware uninstaller
   lib/
-    utils.sh                    # Shared logging, error handling, helpers
-    detect.sh                   # Hardware detection and recommendation engine
-    manifest.sh                 # Install state tracking (JSON manifest)
+    utils.sh                      # Shared logging, error handling, helpers
+    detect.sh                     # Hardware detection and recommendation engine
+    manifest.sh                   # Install state tracking (JSON manifest)
   modules/
-    driver.sh                   # Linuwu-Sense kernel driver (DKMS)
-    battery.sh                  # acer-wmi-battery charge limiting
-    gpu.sh                      # EnvyControl GPU switching
-    touchpad.sh                 # I2C HID touchpad fixes
-    audio.sh                    # SOF firmware and audio config
-    wifi.sh                     # WiFi/Bluetooth troubleshooting
-    power.sh                    # TLP power management
-    thermal.sh                  # Kernel thermal profiles
-    gui.sh                      # Archer GUI module (control panel + daemon)
-    gamemode.sh                 # Game Mode (GameMode + governor switching)
-    audio-enhance.sh            # Audio noise suppression (PipeWire/rnnoise)
-    camera-enhance.sh           # Virtual camera (v4l2loopback)
-    firmware.sh                 # Firmware update advisor (fwupd)
-  gui/                          # GUI application source files
-    archer_daemon.py            # Root daemon (Unix socket, sysfs control)
-    archer_gui.py               # GTK4 application launcher
-    archer/                     # GUI modules (pages, widgets, client, tray)
-    assets/                     # Icons and images
+    driver.sh                     # Linuwu-Sense kernel driver (DKMS)
+    battery.sh                    # acer-wmi-battery charge limiting
+    gpu.sh                        # EnvyControl GPU switching
+    touchpad.sh                   # I2C HID touchpad fixes
+    audio.sh                      # SOF firmware and audio config
+    wifi.sh                       # WiFi/Bluetooth troubleshooting
+    power.sh                      # TLP power management
+    thermal.sh                    # Kernel thermal profiles
+    gui.sh                        # Archer GUI + daemon + D-Bus + polkit
+    gamemode.sh                   # Game Mode (GameMode + governor switching)
+    audio-enhance.sh              # Audio noise suppression (PipeWire/rnnoise)
+    camera-enhance.sh             # Virtual camera (v4l2loopback)
+    firmware.sh                   # Firmware update advisor (fwupd)
+  gui/
+    archer_daemon.py              # Root daemon (D-Bus, sysfs, fan curves, game mode)
+    archer_dbus.py                # D-Bus service with polkit authorization
+    archer_gui.py                 # GTK4 application launcher
+    io.otectus.Archer1.conf       # D-Bus system bus policy
+    io.otectus.Archer1.policy     # Polkit action definitions
+    archer-daemon.service         # Systemd service unit
+    io.github.archer.desktop      # Desktop entry
+    archer/                       # GUI modules (11 pages, client, tray, widgets)
+    assets/                       # Icons (SVG, PNG)
 ```
 
 ## Technical Notes
@@ -211,8 +266,10 @@ Archer/
 - **Secure Boot**: If Secure Boot is enabled, you must manually sign DKMS kernel modules (linuwu-sense, acer-wmi-battery) or disable Secure Boot.
 - **BIOS Configuration**: Some Acer laptops ship with RAID storage mode enabled. Switch to AHCI mode in BIOS for Linux compatibility. Disable Fast Startup for dual-boot setups.
 - **CachyOS**: The installer automatically detects CachyOS kernels and installs the correct `-cachyos-headers` package. Clang/LLVM compiler flags are applied when a Clang-built kernel is detected.
-- **AUR Helpers**: Modules that install AUR packages (battery, GPU) prefer `paru` or `yay` if available, with manual fallback otherwise. The installer never installs an AUR helper for you.
+- **AUR Helpers**: Modules that install AUR packages (battery, GPU, audio-enhance) prefer `paru` or `yay` if available, with manual fallback otherwise. The installer never installs an AUR helper for you.
+- **D-Bus / Polkit**: The daemon registers as `io.otectus.Archer1` on the system bus. Read-only methods are unprivileged. Mutating methods require polkit authorization, cached per session (`auth_admin_keep`). System-level operations (restart, modprobe) always prompt (`auth_admin`).
 - **Install Manifest**: Stored at `~/.local/share/archer/install-manifest.json`. Tracks installed modules, files, DKMS modules, and packages for clean uninstallation. Legacy manifests from previous versions are migrated automatically.
+- **Fan Curve Safety**: The fan curve engine includes a watchdog that restores EC automatic control if the daemon crashes or 3 consecutive control ticks fail.
 
 ## Contributing
 
