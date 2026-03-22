@@ -27,7 +27,15 @@ module_install() {
         log "Installing noise-suppression-for-voice via yay..."
         run yay -S --needed --noconfirm noise-suppression-for-voice
     else
-        warn "No AUR helper found. Install 'noise-suppression-for-voice' manually."
+        log "No AUR helper found. Building noise-suppression-for-voice from AUR..."
+        local _nsv_dir="/tmp/archer-nsv-build"
+        rm -rf "$_nsv_dir"
+        if run git clone https://aur.archlinux.org/noise-suppression-for-voice.git "$_nsv_dir"; then
+            (cd "$_nsv_dir" && makepkg -si --needed --noconfirm) || warn "makepkg failed. Install 'noise-suppression-for-voice' manually."
+            rm -rf "$_nsv_dir"
+        else
+            warn "Failed to clone AUR package. Install 'noise-suppression-for-voice' manually."
+        fi
     fi
 
     log "Creating PipeWire noise suppression filter..."
