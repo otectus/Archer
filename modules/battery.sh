@@ -52,7 +52,13 @@ module_install() {
             run_sudo sed -i "s|^MAKE\[0\]=.*|& $CLANG_BUILD_FLAGS|" "$src_dir/dkms.conf"
         fi
 
-        run_sudo dkms add -m "$_BATTERY_DKMS_NAME" -v "$_BATTERY_DKMS_VERSION" || true
+        # Clean up existing DKMS entry before adding (handles re-runs)
+        if dkms status -m "$_BATTERY_DKMS_NAME" -v "$_BATTERY_DKMS_VERSION" 2>/dev/null | grep -q "$_BATTERY_DKMS_NAME"; then
+            log "Removing existing DKMS entry for clean rebuild..."
+            run_sudo dkms remove -m "$_BATTERY_DKMS_NAME" -v "$_BATTERY_DKMS_VERSION" --all 2>/dev/null || true
+        fi
+
+        run_sudo dkms add -m "$_BATTERY_DKMS_NAME" -v "$_BATTERY_DKMS_VERSION"
         run_sudo dkms install -m "$_BATTERY_DKMS_NAME" -v "$_BATTERY_DKMS_VERSION"
     fi
 
