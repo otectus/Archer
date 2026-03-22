@@ -434,4 +434,7 @@ main() {
     log "To uninstall, run: ./uninstall.sh"
 }
 
-main "$@"
+# Only run main when executed directly (not when sourced for testing)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
