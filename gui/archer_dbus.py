@@ -7,8 +7,13 @@ import logging
 
 import dbus
 import dbus.service
+from gi.repository import GLib
 
 logger = logging.getLogger("archer-daemon")
+
+# How often the daemon pushes a TelemetryUpdated signal. The GUI considers
+# data "stale" if it has not seen a signal within ~3x this interval.
+TELEMETRY_INTERVAL_S = 2
 
 DBUS_NAME = "io.otectus.Archer1"
 DBUS_PATH = "/io/otectus/Archer1"
@@ -63,6 +68,18 @@ class ArcherDBusService(dbus.service.Object):
         self._bus_name = dbus.service.BusName(DBUS_NAME, self._bus)
         super().__init__(self._bus, DBUS_PATH)
         logger.info(f"D-Bus service registered: {DBUS_NAME} at {DBUS_PATH}")
+        # Push telemetry on a timer so the GUI doesn't have to poll. Returns
+        # True so GLib keeps re-arming the timeout.
+        GLib.timeout_add_seconds(TELEMETRY_INTERVAL_S, self._emit_telemetry)
+
+    def _emit_telemetry(self):
+        try:
+            payload = json.dumps(self.hw.get_monitoring_data())
+            self.TelemetryUpdated(payload)
+        except Exception as e:
+            # Don't let a transient sysfs hiccup kill the timer.
+            logger.warning(f"TelemetryUpdated emit failed: {e}")
+        return True
 
     def _authorize(self, command, sender):
         """Check polkit for mutating commands. Returns True if authorized."""

@@ -2,6 +2,9 @@
 Main application window with tab navigation.
 """
 
+import json
+import time
+
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -35,6 +38,13 @@ class ArcherWindow(Adw.ApplicationWindow):
         self.client = ArcherClient()
         self.settings_data = None
         self._monitoring_timer = None
+        self._stale_check_timer = None
+        self._telemetry_signal_match = None
+        self._last_telemetry_ts = 0.0
+        # Mark "stale" if no signal arrives within STALE_AFTER_S. The daemon
+        # emits every 2s, so 6s gives a 3-tick grace window.
+        self._STALE_AFTER_S = 6.0
+        self._is_stale = False
         # Exponential backoff for reconnect attempts. Resets to index 0 on
         # successful settings load.
         self._reconnect_steps_s = (5, 10, 20, 60)
@@ -157,6 +167,7 @@ class ArcherWindow(Adw.ApplicationWindow):
             self.status_label.remove_css_class("status-disconnected")
             self.status_label.add_css_class("status-connected")
             self._reconnect_idx = 0  # success — reset backoff
+            self._is_stale = False   # cleared so _check_staleness re-arms cleanly
 
             # Push settings to all pages
             self.dashboard_page.load_settings(data)
@@ -203,20 +214,73 @@ class ArcherWindow(Adw.ApplicationWindow):
         self._fetch_settings()
 
     def _start_monitoring(self):
-        """Start polling monitoring data every 2 seconds."""
-        if self._monitoring_timer:
+        """Subscribe to TelemetryUpdated and start the staleness watchdog.
+
+        Replaces the previous polling loop, which spawned a new thread every
+        2 seconds and would silently pile up zombie threads if any single
+        D-Bus call hung. The daemon now pushes telemetry on its own timer.
+        """
+        # Drop any previous subscription. After a daemon restart the proxy
+        # in the client is fresh, so the old signal match is dead.
+        if self._telemetry_signal_match is not None:
+            try:
+                self._telemetry_signal_match.remove()
+            except Exception:
+                pass
+            self._telemetry_signal_match = None
+
+        iface = self.client.dbus_iface
+        if iface is not None:
+            try:
+                self._telemetry_signal_match = iface.connect_to_signal(
+                    "TelemetryUpdated", self._on_telemetry_signal
+                )
+            except Exception as e:
+                self.add_toast(
+                    Adw.Toast.new(f"Telemetry signal unavailable: {e}")
+                )
+
+        # Mark "fresh" so the first stale-check tick after subscribe doesn't
+        # immediately flip to "Stale".
+        self._last_telemetry_ts = time.monotonic()
+
+        if self._stale_check_timer is None:
+            # Check more often than the staleness window so the flip is
+            # observed within ~1s of crossing it.
+            self._stale_check_timer = GLib.timeout_add_seconds(
+                1, self._check_staleness
+            )
+
+    def _on_telemetry_signal(self, payload):
+        """Called from the GLib main loop when the daemon emits."""
+        try:
+            data = json.loads(str(payload))
+        except (ValueError, TypeError):
             return
-        self._monitoring_timer = GLib.timeout_add_seconds(2, self._poll_monitoring)
+        self._last_telemetry_ts = time.monotonic()
+        if self._is_stale:
+            self._is_stale = False
+            self.status_label.set_label("Connected")
+            self.status_label.remove_css_class("status-disconnected")
+            self.status_label.add_css_class("status-connected")
+        self.dashboard_page.update_monitoring(data)
 
-    def _poll_monitoring(self):
-        thread = threading.Thread(target=self._fetch_monitoring, daemon=True)
-        thread.start()
-        return True  # Keep repeating
-
-    def _fetch_monitoring(self):
-        data = self.client.get_monitoring_data()
-        if data:
-            GLib.idle_add(self.dashboard_page.update_monitoring, data)
+    def _check_staleness(self):
+        """Flip the status label to 'Stale' if no signal for STALE_AFTER_S."""
+        if self._last_telemetry_ts == 0.0:
+            return True
+        if time.monotonic() - self._last_telemetry_ts > self._STALE_AFTER_S:
+            if not self._is_stale:
+                self._is_stale = True
+                self.status_label.set_label("Stale")
+                self.status_label.remove_css_class("status-connected")
+                self.status_label.add_css_class("status-disconnected")
+                # Schedule a reconnect attempt using the same backoff path.
+                self._reconnect_idx = 0
+                GLib.timeout_add_seconds(
+                    self._reconnect_steps_s[0], self._retry_connect
+                )
+        return True
 
     def add_toast(self, toast):
         """Show a toast notification."""
