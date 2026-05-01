@@ -84,7 +84,7 @@ class SystemPage(Gtk.Box):
         # --- Version Information ---
         version_group = Adw.PreferencesGroup(title="Version")
 
-        self.info_gui_version = Adw.ActionRow(title="GUI Version", subtitle="1.0.0")
+        self.info_gui_version = Adw.ActionRow(title="GUI Version", subtitle="1.0.1")
         version_group.add(self.info_gui_version)
 
         self.info_daemon_version = Adw.ActionRow(title="Daemon Version", subtitle="--")

@@ -22,7 +22,7 @@ from pathlib import Path
 PID_FILE = "/run/archer/daemon.pid"
 LOG_FILE = "/var/log/archer-daemon.log"
 SETTINGS_FILE = "/etc/archer/settings.json"
-VERSION = "2.0.0"
+VERSION = "2.0.1"
 
 # Linuwu-Sense sysfs base paths (tried in order)
 DRIVER_BASE_PATHS = [

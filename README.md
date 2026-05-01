@@ -305,6 +305,10 @@ If the GUI shows the status flipping between "Connected" and "Stale", the daemon
 
 Almost always means D-Bus is unreachable. Same triage as above. The GUI now applies a 5s timeout to every D-Bus call and shows the failure in a toast, so a daemon hang manifests as a quick "Daemon Offline" notification rather than a frozen window.
 
+## Changelog
+
+Release notes and migration guidance: [CHANGELOG.md](CHANGELOG.md).
+
 ## Contributing
 
 To add a new module, create `modules/<id>.sh` implementing the module interface:
