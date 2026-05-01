@@ -71,8 +71,27 @@ def write_sysfs(path, value):
         return False
 
 
-def run_cmd(cmd, timeout=10):
-    """Run a shell command and return stdout."""
+# Shell metacharacters we forbid in dynamic strings. Static literal commands
+# (no $ interpolation) can still pass shell_meta_ok=True if they need pipes
+# or substitutions — see callsites in get_cpu_usage / get_system_info.
+_SHELL_META = (";", "&&", "||", "$(", "`")
+
+
+def run_cmd(cmd, timeout=10, shell_meta_ok=False):
+    """Run a shell command and return stdout.
+
+    shell_meta_ok must be True for any command that contains pipes or
+    substitutions. The default of False catches future regressions where a
+    user-supplied value flows into a shell string.
+    """
+    if not shell_meta_ok:
+        for tok in _SHELL_META:
+            if tok in cmd:
+                logger.error(
+                    f"run_cmd refused: shell metacharacter {tok!r} in command "
+                    f"(set shell_meta_ok=True if intentional): {cmd!r}"
+                )
+                return ""
     try:
         result = subprocess.run(
             cmd, shell=True, capture_output=True, text=True, timeout=timeout
@@ -80,6 +99,47 @@ def run_cmd(cmd, timeout=10):
         return result.stdout.strip()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return ""
+
+
+class _TtlCache:
+    """Tiny single-value-per-key cache with monotonic TTL.
+
+    Used for hot-path probes (nvidia-smi, lspci) that the GUI's 2-second
+    monitoring loop would otherwise hit too often.
+    """
+
+    def __init__(self, ttl_s):
+        self._ttl = ttl_s
+        self._values = {}
+        self._lock = threading.Lock()
+
+    def get_or_compute(self, key, fn):
+        now = time.monotonic()
+        with self._lock:
+            entry = self._values.get(key)
+            if entry is not None:
+                ts, val = entry
+                if now - ts < self._ttl:
+                    return val
+        # Compute outside the lock so a slow probe doesn't block other keys.
+        val = fn()
+        with self._lock:
+            self._values[key] = (time.monotonic(), val)
+        return val
+
+
+# 5-second TTL is short enough to feel live and long enough to skip 2/3rds
+# of the GUI's 2s polling ticks. Touched by HardwareManager methods below.
+_PROBE_CACHE = _TtlCache(ttl_s=5.0)
+
+# hwmon device names that ship a meaningful fan1_input/temp1_input on Acer
+# laptops. Order is preference — first match wins. Anything else falls back
+# to the legacy "first device with fan1_input" behaviour.
+_HWMON_FAN_NAMES = (
+    "linuwu_sense", "acer_wmi", "nct6775", "nct6779", "nct6798",
+    "it87", "dell_smm_hwmon",
+)
+_HWMON_GPU_TEMP_NAMES = ("nvidia", "amdgpu", "nouveau")
 
 
 # --- Persistent Settings Store ---
@@ -327,7 +387,10 @@ class HardwareManager:
         if bat_paths:
             self.features.append("battery_info")
         # Display mode (envycontrol)
-        if run_cmd("which envycontrol 2>/dev/null"):
+        if _PROBE_CACHE.get_or_compute(
+            "which-envycontrol",
+            lambda: run_cmd("which envycontrol 2>/dev/null", shell_meta_ok=True),
+        ):
             self.features.append("display_mode")
         # Game mode (always available)
         self.features.append("game_mode")
@@ -625,25 +688,41 @@ class HardwareManager:
         """Get GPU temperature from hwmon."""
         for hwmon in sorted(Path("/sys/class/hwmon").glob("hwmon*")):
             name = read_sysfs(hwmon / "name")
-            if name and name.lower() in ("nvidia", "amdgpu", "nouveau"):
+            if name and name.lower() in _HWMON_GPU_TEMP_NAMES:
                 val = read_sysfs(hwmon / "temp1_input")
                 if val:
                     return int(val) // 1000
-        # Try nvidia-smi
-        temp = run_cmd("nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null")
+        # Try nvidia-smi (cached; the binary is slow, sometimes hangs)
+        temp = _PROBE_CACHE.get_or_compute(
+            "nvidia-smi-temp",
+            lambda: run_cmd(
+                "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null",
+                timeout=3, shell_meta_ok=True,
+            ),
+        )
         if temp and temp.isdigit():
             return int(temp)
         return 0
 
     def get_cpu_usage(self):
         """Get CPU usage percentage."""
-        usage = run_cmd("awk '/^cpu / {u=$2+$4; t=$2+$4+$5; printf \"%.0f\", u/t*100}' /proc/stat")
+        # Static literal awk pipeline; shell_meta_ok=True intentionally.
+        usage = run_cmd(
+            "awk '/^cpu / {u=$2+$4; t=$2+$4+$5; printf \"%.0f\", u/t*100}' /proc/stat",
+            shell_meta_ok=True,
+        )
         return int(usage) if usage and usage.isdigit() else 0
 
     def get_gpu_usage(self):
         """Get GPU usage from nvidia-smi or amdgpu."""
-        # NVIDIA
-        val = run_cmd("nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null")
+        # NVIDIA (cached)
+        val = _PROBE_CACHE.get_or_compute(
+            "nvidia-smi-util",
+            lambda: run_cmd(
+                "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null",
+                timeout=3, shell_meta_ok=True,
+            ),
+        )
         if val and val.isdigit():
             return int(val)
         # AMD
@@ -656,8 +735,22 @@ class HardwareManager:
         return 0
 
     def get_fan_rpm(self):
-        """Get fan RPM from hwmon or driver."""
+        """Get fan RPM from hwmon. Prefer Acer-relevant chipsets by name."""
         cpu_rpm, gpu_rpm = 0, 0
+        # Pass 1: allowlisted chipsets only.
+        for hwmon in sorted(Path("/sys/class/hwmon").glob("hwmon*")):
+            name = read_sysfs(hwmon / "name") or ""
+            if name.lower() not in _HWMON_FAN_NAMES:
+                continue
+            fan1 = read_sysfs(hwmon / "fan1_input")
+            fan2 = read_sysfs(hwmon / "fan2_input")
+            if fan1:
+                cpu_rpm = int(fan1)
+            if fan2:
+                gpu_rpm = int(fan2)
+            if cpu_rpm or gpu_rpm:
+                return cpu_rpm, gpu_rpm
+        # Pass 2 (fallback): the legacy "first device with fan1_input" rule.
         for hwmon in sorted(Path("/sys/class/hwmon").glob("hwmon*")):
             fan1 = read_sysfs(hwmon / "fan1_input")
             fan2 = read_sysfs(hwmon / "fan2_input")
@@ -692,7 +785,13 @@ class HardwareManager:
                         break
         except OSError:
             pass
-        gpu_model = run_cmd("lspci 2>/dev/null | grep -iE 'vga|3d' | head -1 | sed 's/.*: //'")
+        gpu_model = _PROBE_CACHE.get_or_compute(
+            "lspci-gpu",
+            lambda: run_cmd(
+                "lspci 2>/dev/null | grep -iE 'vga|3d' | head -1 | sed 's/.*: //'",
+                shell_meta_ok=True,
+            ),
+        )
         driver_version = read_sysfs(
             os.path.join(self.driver_base, "version") if self.driver_base else "/dev/null"
         ) or "N/A"
@@ -795,7 +894,10 @@ class HardwareManager:
 
     # --- Display Mode ---
     def get_display_mode(self):
-        mode = run_cmd("envycontrol --query 2>/dev/null")
+        mode = _PROBE_CACHE.get_or_compute(
+            "envycontrol-query",
+            lambda: run_cmd("envycontrol --query 2>/dev/null", shell_meta_ok=True),
+        )
         available_modes = ["integrated", "hybrid", "nvidia"]
         return {
             "mode": mode if mode in available_modes else "unknown",
@@ -807,9 +909,14 @@ class HardwareManager:
         valid_modes = ["integrated", "hybrid", "nvidia"]
         if mode not in valid_modes:
             return {"success": False, "error": f"Invalid mode '{mode}'. Available: {valid_modes}"}
-        if not run_cmd("which envycontrol 2>/dev/null"):
+        if not _PROBE_CACHE.get_or_compute(
+            "which-envycontrol",
+            lambda: run_cmd("which envycontrol 2>/dev/null", shell_meta_ok=True),
+        ):
             return {"success": False, "error": "envycontrol not installed"}
-        result = run_cmd(f"envycontrol -s {mode} 2>&1", timeout=30)
+        # Static format string with whitelisted mode value (validated above);
+        # the trailing 2>&1 makes this a shell construct.
+        result = run_cmd(f"envycontrol -s {mode} 2>&1", timeout=30, shell_meta_ok=True)
         if not result or "error" in result.lower():
             logger.warning(f"Display mode change may have failed: {result}")
             return {"success": False, "error": f"envycontrol failed: {result or 'no output'}", "mode": mode}
@@ -954,10 +1061,29 @@ class HardwareManager:
 
     # --- Driver Management ---
     def restart_daemon(self):
-        run_cmd("systemctl restart archer-daemon.service")
+        # Schedule via systemd-run with a 2s delay so the D-Bus reply
+        # for RestartDaemon has time to flush before SIGTERM lands. The
+        # previous synchronous systemctl restart killed the daemon
+        # before the reply reached the GUI.
+        run_cmd(
+            "systemd-run --on-active=2s --no-block "
+            "systemctl restart archer-daemon.service"
+        )
 
     def restart_drivers_and_daemon(self):
-        run_cmd("modprobe -r linuwu_sense 2>/dev/null; modprobe linuwu_sense; systemctl restart archer-daemon.service")
+        # Same deferred-restart trick. modprobe runs before the daemon
+        # restart so the new daemon picks up the freshly-loaded module.
+        # Each step is its own systemd-run unit so a modprobe failure
+        # doesn't abort the daemon restart.
+        run_cmd(
+            "systemd-run --on-active=1s --no-block "
+            "/bin/sh -c 'modprobe -r linuwu_sense; modprobe linuwu_sense'",
+            shell_meta_ok=True,
+        )
+        run_cmd(
+            "systemd-run --on-active=3s --no-block "
+            "systemctl restart archer-daemon.service"
+        )
 
     def set_modprobe_parameter(self, param):
         """Set a permanent modprobe parameter for linuwu_sense."""

@@ -4,6 +4,8 @@ Archer D-Bus Service — exposes HardwareManager over system D-Bus with polkit a
 
 import json
 import logging
+import os
+import threading
 
 import dbus
 import dbus.service
@@ -299,7 +301,6 @@ class ArcherDBusService(dbus.service.Object):
     def SetAudioEnhancement(self, params_json, sender=None):
         if not self._authorize("set_audio_enhancement", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        import os
         params = json.loads(params_json)
         noise = params.get("noise_suppression", False)
         conf = "/etc/pipewire/filter-chain.conf.d/archer-noise-suppress.conf"
@@ -339,7 +340,6 @@ class ArcherDBusService(dbus.service.Object):
     def RestartDaemon(self, sender=None):
         if not self._authorize("restart_daemon", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        import threading
         threading.Thread(target=self.hw.restart_daemon, daemon=True).start()
         return self._json_response({"success": True})
 
@@ -348,7 +348,6 @@ class ArcherDBusService(dbus.service.Object):
     def RestartDriversAndDaemon(self, sender=None):
         if not self._authorize("restart_drivers_and_daemon", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        import threading
         threading.Thread(target=self.hw.restart_drivers_and_daemon, daemon=True).start()
         return self._json_response({"success": True})
 
