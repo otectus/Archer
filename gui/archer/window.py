@@ -35,6 +35,10 @@ class ArcherWindow(Adw.ApplicationWindow):
         self.client = ArcherClient()
         self.settings_data = None
         self._monitoring_timer = None
+        # Exponential backoff for reconnect attempts. Resets to index 0 on
+        # successful settings load.
+        self._reconnect_steps_s = (5, 10, 20, 60)
+        self._reconnect_idx = 0
 
         # Load CSS
         self._load_css()
@@ -152,6 +156,7 @@ class ArcherWindow(Adw.ApplicationWindow):
             self.status_label.set_label("Connected")
             self.status_label.remove_css_class("status-disconnected")
             self.status_label.add_css_class("status-connected")
+            self._reconnect_idx = 0  # success — reset backoff
 
             # Push settings to all pages
             self.dashboard_page.load_settings(data)
@@ -172,15 +177,30 @@ class ArcherWindow(Adw.ApplicationWindow):
             self.status_label.remove_css_class("status-connected")
             self.status_label.add_css_class("status-disconnected")
 
-            # Retry connection in 5 seconds
-            GLib.timeout_add_seconds(5, self._retry_connect)
+            # Surface the underlying init error in a toast (one per failure)
+            err = self.client.init_error
+            if err:
+                self.add_toast(Adw.Toast.new(f"Daemon offline: {err}"))
+
+            # Retry with exponential backoff
+            delay = self._reconnect_steps_s[
+                min(self._reconnect_idx, len(self._reconnect_steps_s) - 1)
+            ]
+            self._reconnect_idx += 1
+            GLib.timeout_add_seconds(delay, self._retry_connect)
 
         return False
 
     def _retry_connect(self):
-        thread = threading.Thread(target=self._fetch_settings, daemon=True)
+        thread = threading.Thread(target=self._reconnect_then_fetch, daemon=True)
         thread.start()
         return False
+
+    def _reconnect_then_fetch(self):
+        # Re-handshake the D-Bus connection before re-fetching, in case the
+        # daemon was restarted (which invalidates the old proxy).
+        self.client.reconnect()
+        self._fetch_settings()
 
     def _start_monitoring(self):
         """Start polling monitoring data every 2 seconds."""
