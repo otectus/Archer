@@ -3,6 +3,8 @@ Main application window with tab navigation.
 """
 
 import json
+import logging
+import subprocess
 import time
 
 import gi
@@ -14,6 +16,8 @@ import os
 import threading
 
 from archer.client import ArcherClient
+
+logger = logging.getLogger("archer-gui")
 from archer.pages.dashboard import DashboardPage
 from archer.pages.performance import PerformancePage
 from archer.pages.battery import BatteryPage
@@ -40,6 +44,7 @@ class ArcherWindow(Adw.ApplicationWindow):
         self._monitoring_timer = None
         self._stale_check_timer = None
         self._telemetry_signal_match = None
+        self._audio_signal_match = None
         self._last_telemetry_ts = 0.0
         # Mark "stale" if no signal arrives within STALE_AFTER_S. The daemon
         # emits every 2s, so 6s gives a 3-tick grace window.
@@ -220,14 +225,16 @@ class ArcherWindow(Adw.ApplicationWindow):
         2 seconds and would silently pile up zombie threads if any single
         D-Bus call hung. The daemon now pushes telemetry on its own timer.
         """
-        # Drop any previous subscription. After a daemon restart the proxy
-        # in the client is fresh, so the old signal match is dead.
-        if self._telemetry_signal_match is not None:
-            try:
-                self._telemetry_signal_match.remove()
-            except Exception:
-                pass
-            self._telemetry_signal_match = None
+        # Drop any previous subscriptions. After a daemon restart the proxy
+        # in the client is fresh, so old signal matches are dead.
+        for attr in ("_telemetry_signal_match", "_audio_signal_match"):
+            match = getattr(self, attr)
+            if match is not None:
+                try:
+                    match.remove()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
 
         iface = self.client.dbus_iface
         if iface is not None:
@@ -239,6 +246,12 @@ class ArcherWindow(Adw.ApplicationWindow):
                 self.add_toast(
                     Adw.Toast.new(f"Telemetry signal unavailable: {e}")
                 )
+            try:
+                self._audio_signal_match = iface.connect_to_signal(
+                    "AudioEnhancementChanged", self._on_audio_changed
+                )
+            except Exception as e:
+                logger.warning(f"AudioEnhancementChanged subscribe failed: {e}")
 
         # Mark "fresh" so the first stale-check tick after subscribe doesn't
         # immediately flip to "Stale".
@@ -264,6 +277,29 @@ class ArcherWindow(Adw.ApplicationWindow):
             self.status_label.remove_css_class("status-disconnected")
             self.status_label.add_css_class("status-connected")
         self.dashboard_page.update_monitoring(data)
+
+    def _on_audio_changed(self, enabled):
+        """Restart pipewire in this process's user session.
+
+        The daemon runs as root, so it can't poke the user's user-systemd
+        instance. Doing the restart here means the noise-suppression file
+        rename actually takes effect.
+        """
+        try:
+            subprocess.Popen(
+                ["systemctl", "--user", "restart", "pipewire.service"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            logger.warning(f"pipewire restart failed: {e}")
+            self.add_toast(
+                Adw.Toast.new(f"Could not restart pipewire: {e}")
+            )
+            return
+        msg = ("Noise suppression enabled — restarting pipewire."
+               if enabled else
+               "Noise suppression disabled — restarting pipewire.")
+        self.add_toast(Adw.Toast.new(msg))
 
     def _check_staleness(self):
         """Flip the status label to 'Stale' if no signal for STALE_AFTER_S."""

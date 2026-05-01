@@ -313,6 +313,11 @@ class ArcherDBusService(dbus.service.Object):
                 if os.path.exists(conf):
                     os.rename(conf, conf_disabled)
             self.hw.settings.set("audio_enhancement", {"noise_suppression": noise})
+            # Tell the GUI to restart pipewire in the calling user's
+            # session. The daemon runs as root, so `systemctl --user
+            # restart pipewire` here would target root's user manager
+            # and never touch the actual user's pipewire instance.
+            self.AudioEnhancementChanged(noise)
             return self._json_response({"success": True, "data": {"noise_suppression": noise}})
         except OSError as e:
             return self._json_response({"success": False, "error": str(e)})
@@ -359,4 +364,8 @@ class ArcherDBusService(dbus.service.Object):
 
     @dbus.service.signal(DBUS_IFACE, signature="s")
     def ProfileChanged(self, profile):
+        pass
+
+    @dbus.service.signal(DBUS_IFACE, signature="b")
+    def AudioEnhancementChanged(self, enabled):
         pass
