@@ -129,9 +129,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      # No actions/setup-python here on purpose: python3-dbus and python3-gi
+      # are apt packages built against the system interpreter, and a
+      # setup-python toolchain would shadow it and fail to import them.
       - name: Install D-Bus runtime
         run: |
           sudo apt-get update
@@ -155,7 +155,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools and maintained v4l2loopback source
-        run: pacman -Syu --noconfirm base-devel git clang llvm dkms v4l2loopback-dkms curl
+        run: pacman -Syu --noconfirm base-devel git clang llvm dkms v4l2loopback-dkms curl pahole
       - name: Install target headers
         env:
           TARGET: ${{ matrix.kernel }}

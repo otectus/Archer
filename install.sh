@@ -182,6 +182,11 @@ run_menu() {
 }
 
 # --- Module execution ---
+# kernel_battery_limit_path and kernel_collect_targets both take an optional
+# first argument used only to point them at a mock root from the tests. Calling
+# them bare here is correct, but shellcheck reads the bare call as a mistake
+# (SC2119) once -x pulls in lib/kernel.sh and it sees the ${1:-...} default.
+# shellcheck disable=SC2119
 install_shared_deps() {
     log "Installing shared system dependencies..."
     local deps=(base-devel dkms git curl python-pip) path package
