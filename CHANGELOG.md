@@ -7,6 +7,20 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Keyboard lighting (ENE K5130)
+
+- Drive keyboard backlight through the ENE K5130 controller, which is the only
+  path that applies colour and effect mode on PHN16S-71; the sysfs/WMI path
+  remains the fallback and reports success without changing the LEDs.
+- Decode the lid logo and colour the performance-button LED after the active
+  profile, following writers outside Archer so the LED cannot drift out of step.
+- Reapply lighting after resume, which neither the driver nor the controller
+  restores on its own.
+- Replace the WMI-documented effect list with the nine modes verified on the
+  controller, and clamp effect indexes saved by older builds.
+- Install `archer_ene.py` alongside the daemon; without it the optional import
+  fails silently and colour support disappears.
+
 ### Tray profiles and deployment
 
 - Add the right-click Open → Profile submenu → Exit menu with supported performance profiles, checked state, and synchronized GUI/tray changes.

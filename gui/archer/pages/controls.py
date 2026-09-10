@@ -18,6 +18,16 @@ PROFILES = [
     ("performance", "Turbo", "Maximum performance with more heat and fan noise."),
 ]
 
+# The effects the daemon can actually drive, in the order archer_ene.EFFECTS
+# maps them: the value saved for "mode" is an index into that list. The
+# previous list came from the WMI documentation, whose effect field this
+# firmware ignores, so its entries neither matched nor did anything. Keep the
+# two in step or the wrong effect runs.
+KEYBOARD_EFFECTS = [
+    "Static", "Breathing", "Neon", "Neon (fast)", "Wave",
+    "Meteor", "Zoom", "Shifting", "Twinkling",
+]
+
 
 def supported(form, features, feature):
     form.set_visible(feature in features)
@@ -214,7 +224,7 @@ class KeyboardPage(Page):
         self.zones.spin("brightness", "Brightness (%)", 0, 100)
         self.effects = self.form("Lighting effects", "Effect settings apply separately from static zone colors.",
                                  save=self._save_effect, action="Apply effect")
-        self.effects.combo("mode", "Effect", ["Static", "Breathing", "Neon", "Wave", "Shifting", "Zoom", "Meteor", "Twinkling"])
+        self.effects.combo("mode", "Effect", KEYBOARD_EFFECTS)
         self.effects.spin("speed", "Speed", 0, 9)
         self.effects.spin("brightness", "Brightness (%)", 0, 100)
         self.effects.color("color", "Effect color")
@@ -274,7 +284,12 @@ class KeyboardPage(Page):
         effect = saved.get("four_zone_mode") or {}
         self.effects.baseline_unknown = not bool(effect)
         color = "#{:02x}{:02x}{:02x}".format(*(int(effect.get(k, 0)) for k in ("red", "green", "blue")))
-        self.effects.load({"mode": effect.get("mode", 0), "speed": effect.get("speed", 5),
+        # The effect list shrank when the WMI-derived entries gave way to the
+        # verified ones, so a settings file written by an older build can hold
+        # an index past the end of the list. Clamp it rather than let the row
+        # silently fall back to the first entry.
+        mode = min(int(effect.get("mode", 0)), len(KEYBOARD_EFFECTS) - 1)
+        self.effects.load({"mode": mode, "speed": effect.get("speed", 5),
                            "brightness": effect.get("brightness", 100), "color": color,
                            "direction": 0 if effect.get("direction", 2) == 2 else 1})
         self.backlight.load({"enabled": bool(data.get("backlight_timeout"))})

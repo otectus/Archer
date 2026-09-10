@@ -28,6 +28,7 @@ module_install() {
     local _required=(
         "$SCRIPT_DIR/gui/archer_daemon.py"
         "$SCRIPT_DIR/gui/archer_dbus.py"
+        "$SCRIPT_DIR/gui/archer_ene.py"
         "$SCRIPT_DIR/gui/archer_gui.py"
         "$SCRIPT_DIR/gui/io.otectus.Archer1.conf"
         "$SCRIPT_DIR/gui/io.otectus.Archer1.policy"
@@ -73,6 +74,9 @@ module_install() {
     log "Installing Archer GUI to $_GUI_INSTALL_DIR..."
     run_sudo cp "$SCRIPT_DIR/gui/archer_daemon.py" "$_GUI_INSTALL_DIR/"
     run_sudo cp "$SCRIPT_DIR/gui/archer_dbus.py" "$_GUI_INSTALL_DIR/"
+    # The daemon imports archer_ene optionally; if it is missing, keyboard
+    # colour silently falls back to the WMI path that does not apply it.
+    run_sudo cp "$SCRIPT_DIR/gui/archer_ene.py" "$_GUI_INSTALL_DIR/"
     run_sudo cp "$SCRIPT_DIR/gui/archer_gui.py" "$_GUI_INSTALL_DIR/"
     run_sudo cp -r "$SCRIPT_DIR/gui/archer" "$_GUI_INSTALL_DIR/"
     run_sudo cp -r "$SCRIPT_DIR/gui/assets" "$_GUI_INSTALL_DIR/"

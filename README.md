@@ -102,6 +102,8 @@ GTK4/Adwaita control panel with a root daemon for real-time hardware management.
 
 Requires **GTK 4.12+ and libadwaita 1.6+**. See the [control center guide](docs/gui.md) for navigation, shortcuts, saving behavior, and GUI verification.
 
+Keyboard lighting is driven directly through the ENE K5130 controller where it is present, because the WMI path applies brightness but silently discards colour and effect mode. See the [ENE lighting protocol notes](docs/ENE_PROTOCOL.md).
+
 For installation, upgrades, and release checks, see the [deployment guide](docs/deployment.md).
 
 > **Note**: Requires a display server (X11 or Wayland). Install the driver module first for full hardware control.

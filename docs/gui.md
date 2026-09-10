@@ -8,6 +8,8 @@ Archer uses a native GTK4/libadwaita interface with six main destinations. The s
 | Performance | Select a thermal profile, apply automatic/maximum/manual fan settings, and enable Game Mode. |
 | Battery | Check charge and remaining time, protect charging at 80%, calibrate, and configure off-state USB charging. |
 | Display & Keyboard | Configure graphics mode and panel response, preview zone colors, apply effects, and set backlight timeout. |
+
+Zone colours and effects reach the keyboard through the ENE K5130 controller when it is available, falling back to the sysfs/WMI path otherwise; the effect list matches the modes verified on that controller. See [the protocol notes](ENE_PROTOCOL.md).
 | Audio | Enable microphone noise suppression and find the virtual input in your applications. |
 | System | Copy device information, change startup sound, check firmware, and access Advanced recovery tools. |
 
