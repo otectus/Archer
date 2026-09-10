@@ -1,0 +1,61 @@
+--- a/src/linuwu_sense.c
++++ b/src/linuwu_sense.c
+@@ -334,6 +334,11 @@
+  static u8 commun_fn_key_number;
+  static bool cycle_gaming_thermal_profile = true;
+  static bool predator_v4;
++ static bool native_platform_profile;
++ module_param(native_platform_profile, bool, 0444);
++ MODULE_PARM_DESC(native_platform_profile,
++     "Leave profiles to an existing native provider (for example amd-pmf)");
++
+  static bool nitro_v4;
+  static u64 supported_sensors;
+  
+@@ -2274,7 +2279,7 @@
+  static int
+  acer_predator_v4_platform_profile_probe(void *drvdata, unsigned long *choices)
+  {
+-     unsigned long supported_profiles;
++     unsigned long supported_profiles = 0;
+      int err;
+  
+      err = WMID_gaming_get_misc_setting(ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES,
+@@ -2343,6 +2348,10 @@
+  {
+      const int max_retries = 10;
+      int delay_ms = 100;
++     if (native_platform_profile) {
++         pr_info("Preserving native platform-profile provider; gaming profile writes disabled\n");
++         return 0;
++     }
+      if (!quirks->predator_v4 && !quirks->nitro_sense && !quirks->nitro_v4)
+          return 0;
+      for (int attempt = 1; attempt <= max_retries; attempt++) {
+@@ -2368,6 +2377,8 @@
+  
+  static int acer_thermal_profile_change(void)
+  {
++     if (!platform_profile_support)
++         return -EOPNOTSUPP;
+      /*
+       * This mode key can rotate each mode or toggle turbo mode.
+       * On battery, only ECO and BALANCED mode are available.
+@@ -3365,6 +3376,8 @@
+  };
+  
+  static int acer_predator_state_update(int value){
++     if (native_platform_profile)
++         return 0;
+      u8 current_tp;
+      int tp, err;
+      err = WMID_gaming_get_misc_setting(
+@@ -3409,6 +3422,8 @@
+  }
+  
+  static acpi_status acer_predator_state_restore(int value){
++     if (!platform_profile_support)
++         return acer_set_fan_speed(0, 0);
+      int err = WMID_gaming_set_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, 
+                                         value == 0 ? current_states.battery_state.thermal_profile : current_states.ac_state.thermal_profile);
+      if (err)

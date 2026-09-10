@@ -1,0 +1,126 @@
+--- a/src/linuwu_sense.c
++++ b/src/linuwu_sense.c
+@@ -3363,7 +3363,11 @@
+  static ssize_t predator_fan_speed_show(struct device *dev,
+                                             struct device_attribute *attr,
+                                             char *buf) {
+-   return sprintf(buf, "%d,%d\n", cpu_fan_speed, gpu_fan_speed);                           
++   ssize_t count;
++   mutex_lock(&acer_fan_lock);
++   count = sysfs_emit(buf, "%d,%d\n", cpu_fan_speed, gpu_fan_speed);
++   mutex_unlock(&acer_fan_lock);
++   return count;
+  }
+  
+  
+@@ -3469,22 +3473,18 @@
+  }
+  
+  static acpi_status acer_predator_state_restore(int value){
+-     if (!platform_profile_support)
+-         return acer_set_fan_speed(0, 0);
+-     int err = WMID_gaming_set_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, 
+-                                        value == 0 ? current_states.battery_state.thermal_profile : current_states.ac_state.thermal_profile);
+-     if (err)
+-         return err;
+- 
+-     /* Userspace may have exited since these values were saved. */
+      acpi_status status = acer_set_fan_speed(0, 0);
+-     if(ACPI_FAILURE(status)){
+-         return AE_ERROR;
+-     } 
+- 
+-     return AE_OK;
+- }
+- 
++     int err;
++
++     /* Restore cooling even if the subsequent profile operation fails. */
++     if (ACPI_FAILURE(status) || !platform_profile_support)
++         return status;
++     err = WMID_gaming_set_misc_setting(ACER_WMID_MISC_SETTING_PLATFORM_PROFILE,
++         value == 0 ? current_states.battery_state.thermal_profile :
++                      current_states.ac_state.thermal_profile);
++     return err ? AE_ERROR : AE_OK;
++ }
++
+  static int acer_predator_state_load(void)
+  {
+      u64 on_AC;
+@@ -4170,6 +4170,8 @@
+  static int acer_platform_probe(struct platform_device *device)
+  {
+      int err;
++     bool predator_created = false, nitro_v4_created = false;
++     bool nitro_created = false, kb_created = false;
+ 
+      /* Validate the existing v4 sensor protocol before exposing the paired
+       * fan ABI on this newly supported model. A partial/unknown topology must
+@@ -4220,24 +4222,28 @@
+          err = sysfs_create_group(&device->dev.kobj, &preadtor_sense_attr_group);
+          if (err)
+              goto error_predator_sense;
++         predator_created = true;
+          acer_predator_state_load();
+      }
+      if (has_cap(ACER_CAP_NITRO_SENSE_V4)) {
+          err = sysfs_create_group(&device->dev.kobj, &nitro_sense_v4_attr_group);
+          if (err)
+              goto error_predator_sense;
++         nitro_v4_created = true;
+          acer_predator_state_load();
+      }
+      if (has_cap(ACER_CAP_NITRO_SENSE)){
+          err = sysfs_create_group(&device->dev.kobj, &nitro_sense_attr_group);
+          if (err)
+              goto error_nitro_sense;
++         nitro_created = true;
+      }
+  
+      if(quirks->four_zone_kb){
+          err = sysfs_create_group(&device->dev.kobj, &four_zoned_kb_attr_group);
+          if (err)
+              goto error_four_zone;
++         kb_created = true;
+          four_zone_kb_state_load();
+      }
+  
+@@ -4250,7 +4256,19 @@
+      return 0;
+  
+  error_hwmon:
++ error_four_zone:
++ error_nitro_sense:
++ error_predator_sense:
+  error_platform_profile:
++     acer_restore_auto();
++     if (kb_created)
++         sysfs_remove_group(&device->dev.kobj, &four_zoned_kb_attr_group);
++     if (nitro_created)
++         sysfs_remove_group(&device->dev.kobj, &nitro_sense_attr_group);
++     if (nitro_v4_created)
++         sysfs_remove_group(&device->dev.kobj, &nitro_sense_v4_attr_group);
++     if (predator_created)
++         sysfs_remove_group(&device->dev.kobj, &preadtor_sense_attr_group);
+      acer_rfkill_exit();
+  error_rfkill:
+      if (has_cap(ACER_CAP_BRIGHTNESS))
+@@ -4258,17 +4276,10 @@
+  error_brightness:
+      if (has_cap(ACER_CAP_MAILLED))
+          acer_led_exit();
+- error_four_zone:
+-     return err;
+- error_nitro_sense:
+-     return err;
+- error_predator_sense:
+-     return err;
+  error_mailled:
+      return err;
+  }
+- 
+- 
++
+  static void acer_platform_remove(struct platform_device *device)
+  {
+      acer_restore_auto();

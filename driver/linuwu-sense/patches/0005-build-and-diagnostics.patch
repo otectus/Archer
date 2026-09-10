@@ -1,0 +1,41 @@
+--- a/src/linuwu_sense.c
++++ b/src/linuwu_sense.c
+@@ -420,10 +420,20 @@
+      u8 four_zone_kb;
+  };
+  
++ static char *sense_quirk = "none";
++ static const struct kernel_param_ops sense_quirk_ops = {
++     .get = param_get_charp,
++ };
++ module_param_cb(sense_quirk, &sense_quirk_ops, &sense_quirk, 0444);
++ MODULE_PARM_DESC(sense_quirk, "Selected Sense implementation (diagnostic only)");
+  static struct quirk_entry *quirks;
+  
+  static void __init set_quirks(void)
+  {
++     sense_quirk = quirks->nitro_v4 ? "nitro-v4" :
++                   quirks->nitro_sense ? "nitro" :
++                   quirks->predator_v4 ? "predator-v4" : "none";
++     pr_info("Selected Sense quirk: %s\n", sense_quirk);
+      if (quirks->mailled)
+          interface->capability |= ACER_CAP_MAILLED;
+  
+@@ -3829,7 +3839,7 @@
+      char *input_ptr = input_buf;
+      size_t len = min(count, sizeof(input_buf) - 1);
+  
+-     strncpy(input_buf, buf, len);
++     memcpy(input_buf, buf, len);
+  
+      if(input_buf[len-1] == '\n'){
+          input_buf[len-1] = '\0';
+@@ -4002,7 +4012,7 @@
+      struct per_zone_color colors;
+      char *input_ptr = str_buf;
+      len = min(count, sizeof(str_buf) - 1);
+-     strncpy(str_buf, buf, len);
++     memcpy(str_buf, buf, len);
+      if(str_buf[len-1] == '\n'){
+          str_buf[len-1] = '\0';
+      } else {

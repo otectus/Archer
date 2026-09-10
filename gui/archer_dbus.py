@@ -141,9 +141,17 @@ class ArcherDBusService(dbus.service.Object):
         }})
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def GetFirmwareInfo(self, sender=None):
-        return self._json_response({"success": True, "data": self.hw.get_firmware_info()})
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetFirmwareInfo(self, reply, failure, sender=None):
+        def check():
+            try:
+                data = self.hw.get_firmware_info()
+                response = self._json_response({"success": data.get("status") != "error",
+                                                "data": data, "error": data.get("error", "")})
+                GLib.idle_add(lambda: reply(response))
+            except Exception as error:
+                GLib.idle_add(failure, dbus.exceptions.DBusException(str(error)))
+        threading.Thread(target=check, daemon=True).start()
 
     # --- Mutating Methods (polkit-protected) ---
 
@@ -173,16 +181,18 @@ class ArcherDBusService(dbus.service.Object):
     def SetFanCurve(self, params_json, sender=None):
         if not self._authorize("set_fan_curve", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        params = json.loads(params_json)
-        target = params.get("target", "cpu")
-        points = params.get("points", [])
-        enabled = params.get("enabled", True)
-        if enabled:
-            self.hw.start_fan_curve(target, points)
-            self.hw.settings.set(f"fan_curve_{target}", {"enabled": True, "points": points})
-        else:
-            self.hw.stop_fan_curve(target)
-        return self._json_response({"success": True})
+        try:
+            params = json.loads(params_json)
+            if not isinstance(params, dict):
+                raise ValueError("Expected an object")
+            target = params.get("target", "cpu")
+            enabled = params.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ValueError("enabled must be a boolean")
+            ok = self.hw.start_fan_curve(target, params.get("points", [])) if enabled else self.hw.stop_fan_curve(target)
+            return self._json_response({"success": ok, "error": None if ok else "Invalid curve or unavailable fan interface"})
+        except (ValueError, TypeError) as error:
+            return self._json_response({"success": False, "error": str(error)})
 
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
                          sender_keyword="sender")

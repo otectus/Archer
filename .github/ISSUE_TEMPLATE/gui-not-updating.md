@@ -1,6 +1,6 @@
 ---
 name: GUI not updating / daemon unreachable
-about: Use this when the Archer GUI shows stale data, says "Daemon Offline" / "Stale", or won't open at all.
+about: Use this when the Archer GUI shows stale data, says "Offline" / "Stale", or won't open at all.
 title: "[GUI] "
 labels: [gui]
 assignees: []
@@ -19,7 +19,7 @@ fix lands.
 
 ## What you expected
 
-<!-- e.g. "Dashboard should show live CPU/GPU temperatures." -->
+<!-- e.g. "Overview should show live CPU/GPU temperatures." -->
 
 ## Environment
 
@@ -27,6 +27,7 @@ fix lands.
 - **Kernel** (`uname -r`):
 - **Archer commit**: <!-- run `git -C /path/to/Archer rev-parse --short HEAD` -->
 - **Hardware**: <!-- e.g. Acer Nitro 5 AN515-58 -->
+- **Desktop/compositor and tray host**: <!-- Include versions and whether the right-click Open/Profile/Exit menu appears. -->
 
 ## Daemon status
 
@@ -82,5 +83,5 @@ PASTE OUTPUT HERE (if empty, paste any error printed to the terminal when you ra
 ## Did you try
 
 - [ ] `sudo systemctl reload dbus.service && sudo systemctl restart archer-daemon`
-- [ ] Re-running the installer (`./install.sh --modules gui --no-confirm`)
+- [ ] Using Exit/Quit, re-running the installer (`./install.sh --modules gui --no-confirm`), and launching `archer-gui` again
 - [ ] Reading [README → Troubleshooting](https://github.com/otectus/Archer#troubleshooting)

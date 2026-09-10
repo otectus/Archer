@@ -1,0 +1,139 @@
+--- a/src/linuwu_sense.c
++++ b/src/linuwu_sense.c
+@@ -36,6 +36,7 @@
+  #include <linux/unaligned.h>
+  #include <linux/bitfield.h>
+  #include <linux/bitmap.h>
++ #include <linux/mutex.h>
+  
+  MODULE_AUTHOR("Carlos Corbacho");
+  MODULE_DESCRIPTION("Acer Laptop WMI Extras Driver");
+@@ -3227,7 +3228,7 @@
+  static u64 fan_val_calc(int percentage, int fan_index) {
+      return (((percentage * 25600) / 100) & 0xFF00) + fan_index;
+  }
+- static acpi_status acer_set_fan_speed(int t_cpu_fan_speed, int t_gpu_fan_speed){
++ static acpi_status acer_do_set_fan_speed(int t_cpu_fan_speed, int t_gpu_fan_speed){
+      
+      acpi_status status;
+  
+@@ -3312,6 +3313,42 @@
+      return AE_OK;	
+  }
+  
++ /* Fan commands are multi-step transactions. Never retain a partial manual
++  * transition after an ACPI failure. The auto command is upstream's command.
++  */
++ static DEFINE_MUTEX(acer_fan_lock);
++
++ static bool acer_has_fan_control(void)
++ {
++     return wmi_has_guid(WMID_GUID4) &&
++         (has_cap(ACER_CAP_PREDATOR_SENSE) || has_cap(ACER_CAP_NITRO_SENSE) ||
++          has_cap(ACER_CAP_NITRO_SENSE_V4));
++ }
++
++ static acpi_status acer_set_fan_speed(int cpu, int gpu)
++ {
++     acpi_status status;
++
++     if (cpu < 0 || cpu > 100 || gpu < 0 || gpu > 100)
++         return AE_BAD_PARAMETER;
++     if (!acer_has_fan_control())
++         return AE_SUPPORT;
++     mutex_lock(&acer_fan_lock);
++     status = acer_do_set_fan_speed(cpu, gpu);
++     if (ACPI_FAILURE(status) && (cpu || gpu)) {
++         if (ACPI_FAILURE(acer_do_set_fan_speed(0, 0)))
++             pr_err("Fan write failed AND automatic fan restoration failed\n");
++     }
++     mutex_unlock(&acer_fan_lock);
++     return status;
++ }
++
++ static void acer_restore_auto(void)
++ {
++     if (acer_has_fan_control() && ACPI_FAILURE(acer_set_fan_speed(0, 0)))
++         pr_err("Unable to restore automatic fan control\n");
++ }
++
+  static ssize_t predator_fan_speed_show(struct device *dev,
+                                             struct device_attribute *attr,
+                                             char *buf) {
+@@ -3327,16 +3364,13 @@
+      char input[9];
+      char *token;
+      char* input_ptr = input;
+-     size_t len = min(count, sizeof(input) - 1);
+-     strncpy(input, buf, len);
+- 
+-     if(input[len-1] == '\n'){
+-         input[len-1] = '\0';
+-     } else {
+-         input[len] = '\0';
+-     }
+- 
+- 
++     if (!count || count >= sizeof(input) || memchr(buf, '\0', count))
++         return -EINVAL;
++     memcpy(input, buf, count);
++     input[count] = '\0';
++     if (input[count - 1] == '\n')
++         input[count - 1] = '\0';
++
+      token = strsep(&input_ptr, ",");
+      if (!token || kstrtoint(token, 10, &t_cpu_fan_speed) || t_cpu_fan_speed < 0 || t_cpu_fan_speed > 100) {
+          pr_err("Invalid CPU speed value.\n");
+@@ -3349,6 +3383,8 @@
+          return -EINVAL;
+      }
+  
++     if (input_ptr)
++         return -EINVAL;
+      acpi_status status = acer_set_fan_speed(t_cpu_fan_speed, t_gpu_fan_speed);
+      if(ACPI_FAILURE(status)){
+          return -ENODEV;
+@@ -3429,8 +3465,8 @@
+      if (err)
+          return err;
+  
+-     acpi_status status = acer_set_fan_speed(value == 0 ? current_states.battery_state.cpu_fan_speed : current_states.ac_state.cpu_fan_speed, 
+-                                 value == 0 ? current_states.battery_state.gpu_fan_speed : current_states.ac_state.gpu_fan_speed);
++     /* Userspace may have exited since these values were saved. */
++     acpi_status status = acer_set_fan_speed(0, 0);
+      if(ACPI_FAILURE(status)){
+          return AE_ERROR;
+      } 
+@@ -4192,6 +4228,7 @@
+  
+  static void acer_platform_remove(struct platform_device *device)
+  {
++     acer_restore_auto();
+      if (has_cap(ACER_CAP_MAILLED))
+          acer_led_exit();
+      if (has_cap(ACER_CAP_BRIGHTNESS))
+@@ -4201,7 +4238,7 @@
+          acer_predator_state_save();
+      }
+      if (has_cap(ACER_CAP_NITRO_SENSE)) {
+-        sysfs_remove_group(&device->dev.kobj, &nitro_sense_v4_attr_group);
++        sysfs_remove_group(&device->dev.kobj, &nitro_sense_attr_group);
+         acer_predator_state_save();
+      }
+      if (has_cap(ACER_CAP_NITRO_SENSE_V4)) {
+@@ -4219,6 +4256,7 @@
+  #ifdef CONFIG_PM_SLEEP
+  static int acer_suspend(struct device *dev)
+  {
++     acer_restore_auto();
+      u32 value;
+      struct acer_data *data = &interface->data;
+  
+@@ -4266,6 +4304,7 @@
+  
+  static void acer_platform_shutdown(struct platform_device *device)
+  {
++     acer_restore_auto();
+      struct acer_data *data = &interface->data;
+  
+      if (!data)

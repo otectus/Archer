@@ -8,6 +8,13 @@ setup() {
     VERBOSE=0
     LOG_FILE=""
     REBOOT_REQUIRED=0
+    export KERNEL_MODULES_ROOT="$BATS_TEST_TMPDIR/modules"
+    export KERNEL_SYS_ROOT="$BATS_TEST_TMPDIR/sys"
+    export KERNEL_PROC_VERSION="$BATS_TEST_TMPDIR/version"
+    mkdir -p "$KERNEL_MODULES_ROOT" "$KERNEL_SYS_ROOT"
+    echo 'Linux version 7.0 (gcc)' > "$KERNEL_PROC_VERSION"
+    uname() { echo 6.12.1-arch1-1; }
+    pacman() { return 1; }
     # Source utils first (detect.sh depends on it)
     source "$BATS_TEST_DIRNAME/../lib/utils.sh"
     # Override error() to not exit during tests
@@ -48,7 +55,10 @@ setup() {
     [ "$KERNEL_HEADERS" = "linux-cachyos-headers" ]
 }
 
-@test "detect_kernel enables thermal profiles for kernel 6.8+" {
+@test "detect_kernel enables thermal profiles only for an exposed capability" {
+    mkdir -p "$KERNEL_SYS_ROOT/firmware/acpi"
+    echo balanced > "$KERNEL_SYS_ROOT/firmware/acpi/platform_profile"
+    echo balanced > "$KERNEL_SYS_ROOT/firmware/acpi/platform_profile_choices"
     uname() { echo "6.8.0-arch1-1"; }
     export -f uname
     source "$BATS_TEST_DIRNAME/../lib/detect.sh"
@@ -138,15 +148,7 @@ EOF
     export -f uname
     pacman() { echo ""; }
     export -f pacman
-    # Mock /proc/version to contain "clang"
-    # grep -q "clang" /proc/version -> $1=-q, $2=clang, $3=/proc/version
-    grep() {
-        if [[ "${*}" == *"/proc/version"* ]]; then
-            return 0
-        fi
-        command grep "$@"
-    }
-    export -f grep
+    echo "Linux version (Clang 22)" > "$KERNEL_PROC_VERSION"
     source "$BATS_TEST_DIRNAME/../lib/detect.sh"
     detect_kernel
     [ "$IS_CLANG_KERNEL" -eq 1 ]
@@ -201,4 +203,13 @@ EOF
     build_recommendations
     [[ " ${OPTIONAL_MODULES[*]} " == *" driver "* ]]
     ! [[ " ${RECOMMENDED_MODULES[*]} " == *" driver "* ]]
+}
+
+@test "ANV16S-41 is a Nitro family with or without marketing prefix" {
+    source "$BATS_TEST_DIRNAME/../lib/detect.sh"
+    for product in 'Nitro ANV16S-41' 'ANV16S-41' 'Nitro ANV15-51' 'Nitro ANV15-41'; do
+        ACER_PRODUCT_NAME="$product"
+        detect_model_family
+        [ "$MODEL_FAMILY" = nitro ]
+    done
 }

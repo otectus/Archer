@@ -1,0 +1,68 @@
+--- a/src/linuwu_sense.c
++++ b/src/linuwu_sense.c
+@@ -342,6 +342,7 @@
+ 
+  static bool nitro_v4;
+  static u64 supported_sensors;
++ static bool fan_interface_ready = true;
+  
+  module_param(mailled, int, 0444);
+  module_param(brightness, int, 0444);
+@@ -3320,7 +3321,7 @@
+ 
+  static bool acer_has_fan_control(void)
+  {
+-     return wmi_has_guid(WMID_GUID4) &&
++     return fan_interface_ready && wmi_has_guid(WMID_GUID4) &&
+          (has_cap(ACER_CAP_PREDATOR_SENSE) || has_cap(ACER_CAP_NITRO_SENSE) ||
+           has_cap(ACER_CAP_NITRO_SENSE_V4));
+  }
+@@ -3684,8 +3685,17 @@
+      .name = "predator_sense", .attrs = predator_sense_attrs
+  };
+  
++ static umode_t acer_sense_is_visible(struct kobject *kobj,
++                                      struct attribute *attr, int index)
++ {
++     if (attr == &fan_speed.attr && !fan_interface_ready)
++         return 0;
++     return attr->mode;
++ }
++
+  static struct attribute_group nitro_sense_v4_attr_group = {
+-     .name = "nitro_sense", .attrs = predator_sense_attrs
++     .name = "nitro_sense", .attrs = predator_sense_attrs,
++     .is_visible = acer_sense_is_visible
+  };
+  
+  /* nitro sense attributes */
+@@ -4150,6 +4160,29 @@
+  static int acer_platform_probe(struct platform_device *device)
+  {
+      int err;
++
++     /* Validate the existing v4 sensor protocol before exposing the paired
++      * fan ABI on this newly supported model. A partial/unknown topology must
++      * retain firmware control, not receive commands for an absent fan.
++      */
++     if (dmi_match(DMI_SYS_VENDOR, "Acer") &&
++         dmi_match(DMI_PRODUCT_NAME, "Nitro ANV16S-41")) {
++         u64 result = 0;
++         u64 fans = BIT(ACER_WMID_SENSOR_CPU_FAN_SPEED - 1) |
++                    BIT(ACER_WMID_SENSOR_GPU_FAN_SPEED - 1);
++
++         fan_interface_ready = false;
++         if (wmi_has_guid(WMID_GUID4) &&
++             !WMID_gaming_get_sys_info(
++                 ACER_WMID_CMD_GET_PREDATOR_V4_SUPPORTED_SENSORS, &result)) {
++             u64 sensors = FIELD_GET(ACER_PREDATOR_V4_SUPPORTED_SENSORS_BIT_MASK, result);
++             fan_interface_ready = (sensors & fans) == fans;
++             dev_info(&device->dev, "ANV16S-41 v4 sensors=%#llx paired fans=%d\n",
++                      sensors, fan_interface_ready);
++         }
++         if (!fan_interface_ready)
++             dev_warn(&device->dev, "ANV16S-41 fan protocol/topology unavailable; manual fans disabled\n");
++     }
+  
+      if (has_cap(ACER_CAP_MAILLED)) {
+          err = acer_led_init(&device->dev);

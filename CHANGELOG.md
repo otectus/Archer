@@ -5,6 +5,49 @@ All notable changes to Archer Compatibility Suite are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Tray profiles and deployment
+
+- Add the right-click Open → Profile submenu → Exit menu with supported performance profiles, checked state, and synchronized GUI/tray changes.
+- Reuse asynchronous profile saves and authorization/error handling; disable unavailable or pending writes and reveal failed changes in the GUI.
+- Correct recursive D-Bus menu variants, subtree/depth/property requests, update signals, and one-shot event dispatch.
+- Test the menu over a private session bus, hidden-window profile changes, capability changes, failure recovery, and exit cleanup.
+- Validate required GUI package files before installation, restart the daemon on upgrades, and simplify boot ordering to depend on D-Bus.
+- Refresh user/contributor documentation and add a deployment and release checklist.
+
+### Kernel compatibility (issue #9)
+
+- Pin and validate external driver sources with an idempotent shared patch layer.
+- Fix all removed Linuwu string calls and counted RGB input hazards; preserve
+  older platform-profile, WMI, backlight and platform-removal APIs.
+- Validate exact headers and select compilers for every installed kernel; retain
+  DKMS diagnostics and partial-install cleanup records, with ownership checks.
+- Prefer native battery/profile capabilities, preserve fan safeguards, handle
+  disappearing sysfs nodes, and rebuild all initramfs targets with errors visible.
+- Add kernel/module regression tests and real CI builds, including older baselines.
+
+
+### ANV16S-41 fan support
+
+- Add exact Acer Nitro ANV16S-41 driver support using the existing Nitro v4 quirk, guarded by the existing sensor protocol. Physical BIOS V1.12 validation remains pending.
+- Pin Linuwu-Sense to `73a25ec243a44ba2b1703e8d0a76fa2735062506` with isolated, validated patches and DKMS `1.0.archer2`; migrate legacy versions and build against each target kernel's headers/toolchain.
+- Preserve independent native platform profiles and remove the driver/thermal blacklist conflict. Follow provider choices in the GUI.
+- Validate paired fan writes and curves; repair watchdog error handling and restore firmware Auto on stop, failed manual writes, daemon restart/exit and driver lifecycle transitions. Do not replay stale manual fan settings.
+- Add explicit driver diagnostics, a privacy-scoped support report, mock sysfs/C/DKMS tests and a progressive hardware validation guide.
+- Retain other modules' uninstall records during driver updates and report installer/cleanup failures accurately.
+
+### Control center overhaul
+
+- Replace the ten-tab GUI with six adaptive destinations and task-focused subpages.
+- Follow system appearance by default; add Light/Dark overrides and respect high contrast and system accents.
+- Unify guarded loading, staged edits, pending actions, error recovery, and stale-service handling.
+- Add native monitoring cards, theme-aware charts, keyboard previews, and persistent graphics restart status.
+- Move firmware scans out of initial settings loading and run explicit scans asynchronously.
+- Correct graphics/audio payload handling and label persistent driver overrides accurately.
+- Add hardware-free GTK, data-contract, visual-layout and firmware-responsiveness checks. GTK 4.12/libadwaita 1.6 are now the minimum GUI versions.
+
+
 ## [2.0.1] — 2026-05-01
 
 Hardening sweep triggered by [#4](https://github.com/otectus/Archer/issues/4)

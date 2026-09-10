@@ -35,7 +35,7 @@ Archer uses a root daemon with a D-Bus system service for secure hardware contro
 ```
 Archer GUI (GTK4/Adwaita)  ──  D-Bus (io.otectus.Archer1)  ──  Archer Daemon (root)
        │                              │                              │
-  11 pages                     polkit auth                    sysfs / hwmon
+  6 destinations                     polkit auth                    sysfs / hwmon
   system tray               session-cached                  Linuwu-Sense driver
 ```
 
@@ -49,8 +49,12 @@ Archer GUI (GTK4/Adwaita)  ──  D-Bus (io.otectus.Archer1)  ──  Archer Da
 ### 1. Linuwu-Sense Kernel Driver (driver)
 Installs the [Linuwu-Sense](https://github.com/0x7375646F/Linuwu-Sense) kernel driver via DKMS for fan speed control, RGB keyboard access, and battery management at the hardware level. Blacklists the default `acer_wmi` module for exclusive hardware access.
 
+ANV16S-41 fan support is implemented through an exact driver DMI match and the existing Nitro v4 WMI protocol. It is **awaiting physical validation on the issue reporter's BIOS V1.12 hardware**. Archer installs a pinned upstream revision with an isolated patch series as `linuwu-sense/1.0.archer2`; DKMS 1.0 is migrated, matching kernel headers are required, and activation requires a reboot. See the [driver package/update guide](driver/linuwu-sense/README.md) and [ANV16S-41 diagnostics and safe validation procedure](docs/anv16s-41.md).
+
+Manual speeds are not restored across daemon starts. Stopping manual control or either curve restores both fans to firmware Auto; failed writes trigger an Auto attempt. Independent native platform-profile providers are preserved.
+
 ### 2. Battery Charge Limit (battery)
-Installs the [acer-wmi-battery](https://github.com/frederik-h/acer-wmi-battery) DKMS module to limit charging to 80%, extending battery lifespan. Persists across reboots via a udev rule. Prefers AUR installation when `paru` or `yay` is available.
+Installs the [acer-wmi-battery](https://github.com/frederik-h/acer-wmi-battery) DKMS module to limit charging to 80%, extending battery lifespan. Persists across reboots via a udev rule. Prefers an existing standard battery charge threshold or Linuwu interface; otherwise installs a pinned upstream source with Archer DKMS packaging.
 
 ### 3. GPU Switching (gpu)
 Installs [EnvyControl](https://github.com/bayasdev/envycontrol) for NVIDIA Optimus hybrid graphics management. Supports three modes:
@@ -83,23 +87,22 @@ Installs [TLP](https://linrunner.de/tlp/) with an Acer-optimized configuration:
 - Runtime PM for PCI devices (NVIDIA GPU power saving)
 
 ### 8. Kernel Thermal Profiles (thermal)
-Enables native `acer_wmi` thermal profile support on kernel 6.8+. Provides access to Eco, Silent, Balanced, Performance, and Turbo modes via the standard `platform_profile` sysfs interface and the physical mode button.
-
-> **Conflict Warning**: This module requires `acer_wmi` to be loaded, which conflicts with the driver module (Linuwu-Sense blacklists `acer_wmi`). You cannot use both simultaneously.
+Reuses working native or Linuwu-Sense platform profiles. It never removes the Linuwu blacklist to load a second Acer WMI owner, and does not force Predator generation flags on Nitro. The driver module preserves an existing independent provider such as AMD PMF; available choices come from sysfs.
 
 ### 9. Archer GUI (gui)
 GTK4/Adwaita control panel with a root daemon for real-time hardware management. The daemon exposes a D-Bus service (`io.otectus.Archer1`) with polkit authorization for secure access. Features include:
-- **Dashboard** — CPU/GPU temperatures, usage, fan RPM, battery status with live charts
-- **Performance** — Thermal profile selection, fan control (automatic/manual/custom curves)
-- **Battery** — Charge limit toggle, battery calibration, USB charging levels
-- **Keyboard** — 4-zone RGB color pickers, lighting effects, backlight timeout
-- **Display** — GPU mode switching (integrated/hybrid/nvidia) with reboot gating
-- **Game Mode** — One-click performance optimization (governor, EPP, NVIDIA persistence)
-- **Audio** — Noise suppression toggle for the PipeWire virtual source
-- **Firmware** — BIOS version display, fwupd update status
-- **System** — LCD override, boot sound, system info, driver version
-- **Internals** — Driver parameter forcing, daemon/driver restart controls
-- **System tray** — Close-to-tray via D-Bus StatusNotifierItem, works on Wayland
+- **Overview** — Live CPU/GPU, fan and battery summaries, with temperature history
+- **Performance** — Thermal profiles, automatic/manual fan control, and Game Mode
+- **Battery** — Charge protection, calibration, and off-state USB charging
+- **Display & Keyboard** — Graphics configuration with persistent reboot status, panel response, zone colors and lighting effects
+- **Audio** — Noise suppression with clear setup and audio restart feedback
+- **System** — Device information, startup behavior, firmware checks, and Advanced driver/recovery tools
+- **Appearance** — System theme by default, optional Light/Dark overrides, high contrast and supported system accent colors
+- **System tray** — Right-click for **Open**, **Profile** (Eco, Quiet, Balanced, Performance, Turbo as supported), and **Exit**; current profile stays synchronized with the GUI. Close-to-tray and tray-host recovery are supported.
+
+Requires **GTK 4.12+ and libadwaita 1.6+**. See the [control center guide](docs/gui.md) for navigation, shortcuts, saving behavior, and GUI verification.
+
+For installation, upgrades, and release checks, see the [deployment guide](docs/deployment.md).
 
 > **Note**: Requires a display server (X11 or Wayland). Install the driver module first for full hardware control.
 
@@ -184,8 +187,9 @@ busctl introspect io.otectus.Archer1 /io/otectus/Archer1  # D-Bus methods visibl
 # Archer GUI
 archer-gui                                     # Launch the control panel
 
-# Battery
-cat /sys/bus/wmi/drivers/acer-wmi-battery/health_mode  # Should read '1'
+# Battery (use the node provided by your device)
+cat /sys/class/power_supply/BAT*/charge_control_end_threshold  # 80 when native charge protection is enabled
+# Driver fallbacks: Linuwu battery_limiter or acer-wmi-battery health_mode reads 1
 
 # GPU
 envycontrol --query                            # Should show configured mode
@@ -259,23 +263,23 @@ Archer/
     io.otectus.Archer1.policy     # Polkit action definitions
     archer-daemon.service         # Systemd service unit
     io.github.archer.desktop      # Desktop entry
-    archer/                       # GUI modules (11 pages, client, tray, widgets)
+    archer/                       # GUI modules (6 destinations, client, tray, widgets)
     assets/                       # Icons (SVG, PNG)
 ```
 
 ## Technical Notes
 
-- **Secure Boot**: If Secure Boot is enabled, you must manually sign DKMS kernel modules (linuwu-sense, acer-wmi-battery) or disable Secure Boot.
+- **Secure Boot**: DKMS handles module signing, but its certificate must be enrolled. A rejected signing key is a module-load failure, separate from a compiler/API failure; see the [diagnostic guide](docs/kernel-compatibility.md#reporting-a-future-failure).
 - **BIOS Configuration**: Some Acer laptops ship with RAID storage mode enabled. Switch to AHCI mode in BIOS for Linux compatibility. Disable Fast Startup for dual-boot setups.
-- **CachyOS**: The installer automatically detects CachyOS kernels and installs the correct `-cachyos-headers` package. Clang/LLVM compiler flags are applied when a Clang-built kernel is detected.
-- **AUR Helpers**: Modules that install AUR packages (battery, GPU, audio-enhance) prefer `paru` or `yay` if available, with manual fallback otherwise. The installer never installs an AUR helper for you.
+- **Kernel compatibility**: Capability detection supports continued kernel evolution without a version allowlist. Matching headers are required for every installed kernel, including CachyOS variants. Toolchains follow each build target. After a kernel upgrade, reboot into the installed kernel before loading new modules. See [kernel support, validation and DKMS troubleshooting](docs/kernel-compatibility.md).
+- **AUR Helpers**: Modules that install AUR packages (GPU, audio-enhance) prefer `paru` or `yay` if available, with manual fallback otherwise. Battery driver sources use pinned DKMS packaging. The installer never installs an AUR helper for you.
 - **D-Bus / Polkit**: The daemon registers as `io.otectus.Archer1` on the system bus. Read-only methods are unprivileged. Mutating methods require polkit authorization, cached per session (`auth_admin_keep`). System-level operations (restart, modprobe) always prompt (`auth_admin`).
 - **Install Manifest**: Stored at `/var/lib/archer/install-manifest.json` (root-owned, 0644). Tracks installed modules, files, DKMS modules, and packages for clean uninstallation. Manifests from older user-home locations (`~/.local/share/archer/`, legacy `~/.local/share/damx/`) are migrated automatically on the next install or uninstall run.
 - **Fan Curve Safety**: The fan curve engine includes a watchdog that restores EC automatic control if the daemon crashes or 3 consecutive control ticks fail.
 
 ## Troubleshooting
 
-### GUI shows "Daemon Offline" or "Stale"
+### GUI shows "Offline" or "Stale"
 
 1. Confirm the daemon is running:
    ```bash
@@ -303,7 +307,7 @@ If the GUI shows the status flipping between "Connected" and "Stale", the daemon
 
 ### GUI hangs forever / never opens
 
-Almost always means D-Bus is unreachable. Same triage as above. The GUI now applies a 5s timeout to every D-Bus call and shows the failure in a toast, so a daemon hang manifests as a quick "Daemon Offline" notification rather than a frozen window.
+Check the terminal output from `archer-gui` for missing dependencies or startup errors, then use the D-Bus checks above. Hardware calls run asynchronously with bounded timeouts (normally 5 seconds, longer for operations such as firmware checks). Service failures appear in connection status and control feedback. Use **Exit** or **Quit** before relaunching after an upgrade so an old tray process does not keep serving the window.
 
 ## Changelog
 

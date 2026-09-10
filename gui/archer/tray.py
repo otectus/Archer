@@ -126,21 +126,25 @@ DBUSMENU_XML = """
 
 
 def _load_icon_pixmap():
-    """Load archer-tray.png as ARGB32 big-endian pixel data for SNI."""
+    """Render the same theme-legible SVG as the app icon for SNI fallback."""
     try:
-        from PIL import Image
+        gi.require_version("GdkPixbuf", "2.0")
+        from gi.repository import GdkPixbuf
         icon_path = os.path.join(
-            os.path.dirname(__file__), "..", "assets", "archer-tray.png"
+            os.path.dirname(__file__), "..", "assets", "archer.svg"
         )
         if not os.path.exists(icon_path):
             return []
-        img = Image.open(icon_path).convert("RGBA")
-        w, h = img.size
-        pixels = img.load()
+        img = GdkPixbuf.Pixbuf.new_from_file_at_scale(icon_path, 64, 64, True)
+        w, h = img.get_width(), img.get_height()
+        pixels = img.get_pixels()
+        stride, channels = img.get_rowstride(), img.get_n_channels()
         data = bytearray()
         for y in range(h):
             for x in range(w):
-                r, g, b, a = pixels[x, y]
+                offset = y * stride + x * channels
+                r, g, b = pixels[offset:offset + 3]
+                a = pixels[offset + 3] if img.get_has_alpha() else 255
                 # ARGB32, network byte order (big-endian)
                 data.extend(struct.pack(">BBBB", a, r, g, b))
         return [(w, h, bytes(data))]
@@ -151,9 +155,10 @@ def _load_icon_pixmap():
 class StatusNotifierItem:
     """D-Bus StatusNotifierItem tray icon using GIO."""
 
-    def __init__(self, on_activate, on_quit):
+    def __init__(self, on_activate, on_quit, on_profile=None):
         self._on_activate = on_activate
         self._on_quit = on_quit
+        self._on_profile = on_profile
         self._bus = None
         self._sni_reg_id = 0
         self._menu_reg_id = 0
@@ -162,15 +167,46 @@ class StatusNotifierItem:
         self._icon_pixmap = _load_icon_pixmap()
         self._revision = 1
 
-        # Menu items: id -> {label, action}
+        # Stable IDs let hosts cache submenus across state changes.
         self._menu_items = {
             1: {"label": "Open", "action": self._on_activate},
             2: {"label": "Exit", "action": self._on_quit},
+            3: {"label": "Profile", "children": [], "enabled": False},
         }
+        self._profile_ids = {}
+
+    def update_profiles(self, profiles, current, enabled):
+        """Publish available (key, label) pairs and the service-confirmed choice."""
+        before = self._build_layout()
+        children = []
+        for key, label in profiles:
+            item_id = self._profile_ids.setdefault(key, 10 + len(self._profile_ids))
+            children.append(item_id)
+            self._menu_items[item_id] = {
+                "label": label, "profile": key, "enabled": enabled,
+                "toggle-type": "radio", "toggle-state": int(key == current),
+            }
+        for item_id in self._profile_ids.values():
+            if item_id not in children:
+                self._menu_items.pop(item_id, None)
+        self._menu_items[3].update(children=children, enabled=bool(children) and enabled)
+        if before != self._build_layout():
+            self._revision = (self._revision + 1) % (2 ** 32)
+            if self._bus and self._menu_reg_id:
+                self._bus.emit_signal(None, "/Menu", "com.canonical.dbusmenu", "LayoutUpdated",
+                                      GLib.Variant("(ui)", (self._revision, 0)))
 
     def start(self):
         """Register tray icon on the session bus."""
         self._bus = Gio.bus_get_sync(Gio.BusType.SESSION)
+        registered = self._bus.call_sync(
+            "org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher",
+            "org.freedesktop.DBus.Properties", "Get",
+            GLib.Variant("(ss)", ("org.kde.StatusNotifierWatcher", "IsStatusNotifierHostRegistered")),
+            GLib.VariantType.new("(v)"), Gio.DBusCallFlags.NONE, 3000, None,
+        )
+        if not registered.unpack()[0]:
+            raise RuntimeError("No system tray host is registered")
 
         # Own a well-known bus name
         self._bus_name_id = Gio.bus_own_name(
@@ -206,10 +242,10 @@ class StatusNotifierItem:
             "/StatusNotifierWatcher",
             "org.kde.StatusNotifierWatcher",
             "RegisterStatusNotifierItem",
-            GLib.Variant("(s)", (self._service_name,)),
+            GLib.Variant("(s)", (self._bus.get_unique_name(),)),
             None,
             Gio.DBusCallFlags.NONE,
-            -1,
+            3000,
             None,
         )
 
@@ -225,6 +261,7 @@ class StatusNotifierItem:
         if self._bus_name_id:
             Gio.bus_unown_name(self._bus_name_id)
             self._bus_name_id = 0
+        self._bus = None
 
     # -------------------------------------------------------------------
     # StatusNotifierItem method handler
@@ -233,7 +270,9 @@ class StatusNotifierItem:
         if method == "Activate":
             self._on_activate()
         elif method == "ContextMenu":
-            pass  # Menu is handled via DBusMenu
+            # Hosts render /Menu themselves, including on Wayland.
+            self._bus.emit_signal(None, "/Menu", "com.canonical.dbusmenu", "ItemActivationRequested",
+                                  GLib.Variant("(iu)", (0, 0)))
         elif method == "SecondaryActivate":
             self._on_activate()
         invocation.return_value(None)
@@ -245,7 +284,7 @@ class StatusNotifierItem:
             "Title": GLib.Variant("s", "Archer"),
             "Status": GLib.Variant("s", "Active"),
             "WindowId": GLib.Variant("i", 0),
-            "IconName": GLib.Variant("s", ""),
+            "IconName": GLib.Variant("s", "io.github.archer"),
             "IconPixmap": GLib.Variant("a(iiay)", self._icon_pixmap),
             "OverlayIconName": GLib.Variant("s", ""),
             "OverlayIconPixmap": GLib.Variant("a(iiay)", []),
@@ -264,15 +303,17 @@ class StatusNotifierItem:
     # -------------------------------------------------------------------
     def _menu_method_call(self, conn, sender, path, iface, method, params, invocation):
         if method == "GetLayout":
-            layout = self._build_layout()
+            parent, depth, names = params.unpack()
+            if parent != 0 and parent not in self._menu_items:
+                invocation.return_dbus_error("com.canonical.dbusmenu.Error.InvalidMenuItem", "Unknown menu item")
+                return
+            layout = self._build_layout(parent, depth, names)
             invocation.return_value(GLib.Variant("(u(ia{sv}av))", (self._revision, layout)))
         elif method == "GetGroupProperties":
-            ids = params.get_child_value(0)
-            result = []
-            for i in range(ids.n_children()):
-                item_id = ids.get_child_value(i).get_int32()
-                props = self._get_item_properties(item_id)
-                result.append((item_id, props))
+            ids, names = params.unpack()
+            result = [(item_id, self._get_item_properties(item_id, names))
+                      for item_id in (ids or [0, *self._menu_items])
+                      if item_id == 0 or item_id in self._menu_items]
             invocation.return_value(GLib.Variant("(a(ia{sv}))", (result,)))
         elif method == "GetProperty":
             item_id = params.get_child_value(0).get_int32()
@@ -281,28 +322,23 @@ class StatusNotifierItem:
             if prop_name in props:
                 invocation.return_value(GLib.Variant("(v)", (props[prop_name],)))
             else:
-                invocation.return_value(GLib.Variant("(v)", (GLib.Variant("s", ""),)))
+                invocation.return_dbus_error("com.canonical.dbusmenu.Error.InvalidProperty", "Unknown menu property")
         elif method == "Event":
             item_id = params.get_child_value(0).get_int32()
             event_id = params.get_child_value(1).get_string()
-            if event_id == "clicked" and item_id in self._menu_items:
-                action = self._menu_items[item_id]["action"]
-                GLib.idle_add(action)
+            self._event(item_id, event_id)
             invocation.return_value(None)
         elif method == "EventGroup":
-            events = params.get_child_value(0)
-            for i in range(events.n_children()):
-                event = events.get_child_value(i)
-                item_id = event.get_child_value(0).get_int32()
-                event_id = event.get_child_value(1).get_string()
-                if event_id == "clicked" and item_id in self._menu_items:
-                    action = self._menu_items[item_id]["action"]
-                    GLib.idle_add(action)
-            invocation.return_value(GLib.Variant("(ai)", ([],)))
+            errors = []
+            for item_id, event_id, _data, _timestamp in params.unpack()[0]:
+                if not self._event(item_id, event_id):
+                    errors.append(item_id)
+            invocation.return_value(GLib.Variant("(ai)", (errors,)))
         elif method == "AboutToShow":
             invocation.return_value(GLib.Variant("(b)", (False,)))
         elif method == "AboutToShowGroup":
-            invocation.return_value(GLib.Variant("(aiai)", ([], [])))
+            errors = [item_id for item_id in params.unpack()[0] if item_id != 0 and item_id not in self._menu_items]
+            invocation.return_value(GLib.Variant("(aiai)", ([], errors)))
         else:
             invocation.return_value(None)
 
@@ -315,32 +351,49 @@ class StatusNotifierItem:
         }
         return props.get(prop)
 
-    def _build_layout(self):
+    def _event(self, item_id, event_id):
+        if item_id != 0 and item_id not in self._menu_items:
+            return False
+        if event_id == "clicked":
+            GLib.idle_add(self._activate_item, item_id)
+        return True
+
+    def _activate_item(self, item_id):
+        # Recheck after dispatch: a previous click may have started a write.
+        item = self._menu_items.get(item_id, {})
+        if item.get("enabled", True):
+            if "action" in item:
+                item["action"]()
+            elif "profile" in item and self._on_profile:
+                self._on_profile(item["profile"])
+        return False
+
+    def _build_layout(self, parent=0, depth=-1, names=()):
         """Build the menu layout as a nested GVariant structure."""
         children = []
-        for item_id, item in self._menu_items.items():
-            child_props = {
-                "label": GLib.Variant("s", item["label"]),
-                "enabled": GLib.Variant("b", True),
-                "visible": GLib.Variant("b", True),
-            }
-            child = GLib.Variant("(ia{sv}av)", (item_id, child_props, []))
-            children.append(GLib.Variant("v", child))
+        ids = [1, 3, 2] if parent == 0 else self._menu_items[parent].get("children", [])
+        if depth != 0:
+            for item_id in ids:
+                # av wraps each tuple once; wrapping in 'v' here double-boxes it.
+                children.append(GLib.Variant("(ia{sv}av)", self._build_layout(item_id, max(-1, depth - 1), names)))
+        return (parent, self._get_item_properties(parent, names), children)
 
-        root_props = {
-            "children-display": GLib.Variant("s", "submenu"),
-        }
-        return (0, root_props, children)
-
-    def _get_item_properties(self, item_id):
+    def _get_item_properties(self, item_id, names=()):
         """Get properties dict for a menu item."""
         if item_id == 0:
-            return {"children-display": GLib.Variant("s", "submenu")}
+            props = {"children-display": GLib.Variant("s", "submenu")}
+            return {key: value for key, value in props.items() if not names or key in names}
         item = self._menu_items.get(item_id)
         if not item:
             return {}
-        return {
+        props = {
             "label": GLib.Variant("s", item["label"]),
-            "enabled": GLib.Variant("b", True),
+            "enabled": GLib.Variant("b", item.get("enabled", True)),
             "visible": GLib.Variant("b", True),
         }
+        if "children" in item:
+            props["children-display"] = GLib.Variant("s", "submenu")
+        if "profile" in item:
+            props["toggle-type"] = GLib.Variant("s", item["toggle-type"])
+            props["toggle-state"] = GLib.Variant("i", item["toggle-state"])
+        return {key: value for key, value in props.items() if not names or key in names}

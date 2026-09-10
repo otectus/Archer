@@ -1,0 +1,44 @@
+--- a/src/linuwu_sense.c
++++ b/src/linuwu_sense.c
+@@ -449,6 +449,8 @@
+  static int __init dmi_matched(const struct dmi_system_id *dmi)
+  {
+      quirks = dmi->driver_data;
++     pr_info("DMI match: %s (nitro_v4=%u nitro_sense=%u predator_v4=%u)\n",
++             dmi->ident, quirks->nitro_v4, quirks->nitro_sense, quirks->predator_v4);
+      return 1;
+  }
+  
+@@ -632,6 +634,18 @@
+              DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
+              DMI_MATCH(DMI_PRODUCT_NAME, "Nitro ANV16-41"),
+          },
++         .driver_data = &quirk_acer_nitro_anv16_41,
++     },
++     {
++         .callback = dmi_matched,
++         .ident = "Acer Nitro ANV16S-41",
++         .matches = {
++             DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Acer"),
++             DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Nitro ANV16S-41"),
++         },
++         /* Same gaming WMI fan protocol; RGB uses a separate HID device.
++          * See upstream issue #61 and PR #127. Do not enable WMI RGB.
++          */
+          .driver_data = &quirk_acer_nitro_anv16_41,
+      },
+      {
+@@ -970,8 +984,12 @@
+          quirks = &quirk_acer_travelmate_2490;
+      }
+  
+-     if (quirks == NULL)
++     if (quirks == NULL) {
+          quirks = &quirk_unknown;
++         pr_info("No Sense DMI quirk for %s / %s\n",
++                 dmi_get_system_info(DMI_SYS_VENDOR),
++                 dmi_get_system_info(DMI_PRODUCT_NAME));
++     }
+  }
+  
+  /*

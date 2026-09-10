@@ -10,6 +10,7 @@ D-Bus + polkit, so the user-mode GUI was never able to read it anyway.
 
 import json
 import logging
+import math
 import threading
 
 logger = logging.getLogger("archer-client")
@@ -23,7 +24,7 @@ TIMEOUT = 5.0
 # reflow the X/Wayland session config; fwupd can scan slow SPI flash.
 LONG_TIMEOUTS = {
     "set_display_mode": 60.0,
-    "get_firmware_info": 30.0,
+    "get_firmware_info": 40.0,
     "restart_daemon": 10.0,
     "restart_drivers_and_daemon": 15.0,
 }
@@ -74,19 +75,22 @@ DAEMON_OFFLINE_HINT = (
 class ArcherClient:
     """Client for the Archer daemon. D-Bus only."""
 
-    def __init__(self):
+    def __init__(self, connect=True):
         self._lock = threading.Lock()
         self._features = []
         self._connected = False
         self._dbus_iface = None
         self._init_error = None
-        self._init_dbus()
+        if connect:
+            self._init_dbus()
 
     def _init_dbus(self):
         """Connect to the daemon via the system D-Bus. Stores any failure
         on self._init_error so the window can surface it."""
         try:
             import dbus
+            import dbus.mainloop.glib
+            dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
             bus = dbus.SystemBus()
             proxy = bus.get_object(DBUS_NAME, DBUS_PATH)
             self._dbus_iface = dbus.Interface(proxy, DBUS_IFACE)
@@ -96,6 +100,7 @@ class ArcherClient:
             logger.info("Connected to Archer daemon via D-Bus")
         except Exception as e:
             self._connected = False
+            self._dbus_iface = None
             self._init_error = f"{e}"
             logger.warning(
                 f"D-Bus connection failed: {e}. {DAEMON_OFFLINE_HINT}"
@@ -172,7 +177,7 @@ class ArcherClient:
     def get_all_settings(self):
         resp = self._send_command("get_all_settings")
         if resp.get("success"):
-            data = resp.get("data", {})
+            data = normalize_settings(resp.get("data", {}))
             self._features = data.get("features", [])
             return data
         return None
@@ -238,3 +243,70 @@ class ArcherClient:
 
     def restart_drivers_and_daemon(self):
         return self._send_command("restart_drivers_and_daemon")
+
+    def set_display_mode(self, mode):
+        return self._send_command("set_display_mode", {"mode": mode})
+
+    def set_game_mode(self, enabled):
+        return self._send_command("set_game_mode", {"enabled": enabled})
+
+    def set_audio_enhancement(self, enabled):
+        return self._send_command("set_audio_enhancement", {"noise_suppression": enabled})
+
+    def get_firmware_info(self):
+        return self._send_command("get_firmware_info")
+
+    def apply_fan_mode(self, cpu, gpu):
+        # The curve engine must stop writing before a manual/automatic change.
+        for target in ("cpu", "gpu"):
+            response = self._send_command("set_fan_curve", {"target": target, "enabled": False})
+            if not response.get("success"):
+                return response
+        return self.set_fan_speed(cpu, gpu)
+
+
+def normalize_settings(raw):
+    """Accept existing daemon payloads without leaking wire shapes into widgets."""
+    if not isinstance(raw, dict):
+        return {}
+    data = dict(raw)
+    for key in ("features", "thermal_choices"):
+        values = data.get(key)
+        data[key] = [value for value in values if isinstance(value, str)] if isinstance(values, list) else []
+    display = data.get("display_mode")
+    if not isinstance(display, dict):
+        display = {"mode": display or "unknown", "available_modes": ["integrated", "hybrid", "nvidia"]}
+    data["display_mode"] = display
+    if display.get("mode") not in ("integrated", "hybrid", "nvidia"):
+        display["mode"] = "unknown"
+    if not isinstance(display.get("available_modes"), list):
+        display["available_modes"] = ["integrated", "hybrid", "nvidia"]
+    game = data.get("game_mode", False)
+    data["game_mode"] = bool(game.get("active", False)) if isinstance(game, dict) else bool(game)
+    for key in ("saved_settings", "system_info", "battery_info", "firmware_info", "fan_curve"):
+        data[key] = dict(data[key]) if isinstance(data.get(key), dict) else {}
+    saved = data["saved_settings"]
+    for key in ("per_zone_mode", "four_zone_mode"):
+        if not isinstance(saved.get(key), dict):
+            saved[key] = {}
+    audio = data.get("audio_enhancement") or saved.get("audio_enhancement", {})
+    data["audio_enhancement"] = audio if isinstance(audio, dict) else {}
+    data["system_info"]["daemon_version"] = data.get("daemon_version", "Unknown")
+    data["system_info"] = {key: str(value) if value is not None else "" for key, value in data["system_info"].items()}
+    data["battery_info"] = normalize_telemetry({"battery_info": data["battery_info"]})["battery_info"]
+    return data
+
+
+def normalize_telemetry(raw):
+    data = dict(raw) if isinstance(raw, dict) else {}
+    battery = data.get("battery_info")
+    if "battery_info" in data:
+        battery = dict(battery) if isinstance(battery, dict) else {}
+        pct = battery.get("percentage")
+        battery["percentage"] = min(100, max(0, pct)) if isinstance(pct, (int, float)) and math.isfinite(pct) else None
+        battery["status"] = str(battery.get("status") or "Unknown")
+        battery["time_remaining"] = str(battery.get("time_remaining") or "")
+        data["battery_info"] = battery
+    if not isinstance(data.get("metric_validity"), dict):
+        data["metric_validity"] = {}
+    return data

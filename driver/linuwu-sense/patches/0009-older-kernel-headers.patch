@@ -1,0 +1,66 @@
+--- a/src/linuwu_sense.c
++++ b/src/linuwu_sense.c
+@@ -18,6 +18,9 @@
+  #include <linux/types.h>
+  #include <linux/dmi.h>
+  #include <linux/backlight.h>
++ #ifndef BACKLIGHT_POWER_ON
++ #define BACKLIGHT_POWER_ON FB_BLANK_UNBLANK
++ #endif
+  #include <linux/leds.h>
+  #include <linux/platform_device.h>
+  #include <linux/platform_profile.h>
+@@ -33,7 +36,11 @@
+  #include <linux/hwmon.h>
+  #include <linux/fs.h>
+  #include <linux/units.h>
++ #if __has_include(<linux/unaligned.h>)
+  #include <linux/unaligned.h>
++ #else
++ #include <asm/unaligned.h>
++ #endif
+  #include <linux/bitfield.h>
+  #include <linux/bitmap.h>
+  #include <linux/mutex.h>
+@@ -2833,6 +2840,20 @@
+      }
+  }
+  
++ #ifdef ARCHER_LEGACY_WMI_NOTIFY
++ static void archer_wmi_notify(u32 value, void *context)
++ {
++     struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
++     acpi_status status = wmi_get_event_data(value, &output);
++
++     if (ACPI_SUCCESS(status))
++         acer_wmi_notify(output.pointer, context);
++     kfree(output.pointer);
++ }
++ #else
++ #define archer_wmi_notify acer_wmi_notify
++ #endif
++
+  static acpi_status __init
+  wmid3_set_function_mode(struct func_input_params *params,
+              struct func_return_value *return_value)
+@@ -2993,7 +3014,7 @@
+          input_set_capability(acer_wmi_input_dev, EV_SW, SW_TABLET_MODE);
+  
+      status = wmi_install_notify_handler(ACERWMID_EVENT_GUID,
+-                         acer_wmi_notify, NULL);
++                         archer_wmi_notify, NULL);
+      if (ACPI_FAILURE(status)) {
+          err = -EIO;
+          goto err_free_dev;
+@@ -4415,7 +4436,11 @@
+          .pm = &acer_pm,
+      },
+      .probe = acer_platform_probe,
++ #ifdef ARCHER_LEGACY_PLATFORM_REMOVE
++     .remove_new = acer_platform_remove,
++ #else
+      .remove = acer_platform_remove,
++ #endif
+      .shutdown = acer_platform_shutdown,
+  };
+  

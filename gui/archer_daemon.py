@@ -8,7 +8,11 @@ Exposes a Unix socket for GUI communication.
 import json
 import logging
 import os
+import math
+import re
+from numbers import Integral
 import signal
+import shutil
 import subprocess
 import sys
 import threading
@@ -32,10 +36,15 @@ DRIVER_BASE_PATHS = [
 
 # System paths
 PLATFORM_PROFILE = "/sys/firmware/acpi/platform_profile"
+PLATFORM_PROFILE_CLASS = "/sys/class/platform-profile"
+BATTERY_HEALTH_PATH = "/sys/bus/wmi/drivers/acer-wmi-battery/health_mode"
 PLATFORM_PROFILE_CHOICES = "/sys/firmware/acpi/platform_profile_choices"
+DRIVER_MODULE_PATH = "/sys/module/linuwu_sense"
 DMI_PRODUCT = "/sys/class/dmi/id/product_name"
 DMI_BOARD = "/sys/class/dmi/id/board_name"
 DMI_VENDOR = "/sys/class/dmi/id/sys_vendor"
+HWMON_DIR = "/sys/class/hwmon"
+THERMAL_DIR = "/sys/class/thermal"
 POWER_SUPPLY_DIR = "/sys/class/power_supply"
 
 # --- Logging ---
@@ -57,18 +66,42 @@ def read_sysfs(path):
     """Read a sysfs file, return stripped string or None."""
     try:
         return Path(path).read_text().strip()
-    except (OSError, FileNotFoundError):
+    except (OSError, TypeError, ValueError):
         return None
 
 
 def write_sysfs(path, value):
     """Write a value to a sysfs file. Returns True on success."""
     try:
-        Path(path).write_text(str(value))
+        # O_CREAT is intentionally absent: a disappearing sysfs node must fail.
+        with os.fdopen(os.open(path, os.O_WRONLY | os.O_TRUNC | os.O_CLOEXEC), "w") as stream:
+            stream.write(str(value))
         return True
-    except (OSError, PermissionError) as e:
+    except (OSError, TypeError, ValueError) as e:
         logger.error(f"Failed to write '{value}' to {path}: {e}")
         return False
+
+
+def sysfs_children(directory):
+    """A class may disappear between probing and enumeration (hotplug/unload)."""
+    try:
+        return sorted(Path(directory).iterdir())
+    except OSError:
+        return []
+
+
+def platform_profile_paths():
+    if read_sysfs(PLATFORM_PROFILE) is not None and read_sysfs(PLATFORM_PROFILE_CHOICES):
+        return PLATFORM_PROFILE, PLATFORM_PROFILE_CHOICES
+    candidates = [(p / "profile", p / "choices") for p in sysfs_children(PLATFORM_PROFILE_CLASS)
+                  if read_sysfs(p / "profile") is not None and read_sysfs(p / "choices")]
+    # Multiple providers need the kernel's aggregate interface or explicit policy.
+    return candidates[0] if len(candidates) == 1 else (None, None)
+
+
+def battery_supply_paths():
+    return [p for p in sysfs_children(POWER_SUPPLY_DIR) if read_sysfs(p / "type") == "Battery"
+            or p.name.startswith("BAT")]
 
 
 # Shell metacharacters we forbid in dynamic strings. Static literal commands
@@ -136,7 +169,7 @@ _PROBE_CACHE = _TtlCache(ttl_s=5.0)
 # laptops. Order is preference — first match wins. Anything else falls back
 # to the legacy "first device with fan1_input" behaviour.
 _HWMON_FAN_NAMES = (
-    "linuwu_sense", "acer_wmi", "nct6775", "nct6779", "nct6798",
+    "acer", "linuwu_sense", "acer_wmi", "nct6775", "nct6779", "nct6798",
     "it87", "dell_smm_hwmon",
 )
 _HWMON_GPU_TEMP_NAMES = ("nvidia", "amdgpu", "nouveau")
@@ -193,14 +226,15 @@ class SettingsStore:
 class FanCurveEngine:
     """Runs a 2Hz control loop to drive fan speed along a temperature curve."""
 
-    def __init__(self, get_temp_fn, set_fan_fn, restore_auto_fn):
+    def __init__(self, get_temp_fn, set_fan_fn, restore_auto_fn, on_failure_fn=None):
         self._get_temp = get_temp_fn
         self._set_fan = set_fan_fn
         self._restore_auto = restore_auto_fn
+        self._on_failure = on_failure_fn
         self._curves = {}  # "cpu" and/or "gpu" -> [(temp_c, fan_pct), ...]
         self._active = {}  # "cpu" -> bool, "gpu" -> bool
         self._fail_counts = {"cpu": 0, "gpu": 0}
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._curve_thread = None
         self._running = False
 
@@ -214,20 +248,16 @@ class FanCurveEngine:
         self._ensure_thread()
 
     def stop(self, target=None):
-        """Stop fan curve for target, or both if None."""
-        targets = [target] if target else ["cpu", "gpu"]
+        """The paired fan ABI returns both fans to firmware control on stop."""
         with self._lock:
-            for t in targets:
-                self._active[t] = False
-                self._fail_counts[t] = 0
-        # Restore EC auto control
-        self._restore_auto()
-        # Stop thread if nothing is active
-        with self._lock:
-            if not any(self._active.get(t) for t in ["cpu", "gpu"]):
-                self._running = False
-        if self._curve_thread and not self._running:
-            self._curve_thread.join(timeout=1.0)
+            self._active = {"cpu": False, "gpu": False}
+            self._fail_counts = {"cpu": 0, "gpu": 0}
+            self._running = False
+            restored = self._restore_auto()
+            thread = self._curve_thread
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+        return restored
 
     def get_state(self):
         with self._lock:
@@ -249,32 +279,37 @@ class FanCurveEngine:
         self._curve_thread = threading.Thread(target=self._loop, daemon=True)
         self._curve_thread.start()
 
-    def _loop(self):
-        while self._running:
-            with self._lock:
-                targets = {t: self._curves.get(t) for t in ["cpu", "gpu"]
-                           if self._active.get(t) and self._curves.get(t)}
-            for target, points in targets.items():
+    def _tick(self):
+        # Serialize stop/restore with a complete tick; no stale write after Auto.
+        with self._lock:
+            for target in ("cpu", "gpu"):
+                if not self._active.get(target):
+                    continue
                 try:
                     temp = self._get_temp(target)
-                    pct = self._interpolate(points, temp)
-                    pct = max(30, min(100, pct))
-                    self._set_fan(target, pct)
-                    with self._lock:
-                        self._fail_counts[target] = 0
-                except Exception as e:
-                    logger.error(f"Fan curve tick failed for {target}: {e}")
-                    should_restore = False
-                    with self._lock:
-                        self._fail_counts[target] += 1
-                        if self._fail_counts[target] >= 3:
-                            logger.warning(f"Fan curve watchdog: 3 consecutive failures for {target}, restoring EC auto")
-                            self._active[target] = False
-                            self._fail_counts[target] = 0
-                            should_restore = True
-                    if should_restore:
-                        self._restore_auto()
-            time.sleep(0.5)  # 2 Hz
+                    if temp is None or not math.isfinite(temp) or not 0 < temp <= 125:
+                        raise ValueError(f"Unavailable/invalid {target} temperature: {temp}")
+                    pct = max(30, min(100, self._interpolate(self._curves[target], temp)))
+                    if self._set_fan(target, pct) is False:
+                        raise OSError("Fan write failed")
+                    self._fail_counts[target] = 0
+                except Exception as error:
+                    logger.error("Fan curve tick failed for %s: %s", target, error)
+                    self._fail_counts[target] += 1
+                    self._restore_auto()
+                    if self._fail_counts[target] >= 3:
+                        logger.error("Fan curve watchdog: stopping both curves and restoring EC auto")
+                        self._active = {"cpu": False, "gpu": False}
+                        self._running = False
+                        if self._on_failure:
+                            self._on_failure()
+                    # No second target may overwrite the failsafe in this tick.
+                    break
+
+    def _loop(self):
+        while self._running and self._curve_thread is threading.current_thread():
+            self._tick()
+            time.sleep(0.5)
 
     @staticmethod
     def _interpolate(points, temp):
@@ -300,11 +335,13 @@ class FanCurveEngine:
 class HardwareManager:
     """Manages hardware detection and control via sysfs."""
 
-    def __init__(self, settings_store=None):
+    def __init__(self, settings_store=None, restore_settings=True):
         self.driver_base = None
         self.sense_base = None  # predator_sense or nitro_sense subdirectory
         self.laptop_type = "unknown"
         self.features = []
+        self.driver_status = "not_installed"
+        self._fan_lock = threading.RLock()
         self.settings = settings_store or SettingsStore()
         self._game_mode_active = False
         self._game_mode_saved = {}
@@ -312,6 +349,7 @@ class HardwareManager:
             get_temp_fn=self._fan_curve_get_temp,
             set_fan_fn=self._fan_curve_set_fan,
             restore_auto_fn=self._fan_curve_restore_auto,
+            on_failure_fn=self._disable_saved_curves,
         )
         self._detect_driver()
         self._detect_laptop_type()
@@ -320,23 +358,61 @@ class HardwareManager:
         logger.info(f"Driver base: {self.driver_base}")
         logger.info(f"Sense base: {self.sense_base}")
         logger.info(f"Available features: {self.features}")
-        self._restore_saved_settings()
+        self._diagnose_driver()
+        # A previous process might have crashed while the EC was in manual mode.
+        if "fan_control" in self.features and not self._fan_curve_restore_auto():
+            self.features.remove("fan_control")
+            self.driver_status = "auto_restore_failed"
+        if restore_settings:
+            try:
+                self._restore_saved_settings()
+            except Exception:
+                self.shutdown_fan_curves()
+                raise
 
     def _detect_driver(self):
+        self.driver_base = None
         for base in DRIVER_BASE_PATHS:
-            if os.path.isdir(base):
+            if not os.path.isdir(base):
+                continue
+            # /sys/devices/platform/acer-wmi is also created by stock acer_wmi.
+            owner = Path(base, "driver/module").resolve().name
+            module_path = str(Path(DRIVER_MODULE_PATH) / "drivers") + os.sep
+            if owner == "linuwu_sense" or str(base).startswith(module_path):
                 self.driver_base = base
                 return
-        logger.warning("Linuwu-Sense driver not found in sysfs")
+        logger.warning("No platform device owned by Linuwu-Sense found")
+
+    def _diagnose_driver(self):
+        quirk = read_sysfs(Path(DRIVER_MODULE_PATH) / "parameters/sense_quirk")
+        fan_path = self._sense_path("fan_speed")
+        if not os.path.isdir(DRIVER_MODULE_PATH):
+            self.driver_status = "module_not_loaded" if run_cmd("modinfo -n linuwu_sense") else "not_installed"
+        elif not self.sense_base:
+            self.driver_status = "dmi_unsupported" if quirk == "none" else "sense_interface_missing"
+        elif not fan_path or not os.path.isfile(fan_path):
+            self.driver_status = "fan_node_missing"
+        elif not os.access(fan_path, os.R_OK | os.W_OK):
+            self.driver_status = "permission_denied"
+        elif "fan_control" not in self.features:
+            self.driver_status = "fan_abi_incompatible"
+        else:
+            self.driver_status = "supported"
+        logger.info("Driver diagnostic: %s; vendor=%r product=%r board=%r quirk=%r driver=%r sense=%r fan=%r",
+                    self.driver_status, read_sysfs(DMI_VENDOR), read_sysfs(DMI_PRODUCT),
+                    read_sysfs(DMI_BOARD), quirk, self.driver_base, self.sense_base, fan_path)
+        if self.driver_status != "supported":
+            logger.warning("Fan controls unavailable (%s). Run python3 scripts/archer-diagnose.py; "
+                           "DMI family recognition alone does not enable controls.", self.driver_status)
 
     def _detect_laptop_type(self):
         if self.driver_base:
             predator_path = os.path.join(self.driver_base, "predator_sense")
             nitro_path = os.path.join(self.driver_base, "nitro_sense")
-            if os.path.exists(predator_path):
+            if os.path.isdir(predator_path):
                 self.laptop_type = "predator"
                 self.sense_base = predator_path
-            elif os.path.exists(nitro_path):
+            elif os.path.isdir(nitro_path):
                 self.laptop_type = "nitro"
                 self.sense_base = nitro_path
         # Fallback to DMI
@@ -345,7 +421,7 @@ class HardwareManager:
             product_lower = product.lower()
             if "predator" in product_lower or "helios" in product_lower:
                 self.laptop_type = "predator"
-            elif "nitro" in product_lower:
+            elif "nitro" in product_lower or re.fullmatch(r"anv?\d+[a-z]*-\d+", product_lower):
                 self.laptop_type = "nitro"
             elif "triton" in product_lower:
                 self.laptop_type = "predator"
@@ -353,7 +429,7 @@ class HardwareManager:
     def _detect_features(self):
         self.features = []
         # Thermal profiles
-        if os.path.exists(PLATFORM_PROFILE):
+        if platform_profile_paths()[0]:
             self.features.append("thermal_profiles")
         # Keyboard features (under driver_base/four_zoned_kb/)
         if self.driver_base:
@@ -376,16 +452,18 @@ class HardwareManager:
             }
             for sysfs_file, feature_name in sense_features.items():
                 path = os.path.join(self.sense_base, sysfs_file)
-                if os.path.exists(path):
+                if os.path.isfile(path):
+                    if feature_name == "fan_control" and (
+                        not os.access(path, os.R_OK | os.W_OK) or self.get_fan_speed() == (None, None)
+                    ):
+                        continue
                     self.features.append(feature_name)
         # Battery detection
-        bat_paths = [
-            os.path.join(POWER_SUPPLY_DIR, d)
-            for d in os.listdir(POWER_SUPPLY_DIR)
-            if d.startswith("BAT")
-        ] if os.path.isdir(POWER_SUPPLY_DIR) else []
+        bat_paths = battery_supply_paths()
         if bat_paths:
             self.features.append("battery_info")
+        if "battery_limiter" not in self.features and self._battery_limit_path():
+            self.features.append("battery_limiter")
         # Display mode (envycontrol)
         if _PROBE_CACHE.get_or_compute(
             "which-envycontrol",
@@ -403,6 +481,7 @@ class HardwareManager:
     def _restore_saved_settings(self):
         """Re-apply any previously saved settings on daemon startup."""
         restored = []
+        saved_curves = {t: self.settings.get(f"fan_curve_{t}") for t in ("cpu", "gpu")}
 
         # Keyboard lighting — restore whichever mode was last applied
         last_kb = self.settings.get("last_keyboard_mode")
@@ -440,12 +519,9 @@ class HardwareManager:
             if ok:
                 restored.append("thermal_profile")
 
-        # Fan speed
-        fan = self.settings.get("fan_speed")
-        if fan and "fan_control" in self.features:
-            ok = self.set_fan_speed(fan["cpu"], fan["gpu"])
-            if ok:
-                restored.append("fan_speed")
+        # Manual fan settings are deliberately not replayed across daemon starts.
+        # Explicitly enabled curves can resume, after the initial Auto reset.
+        self.settings.remove("fan_speed")
 
         # Battery limiter
         bl_lim = self.settings.get("battery_limiter")
@@ -478,10 +554,10 @@ class HardwareManager:
         # Fan curves
         for target in ("cpu", "gpu"):
             key = f"fan_curve_{target}"
-            curve_data = self.settings.get(key)
+            curve_data = saved_curves[target]
             if curve_data and curve_data.get("enabled") and curve_data.get("points"):
-                self.start_fan_curve(target, curve_data["points"])
-                restored.append(key)
+                if self.start_fan_curve(target, curve_data["points"]):
+                    restored.append(key)
 
         # Game mode
         if self.settings.get("game_mode_active"):
@@ -506,39 +582,60 @@ class HardwareManager:
 
     # --- Thermal Profiles ---
     def get_thermal_profile(self):
-        return read_sysfs(PLATFORM_PROFILE) or "unknown"
+        return read_sysfs(platform_profile_paths()[0]) or "unknown"
 
     def get_thermal_profile_choices(self):
-        choices = read_sysfs(PLATFORM_PROFILE_CHOICES)
+        choices = read_sysfs(platform_profile_paths()[1])
         return choices.split() if choices else []
 
     def set_thermal_profile(self, profile):
         choices = self.get_thermal_profile_choices()
         if profile not in choices:
             return False, f"Invalid profile '{profile}'. Available: {choices}"
-        ok = write_sysfs(PLATFORM_PROFILE, profile)
+        if "fan_control" in self.features:
+            self.stop_fan_curve()
+            if not self._fan_curve_restore_auto():
+                return False, "Could not restore automatic fans before profile change"
+        ok = write_sysfs(platform_profile_paths()[0], profile)
         return ok, None if ok else "Failed to write profile"
 
     # --- Fan Control ---
+    @staticmethod
+    def _valid_fan_value(value):
+        return isinstance(value, Integral) and not isinstance(value, bool) and 0 <= value <= 100
+
     def get_fan_speed(self):
         path = self._sense_path("fan_speed")
-        if not path:
-            return None, None
-        val = read_sysfs(path)
-        if val and "," in val:
-            try:
-                parts = val.split(",")
-                return int(parts[0]), int(parts[1])
-            except (ValueError, IndexError):
-                logger.warning(f"Malformed fan_speed value: {val}")
-                return None, None
+        val = read_sysfs(path) if path else None
+        if val and re.fullmatch(r"[0-9]{1,3},[0-9]{1,3}", val):
+            values = tuple(map(int, val.split(",")))
+            if all(self._valid_fan_value(v) for v in values):
+                return values
+        if val:
+            logger.warning("Incompatible fan_speed ABI at %s: %r", path, val)
         return None, None
 
-    def set_fan_speed(self, cpu, gpu):
-        path = self._sense_path("fan_speed")
-        if not path:
+    def _write_fan_speed(self, cpu, gpu):
+        if not all(self._valid_fan_value(v) for v in (cpu, gpu)):
             return False
-        return write_sysfs(path, f"{cpu},{gpu}")
+        path = self._sense_path("fan_speed")
+        if "fan_control" not in self.features or not path:
+            return False
+        with self._fan_lock:
+            if self.get_fan_speed() == (None, None):
+                logger.error("Fan interface disappeared or became incompatible: %s", path)
+                return False
+            ok = write_sysfs(path, f"{int(cpu)},{int(gpu)}")
+            if not ok and (cpu or gpu):
+                self._fan_curve_restore_auto()
+            return ok
+
+    def set_fan_speed(self, cpu, gpu):
+        if "fan_control" not in self.features or not all(self._valid_fan_value(v) for v in (cpu, gpu)):
+            return False
+        if not self.stop_fan_curve():
+            return False
+        return self._write_fan_speed(cpu, gpu)
 
     # --- Battery Features ---
     def get_battery_calibration(self):
@@ -554,17 +651,34 @@ class HardwareManager:
             return False
         return write_sysfs(path, "1" if enabled else "0")
 
+    def _battery_limit_path(self):
+        for battery in battery_supply_paths():
+            path = battery / "charge_control_end_threshold"
+            if read_sysfs(path) is not None:
+                return str(path)
+        for path in (self._sense_path("battery_limiter"), BATTERY_HEALTH_PATH):
+            if path and read_sysfs(path) is not None:
+                return path
+        return None
+
     def get_battery_limiter(self):
-        path = self._sense_path("battery_limiter")
-        if not path:
-            return None
+        path = self._battery_limit_path()
         val = read_sysfs(path)
-        return val == "1" if val else None
+        if val is None:
+            return None
+        if path.endswith("charge_control_end_threshold"):
+            try:
+                return int(val) <= 80
+            except ValueError:
+                return None
+        return val == "1" if val in ("0", "1") else None
 
     def set_battery_limiter(self, enabled):
-        path = self._sense_path("battery_limiter")
+        path = self._battery_limit_path()
         if not path:
             return False
+        if path.endswith("charge_control_end_threshold"):
+            return write_sysfs(path, "80" if enabled else "100")
         return write_sysfs(path, "1" if enabled else "0")
 
     def get_usb_charging(self):
@@ -582,10 +696,8 @@ class HardwareManager:
     def get_battery_info(self):
         """Get battery percentage, status, and time remaining."""
         info = {"present": False}
-        for name in sorted(os.listdir(POWER_SUPPLY_DIR)) if os.path.isdir(POWER_SUPPLY_DIR) else []:
-            if not name.startswith("BAT"):
-                continue
-            bat_dir = os.path.join(POWER_SUPPLY_DIR, name)
+        for battery in battery_supply_paths():
+            bat_dir = str(battery)
             info["present"] = True
             try:
                 info["percentage"] = int(read_sysfs(os.path.join(bat_dir, "capacity")) or 0)
@@ -673,26 +785,45 @@ class HardwareManager:
 
     # --- System Monitoring ---
     def get_cpu_temp(self):
-        """Get CPU temperature from thermal zones or hwmon."""
-        for tz in sorted(Path("/sys/class/thermal").glob("thermal_zone*")):
-            tz_type = read_sysfs(tz / "type")
-            if tz_type and any(k in tz_type.lower() for k in ["x86_pkg", "coretemp", "k10temp", "cpu"]):
-                val = read_sysfs(tz / "temp")
-                if val:
-                    return int(val) // 1000
-        # Fallback: first thermal zone
-        val = read_sysfs("/sys/class/thermal/thermal_zone0/temp")
-        return int(val) // 1000 if val else 0
+        return self._read_cpu_temp() or 0
+
+    @staticmethod
+    def _temperature(path):
+        value = read_sysfs(path)
+        try:
+            value = int(value) / 1000
+            return int(value) if 0 < value <= 125 else None
+        except (TypeError, ValueError):
+            return None
+
+    def _read_cpu_temp(self):
+        """Use identified CPU sensors; an arbitrary ACPI zone is unsafe for curves."""
+        values = []
+        for hwmon in sorted(Path(HWMON_DIR).glob("hwmon*")):
+            name = read_sysfs(hwmon / "name")
+            if name in ("k10temp", "zenpower", "coretemp", "acer", "acer_wmi", "linuwu_sense"):
+                values.append(self._temperature(hwmon / "temp1_input"))
+        for tz in sorted(Path(THERMAL_DIR).glob("thermal_zone*")):
+            name = read_sysfs(tz / "type") or ""
+            if any(k in name.lower() for k in ("x86_pkg", "coretemp", "k10temp", "cpu")):
+                values.append(self._temperature(tz / "temp"))
+        return max((v for v in values if v is not None), default=None)
 
     def get_gpu_temp(self):
-        """Get GPU temperature from hwmon."""
-        for hwmon in sorted(Path("/sys/class/hwmon").glob("hwmon*")):
+        return self._read_gpu_temp() or 0
+
+    def _read_gpu_temp(self):
+        """Prefer discrete/Nitro GPU readings over the AMD integrated GPU."""
+        discrete, integrated = [], []
+        for hwmon in sorted(Path(HWMON_DIR).glob("hwmon*")):
             name = read_sysfs(hwmon / "name")
-            if name and name.lower() in _HWMON_GPU_TEMP_NAMES:
-                val = read_sysfs(hwmon / "temp1_input")
-                if val:
-                    return int(val) // 1000
-        # Try nvidia-smi (cached; the binary is slow, sometimes hangs)
+            if name in ("acer", "acer_wmi", "linuwu_sense"):
+                # Linuwu's v4 hwmon mapping: CPU, external, GPU temperatures.
+                discrete.append(self._temperature(hwmon / "temp3_input"))
+            elif name in ("nvidia", "nouveau"):
+                discrete.append(self._temperature(hwmon / "temp1_input"))
+            elif name == "amdgpu":
+                integrated.append(self._temperature(hwmon / "temp1_input"))
         temp = _PROBE_CACHE.get_or_compute(
             "nvidia-smi-temp",
             lambda: run_cmd(
@@ -700,20 +831,33 @@ class HardwareManager:
                 timeout=3, shell_meta_ok=True,
             ),
         )
-        if temp and temp.isdigit():
-            return int(temp)
-        return 0
+        if temp and temp.isdigit() and 0 < int(temp) <= 125:
+            discrete.append(int(temp))
+        readings = [v for v in discrete if v is not None]
+        # On a hybrid machine an unavailable NVIDIA sensor must not be replaced
+        # by the cooler iGPU. Curves then fail closed through the watchdog.
+        if readings:
+            return max(readings)
+        if Path("/sys/module/nvidia").is_dir() or Path("/sys/module/nouveau").is_dir():
+            return None
+        return max((v for v in integrated if v is not None), default=None)
 
     def get_cpu_usage(self):
+        return self._read_cpu_usage() or 0
+
+    def _read_cpu_usage(self):
         """Get CPU usage percentage."""
         # Static literal awk pipeline; shell_meta_ok=True intentionally.
         usage = run_cmd(
             "awk '/^cpu / {u=$2+$4; t=$2+$4+$5; printf \"%.0f\", u/t*100}' /proc/stat",
             shell_meta_ok=True,
         )
-        return int(usage) if usage and usage.isdigit() else 0
+        return int(usage) if usage and usage.isdigit() else None
 
     def get_gpu_usage(self):
+        return self._read_gpu_usage() or 0
+
+    def _read_gpu_usage(self):
         """Get GPU usage from nvidia-smi or amdgpu."""
         # NVIDIA (cached)
         val = _PROBE_CACHE.get_or_compute(
@@ -732,11 +876,14 @@ class HardwareManager:
                 val = read_sysfs(hwmon / "device/gpu_busy_percent")
                 if val:
                     return int(val)
-        return 0
+        return None
 
     def get_fan_rpm(self):
+        return tuple(value or 0 for value in self._read_fan_rpm())
+
+    def _read_fan_rpm(self):
         """Get fan RPM from hwmon. Prefer Acer-relevant chipsets by name."""
-        cpu_rpm, gpu_rpm = 0, 0
+        cpu_rpm, gpu_rpm = None, None
         # Pass 1: allowlisted chipsets only.
         for hwmon in sorted(Path("/sys/class/hwmon").glob("hwmon*")):
             name = read_sysfs(hwmon / "name") or ""
@@ -764,8 +911,8 @@ class HardwareManager:
 
     def get_power_source(self):
         """Check if running on AC power."""
-        for name in os.listdir(POWER_SUPPLY_DIR) if os.path.isdir(POWER_SUPPLY_DIR) else []:
-            supply_dir = os.path.join(POWER_SUPPLY_DIR, name)
+        for supply in sysfs_children(POWER_SUPPLY_DIR):
+            supply_dir = str(supply)
             supply_type = read_sysfs(os.path.join(supply_dir, "type"))
             if supply_type and supply_type.lower() == "mains":
                 online = read_sysfs(os.path.join(supply_dir, "online"))
@@ -832,58 +979,86 @@ class HardwareManager:
             "fan_curve": self.get_fan_curve_state(),
             "display_mode": self.get_display_mode() if "display_mode" in self.features else None,
             "game_mode": self.get_game_mode(),
-            "firmware_info": self.get_firmware_info(),
+            "firmware_info": self.get_firmware_info(check=False),
+            "driver_status": self.driver_status,
+            "sense_base": self.sense_base,
+            "driver_override": read_sysfs("/etc/modprobe.d/linuwu-sense.conf") or "Disabled",
             "saved_settings": self.settings.data,
         }
 
     def get_monitoring_data(self):
-        """Get real-time monitoring metrics for dashboard."""
-        cpu_rpm, gpu_rpm = self.get_fan_rpm()
+        """Preserve numeric fields and add explicit sensor validity metadata."""
+        cpu_rpm, gpu_rpm = self._read_fan_rpm()
+        readings = {
+            "cpu_temp": self._read_cpu_temp(), "gpu_temp": self._read_gpu_temp(),
+            "cpu_usage": self._read_cpu_usage(), "gpu_usage": self._read_gpu_usage(),
+            "fan_rpm_cpu": cpu_rpm, "fan_rpm_gpu": gpu_rpm,
+        }
         return {
-            "cpu_temp": self.get_cpu_temp(),
-            "gpu_temp": self.get_gpu_temp(),
-            "cpu_usage": self.get_cpu_usage(),
-            "gpu_usage": self.get_gpu_usage(),
-            "fan_rpm_cpu": cpu_rpm,
-            "fan_rpm_gpu": gpu_rpm,
+            **{key: value if value is not None else 0 for key, value in readings.items()},
+            "metric_validity": {key: value is not None for key, value in readings.items()},
             "battery_info": self.get_battery_info(),
             "power_source_ac": self.get_power_source(),
         }
 
     # --- Fan Curve Methods ---
     def _fan_curve_get_temp(self, target):
-        if target == "cpu":
-            return self.get_cpu_temp()
-        else:
-            return self.get_gpu_temp()
+        return self._read_cpu_temp() if target == "cpu" else self._read_gpu_temp()
 
     def _fan_curve_set_fan(self, target, pct):
-        cpu_fan, gpu_fan = self.get_fan_speed()
-        cpu_fan = cpu_fan or 0
-        gpu_fan = gpu_fan or 0
-        if target == "cpu":
-            self.set_fan_speed(int(pct), gpu_fan)
-        else:
-            self.set_fan_speed(cpu_fan, int(pct))
+        with self._fan_lock:
+            cpu, gpu = self.get_fan_speed()
+            if cpu is None or gpu is None:
+                raise OSError("Paired fan interface unavailable")
+            ok = self._write_fan_speed(int(pct) if target == "cpu" else cpu,
+                                       int(pct) if target == "gpu" else gpu)
+            if not ok:
+                raise OSError("Fan curve write failed")
+            return True
 
     def _fan_curve_restore_auto(self):
         path = self._sense_path("fan_speed")
-        if path:
-            write_sysfs(path, "0,0")
+        if "fan_control" not in self.features or not path:
+            return False
+        with self._fan_lock:
+            if not write_sysfs(path, "0,0"):
+                logger.error("AUTOMATIC FAN RESTORATION FAILED at %s; stop manual control and reboot", path)
+                return False
+            return True
 
     def start_fan_curve(self, target, points):
-        """Start a fan curve for 'cpu' or 'gpu'."""
+        """Reject invalid requests before starting a hardware-control thread."""
+        if "fan_control" not in self.features or target not in ("cpu", "gpu"):
+            return False
+        if not isinstance(points, (list, tuple)) or not 2 <= len(points) <= 64:
+            return False
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                return False
+            temp, pct = point
+            if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in point):
+                return False
+            if not 0 <= temp <= 125 or not 30 <= pct <= 100:
+                return False
+        if len({point[0] for point in points}) != len(points):
+            return False
         self._fan_curve_engine.start(target, points)
         self.settings.set(f"fan_curve_{target}", {"enabled": True, "points": points})
-        logger.info(f"Fan curve started for {target} with {len(points)} points")
+        logger.info("Fan curve started for %s", target)
+        return True
+
+    def _disable_saved_curves(self):
+        for target in ("cpu", "gpu"):
+            saved = self.settings.get(f"fan_curve_{target}", {})
+            self.settings.set(f"fan_curve_{target}", {"enabled": False, "points": saved.get("points", [])})
 
     def stop_fan_curve(self, target=None):
-        """Stop fan curve. None stops both."""
-        self._fan_curve_engine.stop(target)
-        targets = [target] if target else ["cpu", "gpu"]
-        for t in targets:
-            self.settings.set(f"fan_curve_{t}", {"enabled": False, "points": self.settings.get(f"fan_curve_{t}", {}).get("points", [])})
-        logger.info(f"Fan curve stopped for {targets}")
+        if target not in (None, "cpu", "gpu"):
+            return False
+        restored = self._fan_curve_engine.stop(target)
+        self._disable_saved_curves()
+        logger.info("Fan curves stopped; requested target=%s, automatic restoration=%s", target, restored)
+        return bool(restored)
 
     def get_fan_curve_state(self):
         return self._fan_curve_engine.get_state()
@@ -900,9 +1075,9 @@ class HardwareManager:
         )
         available_modes = ["integrated", "hybrid", "nvidia"]
         return {
-            "mode": mode if mode in available_modes else "unknown",
+            "mode": self.settings.get("display_configured_mode", mode) if self.settings.get("display_change_boot") == read_sysfs("/proc/sys/kernel/random/boot_id") else (mode if mode in available_modes else "unknown"),
             "available_modes": available_modes,
-            "reboot_required": False,
+            "reboot_required": bool(read_sysfs("/proc/sys/kernel/random/boot_id")) and self.settings.get("display_change_boot") == read_sysfs("/proc/sys/kernel/random/boot_id"),
         }
 
     def set_display_mode(self, mode):
@@ -920,6 +1095,8 @@ class HardwareManager:
         if not result or "error" in result.lower():
             logger.warning(f"Display mode change may have failed: {result}")
             return {"success": False, "error": f"envycontrol failed: {result or 'no output'}", "mode": mode}
+        self.settings.set("display_change_boot", read_sysfs("/proc/sys/kernel/random/boot_id"))
+        self.settings.set("display_configured_mode", mode)
         logger.info(f"Display mode set to {mode}: {result}")
         return {"success": True, "mode": mode, "reboot_required": True, "output": result}
 
@@ -1043,20 +1220,38 @@ class HardwareManager:
             return False
 
     # --- Firmware Info ---
-    def get_firmware_info(self):
-        """Get BIOS version and firmware update info."""
-        info = {}
-        info["bios_version"] = read_sysfs("/sys/class/dmi/id/bios_version") or "Unknown"
-        info["vendor"] = read_sysfs("/sys/class/dmi/id/sys_vendor") or "Unknown"
-        info["fwupd_available"] = bool(run_cmd("which fwupdmgr 2>/dev/null"))
-        info["updates"] = []
-        if info["fwupd_available"]:
-            try:
-                raw = run_cmd("fwupdmgr get-updates --json 2>/dev/null", timeout=30)
-                if raw:
-                    info["updates"] = json.loads(raw).get("Devices", [])
-            except (json.JSONDecodeError, Exception) as e:
-                logger.error(f"Failed to parse fwupd updates: {e}")
+    def get_firmware_info(self, check=True):
+        """Only explicit checks invoke fwupd; initial settings remain inexpensive."""
+        info = {
+            "bios_version": read_sysfs("/sys/class/dmi/id/bios_version") or "Unknown",
+            "vendor": read_sysfs("/sys/class/dmi/id/sys_vendor") or "Unknown",
+            "fwupd_available": bool(shutil.which("fwupdmgr")),
+            "updates": [], "status": "not_checked", "checked_at": None,
+        }
+        info.update(getattr(self, "_firmware_cache", {}))
+        if not info["fwupd_available"]:
+            info["status"] = "unavailable"
+            return info
+        if not check:
+            return info
+        info["checked_at"] = time.time()
+        try:
+            result = subprocess.run(["fwupdmgr", "get-updates", "--json"],
+                                    capture_output=True, text=True, timeout=30)
+            # fwupd uses exit 2 for a successful query with no updates.
+            if result.returncode not in (0, 2):
+                raise RuntimeError(result.stderr.strip() or "Firmware check failed")
+            payload = json.loads(result.stdout) if result.stdout.strip() else {}
+            if not isinstance(payload, dict):
+                raise ValueError("Unexpected firmware response")
+            info["updates"] = payload.get("Devices", [])
+            info["status"] = "updates" if info["updates"] else "current"
+            info.pop("error", None)
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+            info["status"] = "error"
+            info["error"] = str(error)
+            info["updates"] = []
+        self._firmware_cache = dict(info)
         return info
 
     # --- Driver Management ---
@@ -1071,6 +1266,7 @@ class HardwareManager:
         )
 
     def restart_drivers_and_daemon(self):
+        self.stop_fan_curve()
         # Same deferred-restart trick. modprobe runs before the daemon
         # restart so the new daemon picks up the freshly-loaded module.
         # Each step is its own systemd-run unit so a modprobe failure
@@ -1123,6 +1319,12 @@ def main():
         print("Error: Archer daemon must run as root.", file=sys.stderr)
         sys.exit(1)
 
+    if sys.argv[1:] == ["--restore-fans"]:
+        # Also used by systemd ExecStopPost after SIGKILL / failed startup.
+        logging.basicConfig(level=logging.INFO)
+        hw = HardwareManager(restore_settings=False)
+        sys.exit(1 if hw.driver_status == "auto_restore_failed" else 0)
+
     setup_logging()
     logger.info(f"Archer Daemon v{VERSION} starting...")
 
@@ -1142,6 +1344,7 @@ def main():
             f"Failed to import D-Bus dependencies: {e}. "
             "Install python-dbus and python-gobject, then restart."
         )
+        hw.shutdown_fan_curves()
         cleanup_pid()
         sys.exit(1)
 
@@ -1156,6 +1359,7 @@ def main():
             "Check that /etc/dbus-1/system.d/io.otectus.Archer1.conf exists "
             "and 'systemctl reload dbus.service' has been run."
         )
+        hw.shutdown_fan_curves()
         cleanup_pid()
         sys.exit(1)
 

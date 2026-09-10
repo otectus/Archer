@@ -102,14 +102,6 @@ display_menu() {
             tag="[OPTIONAL]"
         fi
 
-        # Check conflicts
-        if [[ "$id" = "thermal" ]] && [[ "${MODULE_SELECTED[0]}" -eq 1 ]]; then
-            tag="${_RED}[CONFLICTS WITH #1]${_RESET}"
-        fi
-        if [[ "$id" = "driver" ]] && [[ "${MODULE_SELECTED[7]}" -eq 1 ]]; then
-            tag="${_RED}[CONFLICTS WITH #8]${_RESET}"
-        fi
-
         # GUI dependency hint
         if [[ "$id" = "gui" ]] && [[ "${MODULE_SELECTED[0]}" -eq 0 ]]; then
             tag="${tag} ${_YELLOW}(needs #1 Linuwu-Sense)${_RESET}"
@@ -146,13 +138,8 @@ init_selections() {
 }
 
 check_conflicts() {
-    # driver (#0) and thermal (#7) conflict
-    if [[ "${MODULE_SELECTED[0]}" -eq 1 ]] && [[ "${MODULE_SELECTED[7]}" -eq 1 ]]; then
-        warn "Linuwu-Sense driver and Kernel Thermal Profiles both selected."
-        warn "These conflict: Linuwu-Sense blacklists acer_wmi, which thermal profiles require."
-        warn "Please deselect one of them."
-        return 1
-    fi
+    # The thermal module reuses native/Linuwu profiles without loading acer_wmi.
+
     return 0
 }
 
@@ -197,27 +184,47 @@ run_menu() {
 # --- Module execution ---
 install_shared_deps() {
     log "Installing shared system dependencies..."
-    debug "Kernel headers package: $KERNEL_HEADERS"
-
-    # Verify the kernel headers package exists in repos before attempting install
-    if ! pacman -Si "$KERNEL_HEADERS" &>/dev/null && ! pacman -Qi "$KERNEL_HEADERS" &>/dev/null; then
-        warn "Kernel headers package '$KERNEL_HEADERS' not found in repos or installed."
-        warn "DKMS modules may fail to build. Check: pacman -Ss headers"
-    fi
-
-    local deps=(base-devel dkms git curl "$KERNEL_HEADERS" python-pip)
-
-    # Clang-built kernels require clang/llvm toolchain for DKMS module compilation
-    if [[ "$IS_CLANG_KERNEL" -eq 1 ]]; then
-        log "Clang-built kernel detected — including LLVM toolchain for DKMS builds."
+    local deps=(base-devel dkms git curl python-pip) path package
+    local need_kernels=0
+    for i in "${!MODULE_IDS[@]}"; do
+        if [[ "${MODULE_SELECTED[$i]}" -eq 1 ]]; then
+            case "${MODULE_IDS[$i]}" in
+                driver|camera-enhance|gpu) need_kernels=1 ;;
+                battery) kernel_battery_limit_path >/dev/null || need_kernels=1 ;;
+            esac
+        fi
+    done
+    if [[ "$need_kernels" -eq 1 ]]; then
+        for path in "$KERNEL_MODULES_ROOT"/*; do
+            [[ -f "$path/vmlinuz" || -d "$path/kernel" || -f "$path/build/Makefile" ]] || continue
+            if package=$(kernel_header_package "${path##*/}"); then
+                if pacman -Si "$package" &>/dev/null || pacman -Qi "$package" &>/dev/null; then
+                    [[ " ${deps[*]} " == *" $package "* ]] || deps+=("$package")
+                else
+                    warn "Header package $package is unavailable; exact prepared headers are required at $path/build."
+                fi
+            fi
+        done
+        # A package upgrade can change the compiler; include both toolchains.
         deps+=(clang llvm)
     fi
-
-    run_sudo pacman -Syu --needed --noconfirm "${deps[@]}"
+    run_sudo pacman -Syu --needed --noconfirm "${deps[@]}" || return 1
+    if [[ "$need_kernels" -eq 1 && "${DRY_RUN:-0}" -eq 0 ]]; then
+        kernel_collect_targets || return 1
+    fi
 }
 
 run_selected_modules() {
-    local installed_names=()
+    local installed_names=() failed=0 previous
+    # A driver-only update must not discard cleanup records for other modules.
+    if has_manifest; then
+        for previous in $(read_manifest_modules); do
+            is_known_module "$previous" && installed_names+=("$previous")
+        done
+        INSTALLED_FILES="$(read_manifest_field files_created)"
+        INSTALLED_DKMS="$(read_manifest_field dkms_modules)"
+        INSTALLED_PACKAGES="$(read_manifest_field packages_installed)"
+    fi
 
     for i in "${!MODULE_IDS[@]}"; do
         if [[ "${MODULE_SELECTED[$i]}" -eq 1 ]]; then
@@ -234,21 +241,32 @@ run_selected_modules() {
             fi
 
             section "Installing: $label"
-            # Snapshot manifest accumulators so a failed module's partial writes
-            # don't leak into the saved manifest.
+            # Retain cleanup records for completed steps even if a later step fails.
             local _files_pre="$INSTALLED_FILES"
             local _dkms_pre="$INSTALLED_DKMS"
             local _pkgs_pre="$INSTALLED_PACKAGES"
 
             source "$SCRIPT_DIR/modules/${id}.sh"
             if ! module_install; then
-                warn "Module $id failed to install. Rolling back manifest entries; continuing with remaining modules."
-                INSTALLED_FILES="$_files_pre"
-                INSTALLED_DKMS="$_dkms_pre"
-                INSTALLED_PACKAGES="$_pkgs_pre"
+                warn "Module $id failed to install. Retaining cleanup records for completed steps; continuing with remaining modules."
+                if [[ "$INSTALLED_FILES" != "$_files_pre" || "$INSTALLED_DKMS" != "$_dkms_pre" || "$INSTALLED_PACKAGES" != "$_pkgs_pre" ]]; then
+                    is_in_list "$id" "${installed_names[*]}" || installed_names+=("$id")
+                fi
+                failed=1
                 continue
             fi
-            installed_names+=("$id")
+            if ! is_in_list "$id" "${installed_names[*]}"; then
+                installed_names+=("$id")
+            fi
+            if [[ "$id" == driver ]]; then
+                local entry retained=""
+                for entry in $INSTALLED_DKMS; do
+                    if [[ "$entry" != linuwu-sense/* || "$entry" == "$DKMS_NAME/$DKMS_VERSION" ]]; then
+                        retained+=" $entry"
+                    fi
+                done
+                INSTALLED_DKMS="$retained"
+            fi
         fi
     done
 
@@ -256,9 +274,10 @@ run_selected_modules() {
     local modules_joined="${installed_names[*]}"
     if [[ -z "$modules_joined" ]]; then
         warn "No modules installed successfully — skipping manifest write."
-        return
+        return "$failed"
     fi
-    write_manifest "$modules_joined" "$INSTALLED_FILES" "$INSTALLED_DKMS" "$INSTALLED_PACKAGES"
+    write_manifest "$modules_joined" "$INSTALLED_FILES" "$INSTALLED_DKMS" "$INSTALLED_PACKAGES" || return 1
+    return "$failed"
 }
 
 verify_modules() {
@@ -415,16 +434,21 @@ main() {
     fi
 
     # Install shared dependencies
-    install_shared_deps
+    install_shared_deps || return 1
 
     # Run selected modules
-    run_selected_modules
+    local installation_failed=0
+    run_selected_modules || installation_failed=1
 
     # Verify
     verify_modules
 
     # Final summary
     section "Installation Complete"
+    if [[ "$installation_failed" -eq 1 ]]; then
+        warn "Some modules failed to install; see errors above. Existing manifest records were retained."
+        return 1
+    fi
     success "All selected modules have been installed."
 
     if [[ "$REBOOT_REQUIRED" -eq 1 ]]; then

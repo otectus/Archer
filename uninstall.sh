@@ -51,6 +51,7 @@ if has_manifest; then
     log "Installed modules: $INSTALLED_MODS"
     echo ""
 
+    uninstall_failed=0
     for mod in $INSTALLED_MODS; do
         # Allowlist gate: reject path-traversal or arbitrary names from a
         # tampered manifest before sourcing. is_known_module enforces both
@@ -64,14 +65,21 @@ if has_manifest; then
         if [[ -f "$local_mod_file" ]]; then
             log "Uninstalling: $mod"
             source "$local_mod_file"
-            module_uninstall
-            success "Removed: $mod"
+            if module_uninstall; then
+                success "Removed: $mod"
+            else
+                warn "Cleanup failed for $mod; retaining the manifest for retry."
+                uninstall_failed=1
+            fi
         else
             warn "Module file not found: $local_mod_file (skipping)"
         fi
         echo ""
     done
 
+    if [[ "$uninstall_failed" -ne 0 ]]; then
+        exit 1
+    fi
     # Remove manifest
     remove_manifest
     log "Install manifest removed."
@@ -88,20 +96,15 @@ else
     run rm -f "$HOME/.config/systemd/user/damx-daemon.service"
     run systemctl --user daemon-reload
 
-    # 2. Remove Driver (DKMS)
-    log "Removing Linuwu-Sense DKMS module..."
-    run_sudo dkms remove -m linuwu-sense -v 1.0 --all 2>/dev/null || true
-    run_sudo rm -rf "/usr/src/linuwu-sense-1.0"
-
-    # 3. Remove Blacklist
-    log "Restoring acer_wmi (removing blacklist)..."
-    run_sudo rm -f /etc/modprobe.d/blacklist-acer-wmi.conf
+    # Use the same version-aware cleanup with or without a manifest.
+    source "$SCRIPT_DIR/modules/driver.sh"
+    module_uninstall || exit 1
 
     # 4. Remove other possible configs from v2 modules
     run_sudo rm -f /etc/modprobe.d/touchpad-amd-fix.conf
     run_sudo rm -f /etc/modprobe.d/acer-audio-amd.conf
-    run_sudo rm -f /etc/modprobe.d/acer-thermal-profiles.conf
-    run_sudo rm -f /etc/udev/rules.d/99-acer-battery-health.rules
+    archer_remove_config /etc/modprobe.d/acer-thermal-profiles.conf || exit 1
+    archer_remove_config /etc/udev/rules.d/99-acer-battery-health.rules || exit 1
     run_sudo rm -f /etc/tlp.d/01-acer-optimize.conf
 
     # Remove touchpad service if present
@@ -112,8 +115,8 @@ else
     fi
 
     # Remove acer-wmi-battery DKMS if present
-    run_sudo dkms remove -m acer-wmi-battery -v 0.1.0 --all 2>/dev/null || true
-    run_sudo rm -rf "/usr/src/acer-wmi-battery-0.1.0"
+    source "$SCRIPT_DIR/modules/battery.sh"
+    module_uninstall || exit 1
 
     # 5. Clean application files
     if [[ -n "${HOME:-}" && "$HOME" != "/" ]]; then
@@ -140,7 +143,8 @@ else
     # 7. Remove enhancement configs if present
     run_sudo rm -f /etc/gamemode.d/archer.ini
     run_sudo rm -f /etc/pipewire/filter-chain.conf.d/archer-noise-suppress.conf
-    run_sudo rm -f /etc/modprobe.d/archer-v4l2loopback.conf
+    source "$SCRIPT_DIR/modules/camera-enhance.sh"
+    module_uninstall || exit 1
     run_sudo systemctl disable --now fwupd.service 2>/dev/null || true
 fi
 

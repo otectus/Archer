@@ -44,6 +44,18 @@ jobs:
       - name: Run Bats tests
         run: bats tests/*.bats
 
+  fan-driver-tests:
+    name: Fan safety and pinned driver packaging
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch upstream Git objects (preparation validates the pinned commit)
+        run: git clone --no-checkout https://github.com/0x7375646F/Linuwu-Sense.git /tmp/linuwu-upstream
+      - name: Test mock sysfs, fan C code, exact DMI patch and packaging failures
+        env:
+          LINUWU_TEST_REPO: /tmp/linuwu-upstream
+        run: python3 -m unittest discover -s tests -v
+
   python-lint:
     name: Python Lint (GUI)
     runs-on: ubuntu-latest
@@ -55,7 +67,7 @@ jobs:
       - name: Install flake8
         run: pip install flake8
       - name: Lint Python files
-        run: flake8 gui/ --max-line-length=120 --ignore=E501,W503,E402
+        run: flake8 gui/ tests/ scripts/ --max-line-length=120 --ignore=E501,W503,E402
 
   python-syntax:
     name: Python Syntax Check (GUI)
@@ -68,10 +80,49 @@ jobs:
       - name: Compile every GUI module
         run: |
           set -e
-          for f in $(find gui -name '*.py'); do
+          for f in $(find gui tests scripts -name '*.py'); do
             echo "py_compile $f"
             python -m py_compile "$f"
           done
+
+  desktop-metadata:
+    name: Desktop integration metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install desktop entry validator
+        run: sudo apt-get install -y desktop-file-utils
+      - name: Validate desktop entry and D-Bus/polkit XML
+        run: |
+          desktop-file-validate gui/io.github.archer.desktop
+          python3 - <<'PY'
+          import xml.etree.ElementTree as ET
+          for path in ('gui/io.otectus.Archer1.conf', 'gui/io.otectus.Archer1.policy'):
+              ET.parse(path)
+          PY
+
+  gui-interactions:
+    name: GTK UI and data contracts
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK test runtime
+        run: pacman -Syu --noconfirm python python-gobject python-cairo python-dbus gtk4 libadwaita xorg-server-xvfb xorg-xauth dbus
+      - name: Check pure data contracts
+        run: python tests/gui_contract_test.py
+      - name: Check interactions and layouts
+        run: xvfb-run -a dbus-run-session -- python tests/gui_test.py --capture
+      - name: Check high contrast
+        run: xvfb-run -a dbus-run-session -- python tests/gui_test.py --capture --high-contrast
+      - name: Check large text
+        run: xvfb-run -a dbus-run-session -- python tests/gui_test.py --capture --large-text
+      - name: Upload visual review captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: archer-ui-review
+          path: /tmp/archer-ui-review
 
   dbus-introspect-smoke:
     name: D-Bus Introspect Smoke
@@ -92,3 +143,46 @@ jobs:
           # service registers, exposes Ping, GetMonitoringData, and the
           # TelemetryUpdated/AudioEnhancementChanged signals.
           dbus-run-session -- bash tests/dbus_smoke.sh
+
+  kernel-module-build:
+    name: External modules / ${{ matrix.kernel }}
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    strategy:
+      fail-fast: false
+      matrix:
+        kernel: [linux, linux-lts, baseline-6.12, baseline-6.8]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build tools and maintained v4l2loopback source
+        run: pacman -Syu --noconfirm base-devel git clang llvm dkms v4l2loopback-dkms curl
+      - name: Install target headers
+        env:
+          TARGET: ${{ matrix.kernel }}
+        run: |
+          if [ "$TARGET" = baseline-6.12 ]; then
+            curl -fL https://archive.archlinux.org/packages/l/linux-lts-headers/linux-lts-headers-6.12.75-1-x86_64.pkg.tar.zst -o /tmp/headers.pkg.tar.zst
+            mkdir -p /tmp/baseline
+            tar -xf /tmp/headers.pkg.tar.zst -C /tmp/baseline
+            echo KERNEL_MODULES_ROOT=/tmp/baseline/usr/lib/modules >> "$GITHUB_ENV"
+          elif [ "$TARGET" = baseline-6.8 ]; then
+            curl -fL https://archive.archlinux.org/packages/l/linux-headers/linux-headers-6.8.9.arch1-2-x86_64.pkg.tar.zst -o /tmp/headers.pkg.tar.zst
+            mkdir -p /tmp/baseline
+            tar -xf /tmp/headers.pkg.tar.zst -C /tmp/baseline
+            echo KERNEL_MODULES_ROOT=/tmp/baseline/usr/lib/modules >> "$GITHUB_ENV"
+          else
+            pacman -S --noconfirm "$TARGET-headers"
+            echo KERNEL_MODULES_ROOT=/usr/lib/modules >> "$GITHUB_ENV"
+          fi
+      - name: Compile all external modules and replay patch preparation
+        run: |
+          set -o pipefail
+          config=$(pacman -Qlq v4l2loopback-dkms | grep '/dkms.conf$')
+          for release in "$KERNEL_MODULES_ROOT"/*/build/include/config/kernel.release; do
+            bash scripts/check-kernel-modules.sh "$(cat "$release")" "$(dirname "$config")" 2>&1 | tee -a /tmp/kernel-build.log
+          done
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-build-${{ matrix.kernel }}
+          path: /tmp/kernel-build.log

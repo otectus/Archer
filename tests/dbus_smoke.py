@@ -10,6 +10,8 @@ real hardware.
 """
 
 import sys
+import json
+import time
 import threading
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -36,6 +38,7 @@ REQUIRED_METHODS = (
     "GetSupportedFeatures",
     "SetThermalProfile",
     "SetAudioEnhancement",
+    "GetFirmwareInfo",
 )
 REQUIRED_SIGNALS = (
     "TelemetryUpdated",
@@ -70,6 +73,10 @@ class FakeHardware:
     def get_all_settings(self):
         return {"features": list(self.features), "battery_info": {"present": False}}
 
+    def get_firmware_info(self):
+        time.sleep(1)
+        return {"status": "current", "updates": []}
+
 
 def _fail(msg):
     print(f"FAIL: {msg}", file=sys.stderr)
@@ -93,13 +100,27 @@ def main():
     threading.Thread(target=main_loop.run, daemon=True).start()
 
     try:
-        proxy = bus.get_object(archer_dbus.DBUS_NAME, archer_dbus.DBUS_PATH)
+        client_bus = dbus.SessionBus(private=True)
+        proxy = client_bus.get_object(archer_dbus.DBUS_NAME, archer_dbus.DBUS_PATH)
         iface = dbus.Interface(proxy, archer_dbus.DBUS_IFACE)
 
         ping_resp = str(iface.Ping(timeout=5))
         if "success" not in ping_resp:
             _fail(f"Ping returned: {ping_resp!r}")
         print(f"OK: Ping -> {ping_resp}")
+
+        firmware_done = threading.Event()
+        firmware_result = []
+        iface.GetFirmwareInfo(reply_handler=lambda result: (firmware_result.append(json.loads(str(result))), firmware_done.set()),
+                              error_handler=lambda error: (firmware_result.append({"error": str(error)}), firmware_done.set()))
+        # Firmware checks run off the service main loop, so Ping remains responsive.
+        started = time.monotonic()
+        iface.Ping(timeout=2)
+        if time.monotonic() - started > .8:
+            _fail("Firmware query blocked the service main loop")
+        if not firmware_done.wait(3) or not firmware_result[0].get("success"):
+            _fail(f"Asynchronous firmware query failed: {firmware_result}")
+        print("OK: firmware query leaves Ping responsive")
 
         introspect = dbus.Interface(proxy, "org.freedesktop.DBus.Introspectable")
         xml = str(introspect.Introspect(timeout=5))

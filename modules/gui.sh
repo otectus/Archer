@@ -34,6 +34,19 @@ module_install() {
         "$SCRIPT_DIR/gui/archer-daemon.service"
         "$SCRIPT_DIR/gui/io.github.archer.desktop"
         "$SCRIPT_DIR/gui/assets/archer.svg"
+        "$SCRIPT_DIR/gui/archer/__init__.py"
+        "$SCRIPT_DIR/gui/archer/application.py"
+        "$SCRIPT_DIR/gui/archer/window.py"
+        "$SCRIPT_DIR/gui/archer/client.py"
+        "$SCRIPT_DIR/gui/archer/state.py"
+        "$SCRIPT_DIR/gui/archer/preferences.py"
+        "$SCRIPT_DIR/gui/archer/tray.py"
+        "$SCRIPT_DIR/gui/archer/style.css"
+        "$SCRIPT_DIR/gui/archer/pages/__init__.py"
+        "$SCRIPT_DIR/gui/archer/pages/controls.py"
+        "$SCRIPT_DIR/gui/archer/pages/overview.py"
+        "$SCRIPT_DIR/gui/archer/widgets/__init__.py"
+        "$SCRIPT_DIR/gui/archer/widgets/forms.py"
     )
     local _src
     for _src in "${_required[@]}"; do
@@ -44,7 +57,13 @@ module_install() {
 
     # Install dependencies
     log "Installing GUI dependencies..."
-    run_sudo pacman -S --needed --noconfirm python-gobject gtk4 libadwaita python python-pillow python-dbus
+    run_sudo pacman -S --needed --noconfirm python-gobject gtk4 libadwaita python python-cairo python-dbus
+
+    if [[ "${DRY_RUN:-0}" -eq 0 ]]; then
+        if ! python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1"); from gi.repository import Gtk, Adw; raise SystemExit(not ((Gtk.get_major_version(), Gtk.get_minor_version()) >= (4, 12) and (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 6)))'; then
+            error "Archer requires GTK 4.12 and libadwaita 1.6 or newer. Update your system packages."
+        fi
+    fi
 
     # Create directories
     run_sudo mkdir -p "$_GUI_INSTALL_DIR"
@@ -88,8 +107,9 @@ module_install() {
     run_sudo systemctl daemon-reload
     run_sudo systemctl enable archer-daemon.service
 
-    # Start daemon (may fail if Linuwu-Sense not yet loaded)
-    if ! run_sudo systemctl start archer-daemon.service 2>/dev/null; then
+    # Restart also starts an inactive service and picks up code on upgrades.
+    # The daemon's shutdown hooks restore automatic fan control first.
+    if ! run_sudo systemctl restart archer-daemon.service 2>/dev/null; then
         warn "Daemon did not start — Linuwu-Sense driver may not be loaded yet."
         warn "It will start automatically after reboot if the driver module is installed."
     fi
@@ -133,7 +153,7 @@ LAUNCHER_EOF
     log "Daemon status:  sudo systemctl status archer-daemon"
 
     INSTALLED_FILES+=" $_GUI_INSTALL_DIR $_GUI_SERVICE $_GUI_DESKTOP $_GUI_ICON $_GUI_LAUNCHER $_GUI_SETTINGS_DIR /etc/dbus-1/system.d/io.otectus.Archer1.conf /usr/share/polkit-1/actions/io.otectus.Archer1.policy"
-    INSTALLED_PACKAGES+=" python-gobject gtk4 libadwaita python-pillow python-dbus"
+    INSTALLED_PACKAGES+=" python-gobject gtk4 libadwaita python-cairo python-dbus"
 }
 
 module_uninstall() {
@@ -166,7 +186,7 @@ module_uninstall() {
     run_sudo rm -f /var/run/archer.sock 2>/dev/null || true
     run_sudo rm -f /var/run/archer-daemon.pid 2>/dev/null || true
 
-    log "Archer GUI removed. Packages retained (remove manually with: sudo pacman -Rns python-gobject gtk4 libadwaita python-pillow)"
+    log "Archer GUI removed. Packages retained (remove manually with: sudo pacman -Rns python-gobject gtk4 libadwaita python-cairo)"
 }
 
 module_verify() {

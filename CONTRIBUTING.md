@@ -13,33 +13,44 @@ cd Archer
 - [ShellCheck](https://www.shellcheck.net/) for linting
 - [Bats](https://github.com/bats-core/bats-core) for testing
 - Python 3.10+ (for GUI development)
+- GTK 4.12+, libadwaita 1.6+, PyGObject, pycairo, and dbus-python for GUI tests
 
 Install on Arch:
 ```bash
-sudo pacman -S shellcheck bash-bats python
+sudo pacman -S shellcheck bash-bats python python-flake8 python-gobject python-cairo python-dbus gtk4 libadwaita xorg-server-xvfb xorg-xauth dbus desktop-file-utils
 ```
 
 ## Running Tests
 
 ```bash
-# Run all tests
+# Shell tests
 bats tests/
 
-# Run a specific test file
-bats tests/detect.bats
+# Mock sysfs, fan safety, C harness, and pinned source preparation
+git clone --no-checkout https://github.com/0x7375646F/Linuwu-Sense.git /tmp/linuwu-upstream
+LINUWU_TEST_REPO=/tmp/linuwu-upstream python -m unittest discover -s tests -v
 
-# Run with verbose output
-bats -t tests/
+# GUI data contracts, interactions, tray D-Bus protocol, and daemon smoke test
+python tests/gui_contract_test.py
+xvfb-run -a dbus-run-session -- python tests/gui_test.py
+dbus-run-session -- bash tests/dbus_smoke.sh
 ```
+
+Run Bats files individually with `bats tests/detect.bats`. See [GUI verification](docs/gui.md#development-and-verification) for visual, contrast, and text-scaling runs, and [kernel validation](docs/kernel-compatibility.md#validation-evidence) for external module builds. These suites use mocks/private sessions and do not require changing host hardware settings.
 
 ## Running Lints
 
 ```bash
 # Lint all shell scripts
-find . -name '*.sh' -not -path './.git/*' -exec shellcheck -x -s bash {} \;
+rg --files -g '*.sh' -0 | xargs -0 shellcheck -x -s bash
+rg --files -g '*.sh' -0 | xargs -0 -n1 bash -n
 
-# Lint Python GUI code
-flake8 gui/ --max-line-length=120
+# Match CI's Python lint configuration
+flake8 gui tests scripts --max-line-length=120 --ignore=E501,W503,E402
+python -m compileall -q gui tests scripts
+desktop-file-validate gui/io.github.archer.desktop
+systemd-analyze verify gui/archer-daemon.service
+git diff --check
 ```
 
 ## Project Architecture
@@ -52,9 +63,14 @@ Archer/
     utils.sh           # Logging, run/run_sudo, helpers (shared by all scripts)
     detect.sh          # Hardware detection engine (DMI, GPU, WiFi, kernel, distro)
     manifest.sh        # JSON manifest for tracking installed state
+    kernel.sh          # Target headers, toolchains, and initramfs helpers
+    dkms.sh            # Shared driver packaging and lifecycle helpers
   modules/             # 13 independent modules (see below)
   gui/                 # GTK4/Adwaita application + D-Bus daemon
-  tests/               # Bats test suite
+  driver/              # Pinned sources, ordered patches, and source preparation
+  scripts/             # Diagnostics and external kernel module build checks
+  docs/                # GUI, deployment, and hardware validation guides
+  tests/               # Bats, Python, GTK, C harness, and D-Bus tests
 ```
 
 ## Adding a New Module
@@ -112,11 +128,13 @@ module_verify()          # Return 0 if working correctly
 
 ## Module Conflicts
 
-Some modules are mutually exclusive:
+The **driver** module owns the Acer WMI device. **thermal** reuses a native or
+Linuwu profile provider and must never remove the blacklist to load a second
+WMI owner. Independent providers such as AMD PMF must retain their profiles.
 
-- **driver** (Linuwu-Sense) and **thermal** (Kernel Thermal Profiles) both interact with `acer_wmi`. The driver blacklists it; thermal requires it. The installer enforces this conflict in `check_conflicts()`.
-
-When adding modules that conflict with existing ones, update `check_conflicts()` in `install.sh` and add conflict tags in `display_menu()`.
+Hardware support belongs in the driver layer. See the [pinned driver package](driver/linuwu-sense/README.md)
+for revision/patch updates and DKMS version migration. Do not infer fan capability
+from a marketing model name or force a generation in the GUI.
 
 ## CI Pipeline
 
@@ -125,6 +143,13 @@ All PRs are checked by GitHub Actions:
 - **ShellCheck**: Lints all `.sh` files
 - **Bash syntax**: `bash -n` on all scripts
 - **Bats tests**: Runs `tests/*.bats`
-- **Python lint**: flake8 on `gui/`
+- **Python lint and syntax**: flake8 and compilation of `gui/`, `tests/`, and `scripts/`
+- **Desktop integration metadata**: desktop entry validation and D-Bus/polkit XML parsing
+- **GTK UI and data contracts**: simulated interactions, tray protocol/lifecycle checks, and visual captures at multiple sizes, high contrast, and large text
+- **D-Bus smoke**: service introspection, telemetry, and firmware responsiveness on a private session bus
+- **Fan/driver tests**: `LINUWU_TEST_REPO=/path/to/upstream python3 -m unittest discover -s tests -v`
+  validates mock sysfs, the actual patched C fan code, deterministic preparation
+  and refusal on source mismatch. CI fetches upstream before this test.
+- **Kernel modules**: compile Linuwu-Sense, acer-wmi-battery, and v4l2loopback against rolling Arch/LTS and fixed 6.8/6.12 headers
 
-Ensure all checks pass before submitting a PR.
+Ensure all checks pass before submitting a PR. Follow the [deployment guide](docs/deployment.md) for upgrades and release validation; automated tests do not replace desktop and Acer hardware checks.

@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 # Module: Kernel Thermal Profiles
-# Enables native acer_wmi thermal profile support on kernel 6.8+
-# WARNING: Conflicts with driver module (Linuwu-Sense blacklists acer_wmi)
+# Uses the platform-profile ABI exposed by the active provider.
+# Uses an existing profile provider; never loads two Acer WMI owners.
 
 MODULE_NAME="Kernel Thermal Profiles"
 MODULE_ID="thermal"
-MODULE_DESCRIPTION="Native kernel thermal profiles via acer_wmi (requires kernel 6.8+)"
+MODULE_DESCRIPTION="Native kernel thermal profiles"
 
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/kernel.sh"
+_THERMAL_PROFILE="/sys/firmware/acpi/platform_profile"
+_THERMAL_DRIVER_BLACKLIST="/etc/modprobe.d/blacklist-acer-wmi.conf"
 _THERMAL_CONF="/etc/modprobe.d/acer-thermal-profiles.conf"
 
 module_detect() {
-    # Only relevant for gaming models on kernel 6.8+
+    # Only relevant when a gaming model exposes platform profiles
     if [[ "$SUPPORTS_THERMAL_PROFILES" -eq 1 ]]; then
         case "$MODEL_FAMILY" in
             nitro|predator|helios|triton) return 0 ;;
@@ -20,64 +23,36 @@ module_detect() {
 }
 
 module_check_installed() {
-    [[ -f "$_THERMAL_CONF" ]]
+    kernel_profile_path >/dev/null
 }
 
 module_install() {
-    # Kernel version check
-    if [[ "$SUPPORTS_THERMAL_PROFILES" -ne 1 ]]; then
-        warn "Kernel 6.8+ required for native thermal profile support. Current: $KERNEL_VERSION"
-        return 1
+    # A working native provider needs no force-generation override.
+    if [[ -f "$_THERMAL_PROFILE" ]] || kernel_profile_path >/dev/null; then
+        log "Existing platform-profile provider is active; retaining its profiles."
+        return 0
     fi
-
-    # Conflict check
-    if [[ -f /etc/modprobe.d/blacklist-acer-wmi.conf ]]; then
-        warn "acer_wmi is currently blacklisted (by the Linuwu-Sense driver)."
-        warn "Native thermal profiles require acer_wmi to be loaded."
-        warn "Using this module alongside the Linuwu-Sense driver may cause conflicts."
-        if ! confirm "Continue anyway?"; then
-            log "Skipping thermal profile setup."
-            return 0
-        fi
-        # Remove the blacklist to allow acer_wmi
-        log "Removing acer_wmi blacklist..."
-        run_sudo rm -f /etc/modprobe.d/blacklist-acer-wmi.conf
+    if [[ -f "$_THERMAL_DRIVER_BLACKLIST" ]]; then
+        log "Linuwu-Sense owns Acer WMI and supplies profiles on supported models."
+        warn "No profile currently exposed. Reboot and run python3 scripts/archer-diagnose.py."
+        return 0
     fi
-
-    # Write thermal profile configuration
-    log "Enabling Predator Sense v4 thermal profile support..."
-    run_sudo tee "$_THERMAL_CONF" > /dev/null <<'EOF'
-# Acer thermal profile support - Archer Compatibility Suite
-# Enable Predator Sense v4 thermal profiles
-options acer_wmi predator_v4=1
-# Enable thermal profile cycling with mode button
-options acer_wmi cycle_gaming_thermal_profile=1
-EOF
-
-    # GRUB parameter injection
-    add_grub_params "acer_wmi.predator_v4=1"
-
-    INSTALLED_FILES+=" $_THERMAL_CONF"
-    mark_reboot_required
-
-    log "Thermal profiles configured. After reboot, use:"
-    log "  cat /sys/firmware/acpi/platform_profile_choices  (list profiles)"
-    log "  echo balanced | sudo tee /sys/firmware/acpi/platform_profile  (set profile)"
-    log "  The mode button on your keyboard should now cycle through profiles."
+    warn "No platform-profile interface exposed by this hardware/kernel. Update the kernel or check the driver probe log; no model-generation override was applied."
+    return 1
 }
 
 module_uninstall() {
     log "Removing thermal profile configuration..."
-    run_sudo rm -f "$_THERMAL_CONF"
+    archer_remove_config "$_THERMAL_CONF" || return 1
 
     # Revert GRUB parameter
     remove_grub_params "acer_wmi.predator_v4=1"
 }
 
 module_verify() {
-    if [[ -f /sys/firmware/acpi/platform_profile ]]; then
-        local profile
-        profile=$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)
+    local path profile
+    if path=$(kernel_profile_path); then
+        profile=$(cat "$path") || return 1
         log "Active thermal profile: $profile"
         return 0
     fi

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Hardware detection and recommendation engine (Bash)
 
+source "$(dirname "${BASH_SOURCE[0]}")/kernel.sh"
+
 # --- DMI Information ---
 ACER_PRODUCT_NAME=""
 ACER_BOARD_NAME=""
@@ -63,7 +65,7 @@ detect_dmi() {
 
 detect_model_family() {
     case "$ACER_PRODUCT_NAME" in
-        *Nitro*)      MODEL_FAMILY="nitro" ;;
+        *Nitro*|ANV[0-9]*|AN[0-9]*)      MODEL_FAMILY="nitro" ;;
         *Predator*)   MODEL_FAMILY="predator" ;;
         *Helios*)     MODEL_FAMILY="helios" ;;
         *Triton*)     MODEL_FAMILY="triton" ;;
@@ -156,53 +158,23 @@ detect_battery() {
 
 detect_kernel() {
     KERNEL_VERSION=$(uname -r)
-    KERNEL_MAJOR=$(echo "$KERNEL_VERSION" | cut -d. -f1)
-    KERNEL_MINOR=$(echo "$KERNEL_VERSION" | cut -d. -f2)
-    debug "Kernel: $KERNEL_VERSION (major=$KERNEL_MAJOR, minor=$KERNEL_MINOR)"
-    SUPPORTS_THERMAL_PROFILES=0
-    if [[ "$KERNEL_MAJOR" -gt 6 ]] || { [[ "$KERNEL_MAJOR" -eq 6 ]] && [[ "$KERNEL_MINOR" -ge 8 ]]; }; then
-        SUPPORTS_THERMAL_PROFILES=1
-    fi
-
-    IS_CACHYOS=0
-    KERNEL_HEADERS="linux-headers"
-    if [[ "$KERNEL_VERSION" == *"cachyos"* ]]; then
-        IS_CACHYOS=1
-        # Dynamically detect the correct headers package for the installed kernel
-        local kernel_pkg
-        kernel_pkg=$(pacman -Qoq "/usr/lib/modules/${KERNEL_VERSION}/vmlinuz" 2>/dev/null || echo "")
-        if [[ -n "$kernel_pkg" ]]; then
-            KERNEL_HEADERS="${kernel_pkg}-headers"
-            debug "CachyOS kernel package detected: $kernel_pkg -> headers: $KERNEL_HEADERS"
-        else
-            # Running kernel may not match installed packages (reboot pending)
-            # Try to find the right CachyOS kernel package
-            kernel_pkg=$(pacman -Q 2>/dev/null | grep -oP 'linux-cachyos\S*(?=\s)' | grep -v headers | head -1)
-            if [[ -n "$kernel_pkg" ]]; then
-                KERNEL_HEADERS="${kernel_pkg}-headers"
-                debug "CachyOS headers resolved via pacman -Q fallback: $KERNEL_HEADERS"
-            else
-                KERNEL_HEADERS="linux-cachyos-headers"
-                warn "Could not detect exact CachyOS kernel headers package."
-                warn "Defaulting to '$KERNEL_HEADERS'. If DKMS builds fail, install the correct headers manually:"
-                warn "  pacman -Ss linux-cachyos.*headers"
-            fi
-        fi
+    if [[ "$KERNEL_VERSION" =~ ^([0-9]+)\.([0-9]+) ]]; then
+        KERNEL_MAJOR=$((10#${BASH_REMATCH[1]}))
+        KERNEL_MINOR=$((10#${BASH_REMATCH[2]}))
     else
-        # For non-CachyOS: try dynamic detection too
-        local kernel_pkg
-        kernel_pkg=$(pacman -Qoq "/usr/lib/modules/${KERNEL_VERSION}/vmlinuz" 2>/dev/null || echo "")
-        if [[ -n "$kernel_pkg" ]]; then
-            KERNEL_HEADERS="${kernel_pkg}-headers"
-            debug "Kernel headers resolved: $KERNEL_HEADERS"
-        fi
+        warn "Cannot parse kernel release: $KERNEL_VERSION"
+        return 1
     fi
-
-    # Detect Clang-built kernel (CachyOS and other distros may build with Clang/LLVM)
+    SUPPORTS_THERMAL_PROFILES=0
+    if kernel_profile_path >/dev/null; then SUPPORTS_THERMAL_PROFILES=1; fi
+    IS_CACHYOS=0
+    [[ "$KERNEL_VERSION" == *cachyos* ]] && IS_CACHYOS=1
+    KERNEL_HEADERS=$(kernel_header_package "$KERNEL_VERSION") || KERNEL_HEADERS=""
     IS_CLANG_KERNEL=0
     CLANG_BUILD_FLAGS=""
-    if grep -q "clang" /proc/version 2>/dev/null; then
+    if grep -qi clang "$KERNEL_PROC_VERSION" 2>/dev/null; then
         IS_CLANG_KERNEL=1
+        # Informational only. DKMS must select tools from each target's config.
         CLANG_BUILD_FLAGS="LLVM=1 CC=clang"
     fi
 }
@@ -339,7 +311,7 @@ build_recommendations() {
     # Power: always optional
     OPTIONAL_MODULES+=("power")
 
-    # Thermal: recommended for gaming models on 6.8+
+    # Thermal: exposed platform-profile capability on gaming models
     if [[ "$SUPPORTS_THERMAL_PROFILES" -eq 1 ]]; then
         case "$MODEL_FAMILY" in
             nitro|predator|helios|triton)

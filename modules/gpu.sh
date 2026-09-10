@@ -2,6 +2,8 @@
 # Module: GPU Switching
 # Installs EnvyControl for NVIDIA Optimus GPU mode management
 
+source "$(dirname "${BASH_SOURCE[0]}")/../lib/kernel.sh"
+
 MODULE_NAME="GPU Switching"
 MODULE_ID="gpu"
 MODULE_DESCRIPTION="EnvyControl for NVIDIA Optimus hybrid graphics switching"
@@ -20,10 +22,26 @@ module_check_installed() {
 
 module_install() {
     # Ensure NVIDIA driver is installed
-    if ! pacman -Qi nvidia &>/dev/null && ! pacman -Qi nvidia-dkms &>/dev/null; then
+    if ! modinfo nvidia &>/dev/null && [[ ! -d /sys/module/nvidia ]]; then
         log "NVIDIA driver not installed. Installing nvidia-dkms..."
-        run_sudo pacman -S --needed --noconfirm nvidia-dkms nvidia-utils
+        run_sudo pacman -S --needed --noconfirm nvidia-dkms nvidia-utils || return 1
         INSTALLED_PACKAGES+=" nvidia-dkms nvidia-utils"
+    fi
+
+    if [[ "${DRY_RUN:-0}" -eq 0 ]]; then
+        kernel_collect_targets || return 1
+        local kernel
+        for kernel in "${KERNEL_TARGETS[@]}"; do
+            # Catch pacman hooks that warned but let the package transaction succeed.
+            if ! run_sudo dkms autoinstall -k "$kernel"; then
+                warn "DKMS rebuild failed for $kernel; inspect /var/lib/dkms/*/*/build/make.log before changing GPU mode."
+                return 1
+            fi
+            if ! modinfo -k "$kernel" nvidia &>/dev/null; then
+                warn "No NVIDIA module for $kernel. Install the distro's NVIDIA package matching your GPU and kernel."
+                return 1
+            fi
+        done
     fi
 
     # Install EnvyControl
@@ -52,36 +70,18 @@ module_install() {
     fi
 
     log "Setting GPU mode to: $gpu_mode"
-    # EnvyControl internally calls 'mkinitcpio -P' via subprocess.run, which
-    # hangs on CachyOS due to the Limine wrapper's interactive prompt and
-    # multi-kernel preset rebuilds. We temporarily replace mkinitcpio with a
-    # no-op shim so envycontrol skips it, then do our own rebuild afterwards.
-    local _shim_path="/usr/local/bin/mkinitcpio"
-    local _had_existing=0
-    if [[ -f "$_shim_path" ]]; then
-        _had_existing=1
-        run_sudo mv "$_shim_path" "$_shim_path.archer-bak"
-    fi
-    run_sudo tee "$_shim_path" > /dev/null <<'SHIM'
-#!/bin/sh
-exit 0
-SHIM
-    run_sudo chmod 755 "$_shim_path"
-
+    # Resolve the executable before limiting PATH to distro tools. This bypasses
+    # interactive /usr/local wrappers without replacing a system executable.
+    local envycontrol_path
+    envycontrol_path=$(command -v envycontrol) || return 1
     if [[ "$gpu_mode" = "hybrid" ]]; then
-        run_sudo envycontrol -s hybrid --rtd3 2
+        run_sudo env PATH=/usr/bin:/bin "$envycontrol_path" -s hybrid --rtd3 2 || return 1
     else
-        run_sudo envycontrol -s "$gpu_mode"
+        run_sudo env PATH=/usr/bin:/bin "$envycontrol_path" -s "$gpu_mode" || return 1
     fi
 
-    # Restore original wrapper or remove shim
-    run_sudo rm -f "$_shim_path"
-    if [[ "$_had_existing" -eq 1 ]]; then
-        run_sudo mv "$_shim_path.archer-bak" "$_shim_path"
-    fi
-
-    # Now rebuild initramfs properly (single preset, with timeout, bypasses wrapper)
-    rebuild_initramfs
+    # Rebuild every installed kernel, including LTS and vendor variants.
+    rebuild_initramfs || return 1
 
     INSTALLED_PACKAGES+=" envycontrol"
     mark_reboot_required
@@ -91,24 +91,10 @@ SHIM
 module_uninstall() {
     log "Resetting GPU configuration..."
     if has_cmd envycontrol; then
-        # envycontrol --reset also calls mkinitcpio -P internally; use same shim trick
-        local _shim_path="/usr/local/bin/mkinitcpio"
-        local _had_existing=0
-        if [[ -f "$_shim_path" ]]; then
-            _had_existing=1
-            run_sudo mv "$_shim_path" "$_shim_path.archer-bak"
-        fi
-        printf '#!/bin/sh\nexit 0\n' | run_sudo tee "$_shim_path" > /dev/null
-        run_sudo chmod 755 "$_shim_path"
-
-        run_sudo envycontrol --reset 2>/dev/null || true
-
-        run_sudo rm -f "$_shim_path"
-        if [[ "$_had_existing" -eq 1 ]]; then
-            run_sudo mv "$_shim_path.archer-bak" "$_shim_path"
-        fi
-
-        rebuild_initramfs
+        local envycontrol_path
+        envycontrol_path=$(command -v envycontrol) || return 1
+        run_sudo env PATH=/usr/bin:/bin "$envycontrol_path" --reset || return 1
+        rebuild_initramfs || return 1
     fi
     log "EnvyControl package retained (remove manually if desired)."
 }

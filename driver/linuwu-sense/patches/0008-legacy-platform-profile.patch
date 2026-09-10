@@ -1,0 +1,93 @@
+--- a/src/linuwu_sense.c
++++ b/src/linuwu_sense.c
+@@ -967,7 +967,9 @@
+      {}
+  };
+  
++ #ifndef ARCHER_LEGACY_PLATFORM_PROFILE
+  static struct device *platform_profile_device;
++ #endif
+  static bool platform_profile_support;
+  
+  /*
+@@ -2350,22 +2352,60 @@
+  
+  static acpi_status battery_health_set(u8 function, u8 function_status);
+  
++ #ifdef ARCHER_LEGACY_PLATFORM_PROFILE
++ static int archer_profile_get(struct platform_profile_handler *handler,
++                              enum platform_profile_option *profile)
++ {
++     return acer_predator_v4_platform_profile_get(NULL, profile);
++ }
++ static int archer_profile_set(struct platform_profile_handler *handler,
++                              enum platform_profile_option profile)
++ {
++     return acer_predator_v4_platform_profile_set(NULL, profile);
++ }
++ static struct platform_profile_handler archer_profile = {
++     .profile_get = archer_profile_get,
++     .profile_set = archer_profile_set,
++ };
++ static void archer_profile_remove(void *unused)
++ {
++     platform_profile_support = false;
++     platform_profile_remove();
++ }
++ #else
+  static const struct platform_profile_ops acer_predator_v4_platform_profile_ops = {
+      .probe = acer_predator_v4_platform_profile_probe,
+      .profile_get = acer_predator_v4_platform_profile_get,
+      .profile_set = acer_predator_v4_platform_profile_set,
+  };
++ #endif
+  
+  static int acer_platform_profile_setup(struct platform_device *pdev)
+  {
++ #ifndef ARCHER_LEGACY_PLATFORM_PROFILE
+      const int max_retries = 10;
+      int delay_ms = 100;
++ #endif
+      if (native_platform_profile) {
+          pr_info("Preserving native platform-profile provider; gaming profile writes disabled\n");
+          return 0;
+      }
+      if (!quirks->predator_v4 && !quirks->nitro_sense && !quirks->nitro_v4)
+          return 0;
++ #ifdef ARCHER_LEGACY_PLATFORM_PROFILE
++     int err = acer_predator_v4_platform_profile_probe(NULL, archer_profile.choices);
++     if (err) {
++         pr_warn("Platform profile probe failed: %d; keeping other controls available\n", err);
++         return 0;
++     }
++     err = platform_profile_register(&archer_profile);
++     if (err) {
++         pr_warn("Platform profile registration failed: %d; keeping other controls available\n", err);
++         return 0;
++     }
++     platform_profile_support = true;
++     return devm_add_action_or_reset(&pdev->dev, archer_profile_remove, NULL);
++ #else
+      for (int attempt = 1; attempt <= max_retries; attempt++) {
+          platform_profile_device = devm_platform_profile_register(
+              &pdev->dev, "acer-wmi", NULL, &acer_predator_v4_platform_profile_ops);
+@@ -2382,6 +2422,7 @@
+          }
+      }
+      pr_warn("Platform profile setup failed. Continuing to load without profile support.\n");
++ #endif
+      platform_profile_support = false; /* Disable platform profile support if unavailable. */
+      
+      return 0;
+@@ -2464,7 +2505,11 @@
+          if (tp != acer_predator_v4_max_perf)
+              last_non_turbo_profile = tp;
+  
++ #ifdef ARCHER_LEGACY_PLATFORM_PROFILE
++         platform_profile_notify();
++ #else
+          platform_profile_notify(platform_profile_device);
++ #endif
+      }
+  
+      return 0;

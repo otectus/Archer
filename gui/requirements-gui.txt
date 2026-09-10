@@ -1,13 +1,8 @@
-# Archer GUI Dependencies
-# Install via pacman (preferred on Arch):
-#   sudo pacman -S python-gobject gtk4 libadwaita python-pillow
+# Archer uses system packages, not pip packages.
+# Install on Arch:
+#   sudo pacman -S python-gobject python-cairo python-dbus gtk4 libadwaita
 #
-# The following are system packages, not pip packages:
-# - python-gobject (PyGObject - GTK4 Python bindings)
-# - gtk4 (GTK4 toolkit)
-# - libadwaita (Adaptive widgets for GTK4)
-# - python-pillow (PIL - image processing for tray icon)
-#
-# System tray uses D-Bus StatusNotifierItem (no extra packages needed).
-# Pillow is only needed for rendering the tray icon pixmap.
-Pillow
+# GTK >= 4.12 and libadwaita >= 1.6 are required.
+# python-cairo renders telemetry charts and keyboard previews.
+# GdkPixbuf (provided by the GTK runtime) renders the SVG tray icon.
+# The system tray uses D-Bus StatusNotifierItem.

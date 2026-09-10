@@ -1,12 +1,12 @@
 [Unit]
 Description=Archer Compatibility Suite - System Daemon
-After=multi-user.target dbus.service
-Wants=multi-user.target
+After=dbus.service
 Requires=dbus.service
 
 [Service]
 Type=simple
 ExecStart=/usr/bin/python3 /opt/archer/archer_daemon.py
+ExecStopPost=/usr/bin/python3 /opt/archer/archer_daemon.py --restore-fans
 Restart=on-failure
 RestartSec=5
 
