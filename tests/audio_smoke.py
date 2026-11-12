@@ -40,20 +40,26 @@ def main():
             with open(root / 'pipewire.log', 'w+') as log:
                 server = subprocess.Popen(['pipewire'], env=environment, stdout=log, stderr=log)
                 try:
-                    found = False
+                    found, dump_error = False, 'pw-dump never ran'
                     for _ in range(30):
                         if server.poll() is not None:
                             break
                         result = subprocess.run(['pw-dump'], env=client_environment, capture_output=True, text=True, timeout=5)
-                        if result.returncode == 0:
-                            objects = json.loads(result.stdout)
+                        dump_error = result.stderr.strip() or f'pw-dump exited {result.returncode} with {len(result.stdout)} bytes'
+                        try:
+                            # pw-dump also exits 0 without output when the server drops the connection.
+                            objects = json.loads(result.stdout) if result.returncode == 0 else None
+                        except ValueError:
+                            objects = None
+                        if objects is not None:
                             found = any(item.get('info', {}).get('props', {}).get('node.name') == 'archer_noise_suppressed'
                                         and item.get('info', {}).get('props', {}).get('media.class') == 'Audio/Source' for item in objects)
                             if found == enabled:
                                 return
                         time.sleep(.1)
                     log.seek(0)
-                    raise AssertionError(f'Expected virtual source enabled={enabled}, found={found}\n{result.stderr}\n{log.read()}')
+                    raise AssertionError(f'Expected virtual source enabled={enabled}, found={found}, '
+                                         f'server exit status={server.poll()}\n{dump_error}\n{log.read()}')
                 finally:
                     server.terminate()
                     server.wait(timeout=5)

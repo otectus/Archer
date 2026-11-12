@@ -111,7 +111,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install GTK test runtime
-        run: pacman -Syu --noconfirm python python-gobject python-cairo python-dbus gtk4 libadwaita xorg-server-xvfb xorg-xauth dbus pipewire noise-suppression-for-voice
+        run: pacman -Syu --noconfirm python python-gobject python-cairo python-dbus gtk4 libadwaita xorg-server-xvfb xorg-xauth dbus pipewire pipewire-audio noise-suppression-for-voice
       - name: Verify the real audio filter in an isolated PipeWire server
         run: python tests/audio_smoke.py
       - name: Check pure data contracts
