@@ -13,6 +13,8 @@ import logging
 import math
 import threading
 
+from archer.binary import BINARY_KEYS, normalize_binary_state
+
 logger = logging.getLogger("archer-client")
 
 # Default per-call timeout (seconds). Fast enough that a hung daemon is
@@ -296,6 +298,13 @@ def normalize_settings(raw):
             saved[key] = {}
     audio = data.get("audio_enhancement") or saved.get("audio_enhancement", {})
     data["audio_enhancement"] = audio if isinstance(audio, dict) else {}
+    # LCD override, boot sound and backlight timeout: keep unknown as None. An
+    # object or string in a scalar must never become True, and an older service
+    # without *_state objects gets a cautious legacy view.
+    for key in BINARY_KEYS:
+        scalar = data.get(key)
+        data[key] = scalar if scalar is None or isinstance(scalar, bool) else None
+        data[f"{key}_state"] = normalize_binary_state(data.get(f"{key}_state"), saved.get(key))
     data["system_info"]["daemon_version"] = data.get("daemon_version", "Unknown")
     data["system_info"] = {key: str(value) if value is not None else "" for key, value in data["system_info"].items()}
     data["battery_info"] = normalize_telemetry({"battery_info": data["battery_info"]})["battery_info"]

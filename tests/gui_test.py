@@ -2,6 +2,7 @@
 """Hardware-free integration tests. Run under xvfb-run and dbus-run-session in CI."""
 
 import copy
+import json
 import os
 import sys
 import tempfile
@@ -47,6 +48,7 @@ CAPTURE = '--capture' in sys.argv
 if CAPTURE:
     sys.argv.remove('--capture')
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gui'))
+sys.path.insert(0, str(Path(__file__).resolve().parent / 'helpers'))
 
 import gi
 
@@ -54,9 +56,13 @@ gi.require_version('Gtk', '4.0')
 gi.require_version('Adw', '1')
 from gi.repository import Adw, Gio, GLib, Gtk
 
+from archer.binary import BINARY_KEYS, TEXTS
 from archer.client import normalize_settings
 from archer.preferences import Preferences
 from archer.window import ArcherWindow
+from archer_binary import BinaryControl
+from archer_settings import SettingsStore
+from firmware_node import FirmwareNode
 
 
 SETTINGS = {
@@ -82,19 +88,60 @@ LIVE = {'cpu_temp': 52, 'gpu_temp': 43, 'cpu_usage': 24, 'gpu_usage': 8, 'fan_rp
 
 
 class FakeClient:
-    def __init__(self):
+    """Fake transport. LCD override, boot sound and backlight timeout run the real
+    daemon-side controller and settings store over nodes whose readback stays -1."""
+
+    def __init__(self, settings_path):
         self.data = copy.deepcopy(SETTINGS)
         self.calls = []
         self.response = {'success': True}
         self.init_error = None
         self.dbus_iface = None
         self.delay = 0
+        self.legacy = False  # Model a service that predates *_state objects.
+        self.settings_path = settings_path
+        self.nodes = {key: FirmwareNode() for key in BINARY_KEYS}
+        self.start_daemon()
+
+    def start_daemon(self, restore=False):
+        """A new daemon session reading the same settings file and nodes."""
+        self.store = SettingsStore(self.settings_path)
+        self.controls = {key: BinaryControl(key, lambda: '/sys/fake/node', lambda: self.store,
+                                            TEXTS[key]['name'], io=self.nodes[key]) for key in BINARY_KEYS}
+        if restore:
+            for control in self.controls.values():
+                control.restore(True)
 
     def reconnect(self):
         return True
 
     def get_all_settings(self):
-        return normalize_settings(copy.deepcopy(self.data))
+        data = copy.deepcopy(self.data)
+        for key, control in self.controls.items():
+            state = control.snapshot()
+            if self.legacy:  # The old daemon reported -1 as False and sent no state object.
+                data[key] = state['observed'] is True
+            else:
+                data[key], data[f'{key}_state'] = state['effective'], state
+        data['saved_settings'] = {**data.get('saved_settings', {}), **self.store.data}
+        return normalize_settings(data)
+
+    def _binary(self, key, enabled):
+        self.calls.append((f'set_{key}', (enabled,)))
+        time.sleep(self.delay)
+        if not self.response.get('success'):
+            return copy.deepcopy(self.response)
+        result = self.controls[key].apply(enabled)
+        return {'success': result['success']} if self.legacy else result
+
+    def set_lcd_override(self, enabled):
+        return self._binary('lcd_override', enabled)
+
+    def set_boot_animation_sound(self, enabled):
+        return self._binary('boot_animation_sound', enabled)
+
+    def set_backlight_timeout(self, enabled):
+        return self._binary('backlight_timeout', enabled)
 
     def get_monitoring_data(self):
         return {**copy.deepcopy(LIVE), 'power_source_ac': self.data['power_source_ac'],
@@ -111,7 +158,7 @@ class FakeClient:
                 response = copy.deepcopy(self.response)
                 if response.get('success'):
                     mapping = {'set_battery_limiter': 'battery_limiter', 'set_thermal_profile': 'thermal_profile',
-                               'set_usb_charging': 'usb_charging', 'set_backlight_timeout': 'backlight_timeout'}
+                               'set_usb_charging': 'usb_charging'}
                     if name in mapping:
                         self.data[mapping[name]] = args[0]
                 return response
@@ -143,7 +190,8 @@ class GuiTests(unittest.TestCase):
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.client = FakeClient()
+        self.settings_path = Path(self.temp.name) / 'settings.json'
+        self.client = FakeClient(self.settings_path)
         self.window = ArcherWindow(client=self.client, autostart=False,
                                    preferences=Preferences(Path(self.temp.name) / 'gui.json'))
         self.state = self.window.state
@@ -540,6 +588,291 @@ class GuiTests(unittest.TestCase):
             finish.assert_not_called()
             self.assertTrue(self.window.get_visible())
             self.assertFalse(self.state.closed)
+
+    # --- Issue #10: LCD override with readback the driver cannot decode (-1) ---
+
+    def lcd(self):
+        return self.window.pages['display'].lcd_view
+
+    def settle(self, form):
+        drain(lambda: not form.pending and not self.state._fetching, timeout=3)
+
+    def saved_lcd(self):
+        return json.loads(self.settings_path.read_text()).get('lcd_override')
+
+    def rebuild_window(self):
+        self.window.dispose_resources()
+        self.window.destroy()
+        self.window = ArcherWindow(client=self.client, autostart=False,
+                                   preferences=Preferences(Path(self.temp.name) / 'gui.json'))
+        self.state = self.window.state
+        self.load()
+
+    def test_lcd_unknown_readback_sequence_sends_one_then_zero(self):
+        node, view = self.client.nodes['lcd_override'], self.lcd()
+        # Unknown readback and no preference: no authoritative Off switch.
+        self.assertFalse(view.switch.get_visible())
+        self.assertTrue(view.turn_on.get_visible() and view.turn_off.get_visible())
+        self.assertEqual(view.status.get_subtitle(), 'Current state unknown. This device does not report its LCD override state. '
+                                                     'Choose On or Off to send an explicit request.')
+        view.turn_on.emit('activated')
+        self.settle(view.form)
+        self.assertEqual(node.writes, ['1'])
+        self.assertTrue(view.switch.get_visible() and view.switch.get_active())
+        self.assertEqual(view.status.get_subtitle(), 'On requested. This device does not report its LCD override state.')
+        self.assertEqual(view.form.feedback.get_label(), 'Preference saved. Hardware state could not be verified.')
+        self.assertIs(self.saved_lcd(), True)
+        view.switch.set_active(False)
+        self.settle(view.form)
+        self.assertEqual(node.writes, ['1', '0'])
+        self.assertFalse(view.switch.get_active())
+        self.assertEqual(view.status.get_subtitle(), 'Off requested. This device does not report its LCD override state.')
+        self.assertIs(self.saved_lcd(), False)
+        for _ in range(3):
+            self.state.refresh()
+            self.settle(view.form)
+        for name in ('battery', 'display', 'keyboard', 'display'):
+            self.window.navigate(name)
+        self.load()
+        self.assertFalse(view.switch.get_active())
+        self.rebuild_window()
+        self.assertFalse(self.lcd().switch.get_active())
+        self.assertIn('Off requested', self.lcd().status.get_subtitle())
+        self.assertEqual(node.writes, ['1', '0'])
+        # A new daemon session replays the saved Off once; readback is still unknown.
+        self.client.start_daemon(restore=True)
+        self.load()
+        self.assertEqual(node.writes, ['1', '0', '0'])
+        self.assertFalse(self.lcd().switch.get_active())
+        self.assertEqual(self.lcd().status.get_subtitle(), 'Off requested. This device does not report its LCD override state.')
+        self.assertEqual(self.client.calls, [('set_lcd_override', (True,)), ('set_lcd_override', (False,))])
+
+    def test_lcd_saved_on_first_off_interaction_sends_zero(self):
+        self.settings_path.write_text(json.dumps({'lcd_override': 1}))
+        self.client.start_daemon(restore=True)
+        self.load()
+        view, node = self.lcd(), self.client.nodes['lcd_override']
+        self.assertTrue(view.switch.get_active())
+        self.assertIn('On requested', view.status.get_subtitle())
+        view.switch.set_active(False)
+        self.settle(view.form)
+        self.assertEqual(node.writes, ['1', '0'])
+        self.assertIs(self.saved_lcd(), False)
+
+    def test_lcd_explicit_off_from_unknown_and_already_off(self):
+        view, node = self.lcd(), self.client.nodes['lcd_override']
+        view.turn_off.emit('activated')
+        self.settle(view.form)
+        self.assertEqual(node.writes, ['0'])
+        self.assertTrue(view.switch.get_visible())
+        self.assertFalse(view.switch.get_active())
+        view.turn_off.emit('activated')
+        self.settle(view.form)
+        self.assertEqual(node.writes, ['0', '0'])
+        self.assertIs(self.saved_lcd(), False)
+        self.assertEqual(len(self.client.calls), 2)
+
+    def test_lcd_observed_off_with_saved_on_is_repaired_by_explicit_off(self):
+        self.settings_path.write_text(json.dumps({'lcd_override': True}))
+        node = self.client.nodes['lcd_override']
+        node.readback = '0\n'
+        self.client.start_daemon()
+        self.load()
+        view = self.lcd()
+        self.assertFalse(view.switch.get_active())
+        self.assertEqual(view.status.get_subtitle(), 'Hardware reports Off.')
+        self.assertTrue(view.saved.get_visible())
+        self.assertEqual(view.saved.get_subtitle(), 'On')
+        view.turn_off.emit('activated')
+        self.settle(view.form)
+        self.assertEqual(node.writes, ['0'])
+        self.assertIs(self.saved_lcd(), False)
+        self.assertFalse(view.saved.get_visible())
+        self.assertEqual(view.form.feedback.get_label(), 'Saved. Hardware reports Off.')
+
+    def test_lcd_denied_and_failed_writes(self):
+        view, node = self.lcd(), self.client.nodes['lcd_override']
+        self.client.response = {'success': False, 'error': 'Authorization denied'}
+        view.turn_on.emit('activated')
+        self.settle(view.form)
+        self.assertIn('Authorization denied', view.form.feedback.get_label())
+        self.assertTrue(view.form.feedback.get_visible())  # The follow-up refresh keeps the denial visible.
+        self.assertFalse(view.switch.get_visible())
+        self.assertEqual(node.writes, [])
+        self.assertFalse(self.settings_path.exists())
+        self.client.response = {'success': True}
+        node.write_error = 'No such device'
+        view.turn_on.emit('activated')
+        self.settle(view.form)
+        self.assertTrue(view.form.feedback.get_label().startswith(
+            'Could not send the LCD override request. Your saved preference was not changed.'))
+        self.assertTrue(view.form.feedback.has_css_class('error'))
+        self.assertFalse(view.switch.get_visible())
+        self.assertIsNone(self.client.store.get('lcd_override'))
+
+    def test_lcd_accepted_request_with_failed_save_shows_old_startup_preference(self):
+        view, node = self.lcd(), self.client.nodes['lcd_override']
+        view.turn_on.emit('activated')
+        self.settle(view.form)
+        with patch('archer_settings.os.replace', side_effect=OSError(28, 'No space left on device')):
+            view.switch.set_active(False)
+            self.settle(view.form)
+        self.assertEqual(node.writes, ['1', '0'])
+        self.assertFalse(view.switch.get_active())
+        self.assertIn('Off requested', view.status.get_subtitle())
+        self.assertTrue(view.saved.get_visible())
+        self.assertEqual(view.saved.get_subtitle(), 'On')
+        self.assertTrue(view.form.feedback.get_label().startswith(
+            'Off request accepted, but saving failed. The startup preference is still On.'))
+        self.assertIs(self.saved_lcd(), True)
+        view.turn_off.emit('activated')
+        self.settle(view.form)
+        self.assertIs(self.saved_lcd(), False)
+        self.assertFalse(view.saved.get_visible())
+
+    def test_lcd_confirmed_mismatch_keeps_explicit_off_available(self):
+        node = self.client.nodes['lcd_override']
+        node.readback = '1\n'
+        self.load()
+        view = self.lcd()
+        view.turn_off.emit('activated')
+        self.settle(view.form)
+        self.assertTrue(view.switch.get_active())
+        self.assertEqual(view.status.get_subtitle(),
+                         'The driver reports a different state from your request: On reported, Off requested.')
+        self.assertEqual(view.form.feedback.get_label(),
+                         'The driver reports a different state from your request. Off is saved for startup.')
+        self.assertTrue(view.turn_off.get_visible() and view.turn_off.get_sensitive())
+        self.assertIs(self.saved_lcd(), False)
+
+    def test_lcd_pending_request_blocks_duplicates_and_stale_reads(self):
+        view = self.lcd()
+        stale, generation = self.client.get_all_settings(), self.state._generation
+        self.client.delay = .1
+        view.turn_on.emit('activated')
+        view.turn_on.emit('activated')
+        view.turn_off.emit('activated')
+        self.assertFalse(view.form.group.get_sensitive())
+        self.state.emit('settings-changed', stale)  # A read delivered while the request is pending.
+        self.settle(view.form)
+        self.assertEqual(self.client.calls, [('set_lcd_override', (True,))])
+        self.state._loaded(stale, None, '', generation, False)  # A read that began before the request.
+        self.settle(view.form)
+        self.assertTrue(view.switch.get_active())
+        self.assertIn('On requested', view.status.get_subtitle())
+
+    def test_lcd_timeout_reconciles_without_resending(self):
+        view = self.lcd()
+        self.client.response = {'success': False, 'error': 'Daemon did not respond within 180.0s'}
+        view.turn_on.emit('activated')
+        drain(lambda: not view.form.pending, timeout=2)
+        self.assertIn('Checking the current state', view.form.feedback.get_label())
+        self.client.response = {'success': True}
+        self.settle(view.form)
+        self.assertEqual(self.state.status, 'Connected')
+        self.assertEqual(len(self.client.calls), 1)
+        self.assertEqual(self.client.nodes['lcd_override'].writes, [])
+        self.assertFalse(view.switch.get_visible())
+
+    def test_lcd_loading_capabilities_and_telemetry_never_write(self):
+        for features in (['display_mode'], SETTINGS['features']):
+            self.client.data['features'] = features
+            self.load()
+            self.state._sample({**LIVE, 'power_source_ac': False})
+        self.assertTrue(self.window.pages['display'].lcd.get_visible())
+        self.client.data['features'] = ['display_mode']
+        self.settings_path.write_text(json.dumps({'lcd_override': True}))
+        self.client.start_daemon()
+        self.load()
+        self.assertTrue(self.window.pages['display'].lcd.get_visible())
+        self.assertEqual(self.client.calls, [])
+        self.assertEqual({key: node.writes for key, node in self.client.nodes.items()}, {key: [] for key in BINARY_KEYS})
+
+    def test_lcd_unavailable_interface_discloses_saved_preference(self):
+        self.settings_path.write_text(json.dumps({'lcd_override': True}))
+        self.client.nodes['lcd_override'].present = False
+        self.client.start_daemon()
+        self.load()
+        view = self.lcd()
+        self.assertEqual(view.status.get_subtitle(), 'LCD override control is unavailable.')
+        self.assertEqual(view.saved.get_subtitle(), 'On')
+        self.assertFalse(view.turn_off.get_sensitive())
+        view.request(False)
+        self.assertEqual(self.client.calls, [])
+
+    def test_lcd_change_by_another_client_reconciles(self):
+        class Iface:
+            def __init__(self):
+                self.callbacks = {}
+
+            def connect_to_signal(self, name, callback):
+                self.callbacks[name] = callback
+                return Mock()
+        self.client.dbus_iface = Iface()
+        self.state._subscribe()
+        view = self.lcd()
+        view.turn_off.emit('activated')
+        self.settle(view.form)
+        self.assertTrue(view.form.feedback.get_visible())
+        self.client.controls['lcd_override'].apply(True)  # Another D-Bus client.
+        self.client.dbus_iface.callbacks['BinarySettingChanged']('lcd_override', '{}')
+        self.settle(view.form)
+        self.assertTrue(view.switch.get_active())
+        self.assertIn('On requested', view.status.get_subtitle())
+        self.assertFalse(view.form.feedback.get_visible())  # The earlier Off message no longer applies.
+        self.assertEqual(self.client.calls, [('set_lcd_override', (False,))])
+
+    def test_lcd_with_an_older_service_shows_a_compatibility_notice(self):
+        self.settings_path.write_text(json.dumps({'lcd_override': True}))
+        self.client.start_daemon()
+        self.client.legacy = True
+        self.load()
+        view = self.lcd()
+        self.assertFalse(view.switch.get_visible())
+        self.assertIn('This Archer service version does not report', view.status.get_subtitle())
+        self.assertEqual(view.saved.get_subtitle(), 'On')
+        view.turn_off.emit('activated')
+        self.settle(view.form)
+        self.assertEqual(self.client.nodes['lcd_override'].writes, ['0'])
+        self.assertIn('cannot confirm', view.form.feedback.get_label())
+        self.assertFalse(view.switch.get_visible())
+        self.assertEqual(view.saved.get_subtitle(), 'Off')
+
+    def test_boot_sound_and_backlight_unknown_are_not_shown_as_off(self):
+        boot, backlight = self.window.pages['system'].boot_view, self.window.pages['keyboard'].backlight_view
+        for view in (boot, backlight):
+            self.assertFalse(view.switch.get_visible())
+            self.assertTrue(view.status.get_subtitle().startswith('Current state unknown.'))
+        self.assertEqual(backlight.turn_off.get_title(), 'Turn off timeout and save')
+        boot.turn_off.emit('activated')
+        self.settle(boot.form)
+        self.assertEqual(self.client.nodes['boot_animation_sound'].writes, ['0'])
+        self.assertEqual(self.client.nodes['backlight_timeout'].writes, [])
+        self.assertIn('Off requested', boot.status.get_subtitle())
+
+    def test_unknown_calibration_status_offers_only_an_explicit_stop(self):
+        page = self.window.pages['battery']
+        self.client.data['battery_calibration'] = None
+        self.client.data['power_source_ac'] = False
+        self.load()
+        self.assertEqual(page.calibration.apply_button.get_label(), 'Stop calibration')
+        self.assertIsNone(page.calibration.confirmation)
+        self.assertIn('status unknown', page.cal_status.get_subtitle())
+        page.calibration.submit()
+        self.settle(page.calibration)
+        self.assertEqual(self.client.calls, [('set_battery_calibration', (False,))])
+
+    def test_lcd_recovery_controls_fit_a_narrow_window(self):
+        view = self.lcd()
+        rows = (view.status, view.turn_on, view.turn_off)
+        self.window.set_default_size(360, 600)
+        self.window.present()
+        self.window.navigate('display')
+        drain(lambda: self.window.get_width() > 0 and all(row.get_mapped() for row in rows), timeout=3)
+        for row in rows:
+            self.assertTrue(row.get_mapped())
+            self.assertLessEqual(row.get_width(), self.window.get_width())
+        self.assertLessEqual(self.window.toast_overlay.measure(Gtk.Orientation.HORIZONTAL, -1)[0], self.window.get_width())
 
     @unittest.skipUnless(CAPTURE, 'Run with --capture for visual review')
     def test_visual_review(self):

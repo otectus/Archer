@@ -225,7 +225,7 @@ The Archer daemon persists user settings to `/etc/archer/settings.json`. This fi
 - Audio enhancement toggles
 - LCD override and boot sound preferences
 
-Settings are restored automatically when the daemon starts.
+Settings are restored automatically when the daemon starts. LCD override, boot animation/sound and backlight timeout are each replayed once, without being saved again. Some firmware cannot report their state, and the driver then reads `-1`. Archer shows the last accepted request as unverified rather than as Off, and **Turn off and save** always sends and saves Off. See [LCD override recovery](#lcd-override-keeps-turning-on-or-inverse-ghosting-returns).
 
 ## Uninstallation
 
@@ -310,6 +310,56 @@ Archer/
    ```
 
 If the GUI shows the status flipping between "Connected" and "Stale", the daemon is up but not emitting telemetry on schedule — check `journalctl` for `TelemetryUpdated emit failed` messages (often a transient sysfs/nvidia-smi hang).
+
+### LCD override keeps turning on, or inverse ghosting returns
+
+Before the issue #10 fix, Archer showed an unreadable LCD override state as Off while saving and replaying On, so each attempt to turn it off sent On again. On affected firmware, `cat .../lcd_override` prints `-1` even after a working command. `-1` means the driver could not decode the firmware reply, not that the request failed.
+
+After upgrading, open **Display & Keyboard → Display → Panel response** and choose **Turn off and save**. Off is then saved for startup. On firmware that cannot report the state, the status reads “Off requested”.
+
+Without the GUI, send the same request through the daemon, which also saves it:
+
+```bash
+sudo busctl --system call io.otectus.Archer1 /io/otectus/Archer1 io.otectus.Archer1 SetLcdOverride b false
+```
+
+On a fixed daemon, `"success": true` means the request was accepted and saved. Older daemons can report success even when saving failed, so also check the saved value. It should be `false` (`0` in older files):
+
+```bash
+grep '"lcd_override"' /etc/archer/settings.json
+```
+
+If the daemon cannot run or save, repair the setting by hand in this order:
+
+1. Exit the GUI from the tray, then stop the daemon so its in-memory copy cannot overwrite your edit: `sudo systemctl stop archer-daemon`.
+2. Back up the file: `sudo cp -a /etc/archer/settings.json /etc/archer/settings.json.bak`.
+3. Change only the LCD key, keep every other setting, and replace the file atomically:
+   ```bash
+   sudo python3 - <<'EOF'
+   import json, os, tempfile
+   path = "/etc/archer/settings.json"
+   with open(path) as stream:
+       data = json.load(stream)
+   data["lcd_override"] = False
+   fd, temporary = tempfile.mkstemp(dir="/etc/archer", prefix=".settings-")
+   with os.fdopen(fd, "w") as stream:
+       json.dump(data, stream, indent=2)
+       stream.flush()
+       os.fsync(stream.fileno())
+   os.chmod(temporary, 0o644)
+   os.replace(temporary, path)
+   EOF
+   ```
+   If the file is not valid JSON, keep the backup and repair it deliberately. Do not replace it with an LCD-only file.
+4. Find the LCD override node on your machine, then write `0` to the path that exists:
+   ```bash
+   ls /sys/devices/platform/acer-wmi/predator_sense/lcd_override \
+      /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/lcd_override 2>/dev/null
+   echo 0 | sudo tee /sys/devices/platform/acer-wmi/predator_sense/lcd_override
+   ```
+5. Start the daemon and check that it runs, that the saved value is still Off, and that the panel no longer shows inverse ghosting: `sudo systemctl start archer-daemon && systemctl is-active archer-daemon`. If the service does not start, recovery is incomplete; read `journalctl -u archer-daemon -n 100`.
+
+A sysfs write alone is not enough while On is still saved, because the daemon replays it at its next start. Deleting the key stops the replay but does not turn the current setting off.
 
 ### GUI hangs forever / never opens
 

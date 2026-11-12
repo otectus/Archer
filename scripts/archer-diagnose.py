@@ -6,6 +6,10 @@ import platform
 import subprocess
 from pathlib import Path
 
+SETTINGS_FILE = Path("/etc/archer/settings.json")
+# Only these saved preferences are reported; other user settings never are.
+BINARY_KEYS = ("lcd_override", "boot_animation_sound", "backlight_timeout")
+
 
 def read(path):
     try:
@@ -24,7 +28,40 @@ def command(args):
         return "<unavailable>"
 
 
-def collect(root=Path("/sys"), commands=True):
+def saved_preferences(path):
+    """The saved LCD override, boot sound and backlight timeout values, bounded."""
+    try:
+        data = json.loads(path.read_text())
+    except FileNotFoundError:
+        return "<absent>"
+    except PermissionError:
+        return "<permission denied>"
+    except (OSError, ValueError) as error:
+        return f"<unreadable: {type(error).__name__}>"
+    if not isinstance(data, dict):
+        return "<unreadable: not an object>"
+    report = {}
+    for key in BINARY_KEYS:
+        value = data.get(key, "<absent>")
+        if not (value is None or isinstance(value, (bool, int)) or (isinstance(value, str) and len(value) <= 32)):
+            value = f"<invalid {type(value).__name__}>"
+        report[key] = value
+    return report
+
+
+def daemon_states():
+    """Read-only GetAllSettings, reduced to the binary control states. Nonfatal when unavailable."""
+    output = command(["busctl", "--system", "--json=short", "call", "io.otectus.Archer1", "/io/otectus/Archer1",
+                      "io.otectus.Archer1", "GetAllSettings"])
+    try:
+        data = json.loads(json.loads(output)["data"][0])["data"]
+        return {key: {"value": data.get(key), "state": data.get(f"{key}_state", "<not reported by this service>")}
+                for key in BINARY_KEYS}
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        return "<unavailable>"
+
+
+def collect(root=Path("/sys"), commands=True, settings=None):
     dmi = root / "class/dmi/id"
     report = {
         "dmi": {key: read(dmi / key) for key in
@@ -67,7 +104,12 @@ def collect(root=Path("/sys"), commands=True):
         if fans:
             report["hwmon"].append({"path": str(path), "name": read(path / "name"),
                                     "fans": {p.name: read(p) for p in sorted(fans)}})
+    if settings is None and commands:
+        settings = SETTINGS_FILE
+    if settings is not None:
+        report["archer"] = {"saved_preferences": saved_preferences(Path(settings))}
     if commands:
+        report["archer"]["daemon"] = daemon_states()
         report["dkms"] = command(["dkms", "status", "-m", "linuwu-sense"])
         report["module_file"] = command(["modinfo", "-n", "linuwu_sense"])
         report["module_version"] = command(["modinfo", "-F", "version", "linuwu_sense"])

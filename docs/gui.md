@@ -48,6 +48,8 @@ Switches and performance profiles apply immediately. Multi-field fan, graphics, 
 
 While a change is pending, its control group is disabled. Failed switches revert, failed staged edits remain editable, and an inline message explains the error. A timed-out write is reconciled with the service before another write is allowed. Offline/stale service state disables hardware writes and offers retry while retaining readable last-known information.
 
+LCD override, boot animation/sound and backlight timeout have a **Status** row because some firmware cannot report their state; the driver then reads `-1`. A switch appears only for a hardware report or for a request the driver accepted in the service’s current session. An accepted but unverified request is labeled “On requested” or “Off requested”, never as a hardware report. Without either, the group says the state is unknown and offers **Turn on** and **Turn off and save**. **Turn off and save** is always available. It sends Off again and saves it, which repairs a saved On preference or a reported mismatch. **Saved for startup** appears when the startup preference differs from the shown state, cannot be used, or was not saved or confirmed on disk. When the driver accepts a request but saving fails, the request stays visible and the message names the preference that still applies at startup. Resume and driver reloads downgrade earlier evidence, and Archer does not rewrite these settings on resume. With an older Archer service, the group shows a compatibility notice instead of a state.
+
 Graphics settings are labeled **Configured mode**. A successful change records a restart requirement for the current boot; it survives GUI/service restarts and clears after reboot. Archer does not reboot automatically. Firmware checks are advisory and explicit; failed checks never report that firmware is current.
 
 Driver recovery runs one ordered stop/reload/start operation. The GUI waits for its completion record after reconnecting and displays failures; **View recent service logs** includes recovery logs. Hardware writes are serialized, and another pending change receives a busy response. Authorization can remain pending for up to two minutes.
@@ -92,7 +94,7 @@ The panel must provide a StatusNotifierItem host with D-Bus menu support. Archer
 
 ## Development and verification
 
-The shared `AppState` handles settings, telemetry, connection recovery, and stale reads. Native `Form` groups guard programmatic updates, preserve drafts, and standardize asynchronous actions. The tray reuses the Performance form, publishes supported profiles and state updates, and serves recursive D-Bus menu layouts with stable item IDs. Existing daemon D-Bus method signatures are retained; sensor validity, boot-scoped graphics restart state, and firmware-check metadata extend the existing JSON payloads.
+The shared `AppState` handles settings, telemetry, connection recovery, and stale reads. Native `Form` groups guard programmatic updates, preserve drafts, and standardize asynchronous actions. The tray reuses the Performance form, publishes supported profiles and state updates, and serves recursive D-Bus menu layouts with stable item IDs. Existing daemon D-Bus method signatures are retained; sensor validity, boot-scoped graphics restart state, firmware-check metadata and binary-control `*_state` objects extend the existing JSON payloads. The additive `BinarySettingChanged` signal triggers a read-only refresh.
 
 Run the hardware-free suites:
 
@@ -112,6 +114,7 @@ Before a release, complete these environment-dependent checks on real systems:
 - GNOME, KDE, and a Wayland compositor: live desktop light/dark, accent and high-contrast changes; settings-portal availability; scaling; keyboard and screen-reader navigation.
 - Tray registration, right-click Open/Profile/Exit, checked profile updates from both the GUI and tray, selection while hidden, tray-host disappearance and recovery, close-to-tray preference, and dirty-edit confirmation.
 - Supported Acer hardware: polkit acceptance/cancellation, fan modes and active-curve transitions, AC/battery changes, calibration, graphics mode/reboot persistence, and audio restart behavior.
+- LCD override on a device that reads `-1` (issue #10, PT516-52S), on a device with normal 0/1 readback and on one without the control. Check On, Off, and **Turn off and save** from Off and unknown states. Then check GUI relaunch, daemon restart, reboot, suspend/resume and an external write. Record the physical panel behavior separately from the reported state.
 - Firmware errors, slow checks, and available updates against the installed fwupd version.
 
 Automated UI tests and screenshots validate simulated interactions; they do not establish physical hardware compatibility or replace the desktop matrix above.

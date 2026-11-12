@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'gui'))
 
+from archer.binary import TEXTS, describe, describe_operation, normalize_binary_state, response_state
 from archer.client import ArcherClient, normalize_settings
 from archer.autostart import Autostart, DESKTOP_FILE
 from archer.preferences import Preferences
@@ -69,6 +70,108 @@ class ContractTests(unittest.TestCase):
             self.assertTrue(data['audio_enhancement']['noise_suppression'])
             self.assertEqual(data['system_info']['daemon_version'], 'test')
         self.assertEqual(normalize_settings(None), {})
+
+    def test_binary_state_contract_preserves_unknown_and_rejects_malformed_data(self):
+        state = {'effective': True, 'source': 'last_write', 'configured': True, 'configured_status': 'valid',
+                 'requested': True, 'requested_origin': 'user', 'observed': None, 'readback_status': 'unrecognized',
+                 'raw_readback': '-1', 'readback_error': None, 'available': True, 'evidence_reset': None,
+                 'last_operation': {'origin': 'user', 'target': True, 'write_status': 'accepted', 'save_status': 'saved',
+                                    'verification': 'unverified', 'error': None}, 'restore': None}
+        data = normalize_settings({'lcd_override': True, 'lcd_override_state': state, 'saved_settings': {}})
+        lcd = data['lcd_override_state']
+        self.assertIsNone(lcd['compatibility'])
+        self.assertEqual((lcd['effective'], lcd['source'], lcd['observed']), (True, 'last_write', None))
+        self.assertEqual(lcd['last_operation']['verification'], 'unverified')
+        # Older service: no state object; only a valid saved value survives, as a preference.
+        legacy = normalize_settings({'lcd_override': False, 'saved_settings': {'lcd_override': True}})
+        self.assertEqual(legacy['lcd_override_state']['compatibility'], 'legacy')
+        self.assertIsNone(legacy['lcd_override_state']['effective'])
+        self.assertIs(legacy['lcd_override_state']['configured'], True)
+        for scalar in ({'enabled': True}, 'true', 1, [True]):
+            self.assertIsNone(normalize_settings({'lcd_override': scalar})['lcd_override'], scalar)
+        broken = (
+            [], 'state', {**state, 'effective': 'true'}, {**state, 'source': 'guess'}, {**state, 'available': 1},
+            {**state, 'source': 'hardware'}, {**state, 'source': 'unknown'}, {**state, 'effective': None},
+            {**state, 'requested': False}, {**state, 'observed': -1}, {**state, 'readback_status': None},
+        )
+        for raw in broken:
+            normalized = normalize_binary_state(raw, saved='on')
+            self.assertEqual(normalized['compatibility'], 'malformed', raw)
+            self.assertIsNone(normalized['effective'])
+            self.assertIsNone(normalized['configured'])
+        damaged = normalize_binary_state({**state, 'last_operation': {'write_status': 'accepted'}, 'restore': [],
+                                          'raw_readback': {'x': 1}, 'configured_status': 7})
+        self.assertIsNone(damaged['compatibility'])
+        self.assertIsNone(damaged['last_operation'])
+        self.assertIsNone(damaged['restore'])
+        self.assertIsNone(damaged['raw_readback'])
+        self.assertEqual(damaged['configured_status'], 'valid')
+        absent = normalize_settings({'features': []})
+        self.assertEqual(absent['lcd_override_state']['compatibility'], 'legacy')
+        self.assertIsNone(absent['lcd_override'])
+
+    def test_binary_presentation_never_claims_unknown_as_off(self):
+        texts = TEXTS['lcd_override']
+        base = {'available': True, 'configured_status': 'absent', 'configured': None, 'requested': None,
+                'observed': None, 'readback_status': 'unrecognized', 'raw_readback': '-1', 'evidence_reset': None,
+                'last_operation': None, 'restore': None}
+
+        def view(**changes):
+            state = normalize_binary_state({**base, **changes})
+            self.assertIsNone(state['compatibility'], changes)
+            return describe(state, texts)
+        unknown = view(effective=None, source='unknown')
+        self.assertEqual((unknown['mode'], unknown['value']), ('choices', None))
+        self.assertEqual(unknown['status'], 'Current state unknown. This device does not report its LCD override state. '
+                                            'Choose On or Off to send an explicit request.')
+        requested = view(effective=True, source='last_write', requested=True, configured=True, configured_status='valid')
+        self.assertEqual((requested['mode'], requested['value'], requested['saved']), ('switch', True, None))
+        self.assertEqual(requested['status'], 'On requested. This device does not report its LCD override state.')
+        failed_save = view(effective=False, source='last_write', requested=False, configured=True, configured_status='valid',
+                           last_operation={'origin': 'user', 'target': False, 'write_status': 'accepted', 'save_status': 'failed',
+                                           'verification': 'unverified', 'error': 'disk full'})
+        self.assertEqual((failed_save['value'], failed_save['saved']), (False, 'On'))
+        saved_only = view(effective=True, source='saved_preference', configured=True, configured_status='valid',
+                          restore={'status': 'failed', 'reason': None, 'target': True, 'verification': 'not_checked',
+                                   'error': 'Input/output error'})
+        self.assertEqual((saved_only['mode'], saved_only['saved']), ('choices', 'On'))
+        self.assertIn('Applying the saved On setting at startup failed: Input/output error.', saved_only['status'])
+        mismatch = view(effective=True, source='hardware', observed=True, readback_status='known', raw_readback='1',
+                        requested=False, configured=False, configured_status='valid')
+        self.assertEqual(mismatch['status'], 'The driver reports a different state from your request: On reported, Off requested.')
+        self.assertEqual(mismatch['saved'], 'Off')
+        missing = view(effective=None, source='unknown', available=False, readback_status='unavailable',
+                       configured=True, configured_status='valid')
+        self.assertEqual((missing['status'], missing['actions'], missing['saved']),
+                         ('LCD override control is unavailable.', False, 'On'))
+        invalid = view(effective=None, source='unknown', configured_status='invalid')
+        self.assertIn('invalid and will not be applied', invalid['saved'])
+        legacy = describe(normalize_binary_state(None, saved=True), texts)
+        self.assertEqual((legacy['mode'], legacy['saved']), ('choices', 'On'))
+        self.assertIn('This Archer service version does not report', legacy['status'])
+
+    def test_binary_operation_feedback_distinguishes_outcomes(self):
+        texts = TEXTS['lcd_override']
+        state = normalize_binary_state({'available': True, 'effective': False, 'source': 'last_write', 'configured': True,
+                                        'configured_status': 'valid', 'requested': False, 'observed': None,
+                                        'readback_status': 'unrecognized'})
+
+        def message(write, save='not_attempted', verification='not_checked', error=None):
+            operation = {'origin': 'user', 'target': False, 'write_status': write, 'save_status': save,
+                         'verification': verification, 'error': error}
+            return describe_operation(operation, state, texts)
+        self.assertEqual(message('accepted', 'saved', 'unverified'), ('Preference saved. Hardware state could not be verified.', False))
+        self.assertEqual(message('accepted', 'saved', 'matches'), ('Saved. Hardware reports Off.', False))
+        self.assertEqual(message('accepted', 'failed', 'unverified', 'disk full'),
+                         ('Off request accepted, but saving failed. The startup preference is still On. Details: disk full', True))
+        self.assertTrue(message('accepted', 'unsynced', 'unverified')[0].startswith('Off request accepted and saved, but'))
+        self.assertTrue(message('failed', error='Input/output error')[0].startswith(
+            'Could not send the LCD override request. Your saved preference was not changed.'))
+        self.assertEqual(message('accepted', 'saved', 'mismatch')[0],
+                         'The driver reports a different state from your request. Off is saved for startup.')
+        self.assertIn('unavailable', message('not_attempted')[0])
+        self.assertEqual(response_state({'success': False, 'error': 'Authorization denied'}, 'lcd_override'), (None, None))
+        self.assertEqual(response_state({'data': {'lcd_override_state': []}}, 'lcd_override'), (None, None))
 
     def test_preferences_validate_and_persist_without_hardware(self):
         with tempfile.TemporaryDirectory() as directory:

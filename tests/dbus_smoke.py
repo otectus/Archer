@@ -23,6 +23,7 @@ from gi.repository import GLib
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "gui"))
+sys.path.insert(0, str(REPO_ROOT / "tests" / "helpers"))
 
 # archer_dbus.py uses dbus.SystemBus() in __init__; force SessionBus for CI.
 import dbus  # noqa: E402  (re-import after path tweak)
@@ -30,6 +31,8 @@ _orig_system_bus = dbus.SystemBus
 dbus.SystemBus = dbus.SessionBus
 
 import archer_dbus  # noqa: E402
+from archer_binary import BinaryControl  # noqa: E402
+from firmware_node import FirmwareNode  # noqa: E402
 
 REQUIRED_METHODS = (
     "Ping",
@@ -39,23 +42,49 @@ REQUIRED_METHODS = (
     "SetThermalProfile",
     "SetAudioEnhancement",
     "GetFirmwareInfo",
+    "SetLcdOverride",
+    "SetBootAnimationSound",
+    "SetBacklightTimeout",
 )
 REQUIRED_SIGNALS = (
     "TelemetryUpdated",
     "AudioEnhancementChanged",
     "ProfileChanged",
+    "BinarySettingChanged",
 )
 
 
 class FakeSettings:
+    """Implements the checked persistence contract: a failure is reported, never hidden."""
+
     def __init__(self):
         self._data = {"daemon_version": "smoke"}
+        self.fail = None
+        self.unreadable = False
 
     def get(self, k, default=None):
         return self._data.get(k, default)
 
+    def update(self, values=None, remove=(), force=False):
+        if self.fail:
+            raise OSError(self.fail)
+        self._data.update(values or {})
+        for key in remove:
+            self._data.pop(key, None)
+        return True
+
     def set(self, k, v):
-        self._data[k] = v
+        return self.update({k: v})
+
+    def save_checked(self, values=None, remove=(), force=False):
+        try:
+            self.update(values, remove, force)
+        except OSError as error:
+            return "failed", str(error)
+        return "saved", None
+
+    def is_rejected(self, key):
+        return False
 
     @property
     def data(self):
@@ -63,10 +92,22 @@ class FakeSettings:
 
 
 class FakeHardware:
-    """Minimal stand-in. Returns plausible scalar telemetry every call."""
-    features = ["smoke"]
+    """Minimal stand-in. Returns plausible scalar telemetry every call.
+
+    LCD override uses the real controller over a node whose readback stays -1."""
+    features = ["smoke", "lcd_override"]
     settings = FakeSettings()
     profile = 'balanced'
+    lcd_node = FirmwareNode()
+
+    def __init__(self):
+        self.lcd = BinaryControl("lcd_override", lambda: "/sys/fake/lcd_override", lambda: self.settings,
+                                 "LCD override", io=self.lcd_node)
+
+    def apply_binary(self, key, value):
+        if key != "lcd_override":
+            return {"success": False, "error": "Unavailable in the smoke harness"}
+        return self.lcd.apply(value)
 
     def get_monitoring_data(self):
         return {"cpu_temp": 42, "gpu_temp": 38, "battery_info": {"present": False}, "thermal_profile": self.profile}
@@ -76,7 +117,9 @@ class FakeHardware:
         return True, None
 
     def get_all_settings(self):
-        return {"features": list(self.features), "battery_info": {"present": False}}
+        state = self.lcd.snapshot()
+        return {"features": list(self.features), "battery_info": {"present": False},
+                "lcd_override": state["effective"], "lcd_override_state": state}
 
     def get_firmware_info(self):
         time.sleep(1)
@@ -183,6 +226,70 @@ def main():
         if missing_s:
             _fail(f"Missing D-Bus signals: {missing_s}")
         print(f"OK: signals present: {sorted(signal_names)}")
+
+        interface = next(node for node in root.iter("interface") if node.attrib.get("name") == archer_dbus.DBUS_IFACE)
+        for method in ("SetLcdOverride", "SetBootAnimationSound", "SetBacklightTimeout"):
+            node = next(m for m in interface.findall("method") if m.attrib["name"] == method)
+            args = [(arg.attrib.get("direction", "in"), arg.attrib["type"]) for arg in node.findall("arg")]
+            if args != [("in", "b"), ("out", "s")]:
+                _fail(f"{method} signature changed: {args}")
+        signal = next(s for s in interface.findall("signal") if s.attrib["name"] == "BinarySettingChanged")
+        if [arg.attrib["type"] for arg in signal.findall("arg")] != ["s", "s"]:
+            _fail("BinarySettingChanged signature changed")
+        print("OK: binary setters keep b -> s; BinarySettingChanged is ss")
+
+        # Issue #10: accepted writes with -1 readback, as seen by a second client.
+        node, settings = FakeHardware.lcd_node, FakeHardware.settings
+        observer_bus = dbus.SessionBus(private=True)
+        observer = observer_bus.get_object(archer_dbus.DBUS_NAME, archer_dbus.DBUS_PATH)
+        changes = []
+        changed_event = threading.Event()
+        observer.connect_to_signal("BinarySettingChanged",
+                                   lambda key, state: (changes.append((str(key), json.loads(str(state)))), changed_event.set()),
+                                   dbus_interface=archer_dbus.DBUS_IFACE)
+        time.sleep(.2)
+        archer_dbus._check_polkit = lambda *_: False
+        denied = json.loads(str(iface.SetLcdOverride(True, timeout=5)))
+        if denied != {"success": False, "error": "Authorization denied"} or node.writes or "lcd_override" in settings.data:
+            _fail(f"Denied LCD request changed state: {denied}, writes={node.writes}")
+        archer_dbus._check_polkit = lambda *_: True
+        enabled = json.loads(str(iface.SetLcdOverride(True, timeout=5)))
+        state = enabled.get("data", {}).get("lcd_override_state", {})
+        if not enabled.get("success") or state.get("effective") is not True or state.get("observed") is not None \
+                or state.get("readback_status") != "unrecognized" or node.writes != ["1"] or settings.get("lcd_override") is not True:
+            _fail(f"Accepted LCD request with -1 readback was misreported: {enabled}")
+        disabled = json.loads(str(iface.SetLcdOverride(False, timeout=5)))
+        if not disabled.get("success") or node.writes != ["1", "0"] or settings.get("lcd_override") is not False:
+            _fail(f"Disable did not send 0 and save Off: {disabled}")
+        loaded = json.loads(str(iface.GetAllSettings(timeout=5)))["data"]
+        if loaded.get("lcd_override") is not False or loaded["lcd_override_state"]["source"] != "last_write":
+            _fail(f"GetAllSettings disagrees with the last request: {loaded}")
+        if not changed_event.wait(3) or changes[-1][0] != "lcd_override":
+            _fail(f"BinarySettingChanged was not received by another client: {changes}")
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and changes[-1][1].get("effective") is not False:
+            time.sleep(.05)
+        if changes[-1][1].get("effective") is not False:
+            _fail(f"Last BinarySettingChanged payload is stale: {changes[-1]}")
+        print("OK: LCD requests with -1 readback send 1 then 0, save each choice and notify other clients")
+
+        node.write_error = "No such device"
+        failed = json.loads(str(iface.SetLcdOverride(True, timeout=5)))
+        if failed.get("success") or failed["data"]["operation"]["write_status"] != "failed" or settings.get("lcd_override") is not False:
+            _fail(f"Failed LCD write was not reported: {failed}")
+        node.write_error = None
+        settings.fail = "No space left on device"
+        unsaved = json.loads(str(iface.SetLcdOverride(True, timeout=5)))
+        operation = unsaved["data"]["operation"]
+        if unsaved.get("success") or operation["write_status"] != "accepted" or operation["save_status"] != "failed" \
+                or unsaved["data"]["lcd_override_state"]["configured"] is not False:
+            _fail(f"Persistence failure was not disclosed: {unsaved}")
+        settings.fail = None
+        node.readback = "1\n"
+        mismatch = json.loads(str(iface.SetLcdOverride(False, timeout=5)))
+        if mismatch.get("success") or mismatch["data"]["operation"]["verification"] != "mismatch":
+            _fail(f"Confirmed mismatch was reported as success: {mismatch}")
+        print("OK: write failure, save failure and confirmed mismatch are reported with state")
 
         # Wait for one TelemetryUpdated emit. Daemon timer is 2s, so ~5s
         # is comfortably enough for the first tick.

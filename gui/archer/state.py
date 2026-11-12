@@ -128,9 +128,13 @@ class AppState(GObject.Object):
         iface = self.client.dbus_iface
         if iface is None:
             return
+        # BinarySettingChanged (LCD override, boot sound, backlight timeout) only
+        # triggers a read-only refresh, so another client's change reconciles here
+        # without echoing a command back.
         for name, callback in (("TelemetryUpdated", self._signal),
                                ("AudioEnhancementChanged", self._audio),
-                               ("ProfileChanged", lambda *_: self.refresh())):
+                               ("ProfileChanged", lambda *_: self.refresh()),
+                               ("BinarySettingChanged", lambda *_: self.refresh())):
             try:
                 self._matches.append(iface.connect_to_signal(name, callback))
             except Exception:

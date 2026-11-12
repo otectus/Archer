@@ -100,6 +100,9 @@ class Form(Gtk.Box):
         self.baseline_unknown = False
         self.restart_delay = 0
         self._awaiting_restart = False
+        # Optional callable(response, values) -> bool. True means it presented the
+        # outcome itself (used where a response carries authoritative state).
+        self.result_hook = None
         self.group = Adw.PreferencesGroup(title=title, description=description)
         self.append(self.group)
         self.feedback = Gtk.Label(label="", xalign=0, wrap=True, accessible_role=Gtk.AccessibleRole.STATUS)
@@ -256,10 +259,17 @@ class Form(Gtk.Box):
         else:
             self._run()
 
-    def _run(self):
+    def request(self, values):
+        """Submit explicit values rather than the widgets' current ones, with the same guards."""
+        if self.pending or not self.state.writable or not self.allowed:
+            return False
+        self._run(dict(values))
+        return True
+
+    def _run(self, values=None):
         if self.pending or not self.state.writable:
             return
-        values = self.values()
+        values = self.values() if values is None else values
         self.pending = True
         self.state.invalidate()
         self.feedback.set_label("Saving…")
@@ -285,7 +295,9 @@ class Form(Gtk.Box):
         self.pending = False
         self.spinner.stop()
         self.spinner.set_visible(False)
-        if response.get("success"):
+        if self.result_hook and self.result_hook(response, values):
+            pass
+        elif response.get("success"):
             self.baseline_unknown = False
             self.load(values, force=True)
             self.feedback.set_label("Saved" if self.fields else "Request accepted. Refreshing status…")

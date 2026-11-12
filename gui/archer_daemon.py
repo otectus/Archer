@@ -23,6 +23,7 @@ from pathlib import Path
 
 import archer_battery
 import uuid
+from archer_binary import BinaryControl, parse_binary_readback
 from archer_runtime import run_command
 from archer_settings import SettingsStore, validate, EFFECT_IDS, WMI_EFFECT_IDS, EFFECT_LABELS
 
@@ -65,6 +66,15 @@ DMI_VENDOR = "/sys/class/dmi/id/sys_vendor"
 HWMON_DIR = "/sys/class/hwmon"
 THERMAL_DIR = "/sys/class/thermal"
 POWER_SUPPLY_DIR = "/sys/class/power_supply"
+
+# Saved and replayed 0/1 sense controls. Their show() callbacks print -1 for
+# firmware replies they cannot decode, so requests and readback stay separate.
+BINARY_CONTROLS = {
+    "lcd_override": "LCD override",
+    "boot_animation_sound": "Boot animation and sound",
+    "backlight_timeout": "Keyboard backlight timeout",
+}
+_BINARY_CONTROLS_LOCK = threading.Lock()
 
 # --- Logging ---
 logger = logging.getLogger("archer-daemon")
@@ -480,12 +490,10 @@ class HardwareManager:
                 if ok:
                     restored.append("keyboard_per_zone")
 
-        # Backlight timeout
-        bl = self.settings.get("backlight_timeout")
-        if bl is not None and "backlight_timeout" in self.features:
-            ok = self.set_backlight_timeout(bl)
-            if ok:
-                restored.append("backlight_timeout")
+        # Backlight timeout. Binary controls validate the saved value, replay it
+        # once without saving it again, and record an unverified result honestly.
+        if self._binary_control("backlight_timeout").restore("backlight_timeout" in self.features):
+            restored.append("backlight_timeout")
 
         # Thermal profile
         tp = self.settings.get("thermal_profile")
@@ -496,7 +504,10 @@ class HardwareManager:
 
         # Manual fan settings are deliberately not replayed across daemon starts.
         # Explicitly enabled curves can resume, after the initial Auto reset.
-        self.settings.remove("fan_speed")
+        try:
+            self.settings.remove("fan_speed")
+        except OSError as error:
+            logger.error("Could not discard saved manual fan speeds: %s", error)
 
         # Battery limiter
         if "battery_limiter" in self.features:
@@ -519,19 +530,10 @@ class HardwareManager:
             if ok:
                 restored.append("usb_charging")
 
-        # LCD override
-        lcd = self.settings.get("lcd_override")
-        if lcd is not None and "lcd_override" in self.features:
-            ok = self.set_lcd_override(lcd)
-            if ok:
-                restored.append("lcd_override")
-
-        # Boot animation sound
-        boot = self.settings.get("boot_animation_sound")
-        if boot is not None and "boot_animation_sound" in self.features:
-            ok = self.set_boot_animation_sound(boot)
-            if ok:
-                restored.append("boot_animation_sound")
+        # LCD override, then boot animation sound
+        for key in ("lcd_override", "boot_animation_sound"):
+            if self._binary_control(key).restore(key in self.features):
+                restored.append(key)
 
         # Fan curves
         for target in ("cpu", "gpu"):
@@ -634,13 +636,16 @@ class HardwareManager:
         path = self._battery_calibration_path()
         if not path:
             return None
-        val = read_sysfs(path)
-        return val == "1" if val else None
+        return parse_binary_readback(read_sysfs(path))
 
     def set_battery_calibration(self, enabled):
         if enabled and self.get_power_source() is not True:
             return False
         path = self._battery_calibration_path()
+        if not path and not enabled and "battery_calibration" in getattr(self, "features", []):
+            # Stopping stays possible while the status is unrecognized; starting does not.
+            path = next((p for p in (self._sense_path("battery_calibration"), BATTERY_CALIBRATION_PATH)
+                         if p and os.path.isfile(p)), None)
         if not path:
             return False
         return write_sysfs(path, "1" if enabled else "0")
@@ -832,45 +837,37 @@ class HardwareManager:
             return False
         return bool(path) and write_sysfs(path, f"{wire_mode},{speed},{brightness},{direction},{r},{g},{b}")
 
-    # --- LCD & Boot ---
-    def get_lcd_override(self):
-        path = self._sense_path("lcd_override")
-        if not path:
-            return None
-        val = read_sysfs(path)
-        return val == "1" if val else None
+    # --- LCD override, boot sound and backlight timeout ---
+    def _binary_control(self, key):
+        # Created lazily (and once) so partially constructed managers in tests and
+        # concurrent D-Bus readers share one owner per control.
+        with _BINARY_CONTROLS_LOCK:
+            controls = self.__dict__.setdefault("_binary_controls", {})
+            if key not in controls:
+                controls[key] = BinaryControl(key, lambda: self._sense_path(key), lambda: self.settings,
+                                              BINARY_CONTROLS[key])
+            return controls[key]
 
-    def set_lcd_override(self, enabled):
-        path = self._sense_path("lcd_override")
-        if not path:
-            return False
-        return write_sysfs(path, "1" if enabled else "0")
+    def binary_state(self, key, refresh=True):
+        return self._binary_control(key).snapshot(refresh)
+
+    def apply_binary(self, key, value):
+        """User request: write the explicit value, save it, verify once and report each outcome."""
+        return self._binary_control(key).apply(value, persist=True, origin="user")
+
+    def note_resume(self):
+        for key in BINARY_CONTROLS:
+            self._binary_control(key).note_resume()
+
+    def get_lcd_override(self):
+        """Legacy scalar: the resolved effective value, or None when unknown."""
+        return self.binary_state("lcd_override")["effective"]
 
     def get_boot_animation_sound(self):
-        path = self._sense_path("boot_animation_sound")
-        if not path:
-            return None
-        val = read_sysfs(path)
-        return val == "1" if val else None
-
-    def set_boot_animation_sound(self, enabled):
-        path = self._sense_path("boot_animation_sound")
-        if not path:
-            return False
-        return write_sysfs(path, "1" if enabled else "0")
+        return self.binary_state("boot_animation_sound")["effective"]
 
     def get_backlight_timeout(self):
-        path = self._sense_path("backlight_timeout")
-        if not path:
-            return None
-        val = read_sysfs(path)
-        return val == "1" if val else None
-
-    def set_backlight_timeout(self, enabled):
-        path = self._sense_path("backlight_timeout")
-        if not path:
-            return False
-        return write_sysfs(path, "1" if enabled else "0")
+        return self.binary_state("backlight_timeout")["effective"]
 
     # --- System Monitoring ---
     def get_cpu_temp(self):
@@ -1065,6 +1062,7 @@ class HardwareManager:
         """Get all current settings for the GUI to load."""
         cpu_fan, gpu_fan = self.get_fan_speed()
         cpu_rpm, gpu_rpm = self.get_fan_rpm()
+        binary = {key: self.binary_state(key) for key in BINARY_CONTROLS}
         return {
             "laptop_type": self.laptop_type,
             "features": self.features,
@@ -1078,9 +1076,10 @@ class HardwareManager:
             "battery_calibration": self.get_battery_calibration(),
             "battery_limiter": self.get_battery_limiter(),
             "usb_charging": self.get_usb_charging(),
-            "lcd_override": self.get_lcd_override(),
-            "boot_animation_sound": self.get_boot_animation_sound(),
-            "backlight_timeout": self.get_backlight_timeout(),
+            # Scalars stay boolean/null for older clients and equal "effective";
+            # the *_state objects separate saved, requested and observed values.
+            **{key: state["effective"] for key, state in binary.items()},
+            **{f"{key}_state": state for key, state in binary.items()},
             "battery_info": self.get_battery_info(),
             "power_source_ac": self.get_power_source(),
             "system_info": self.get_system_info(),
@@ -1528,6 +1527,9 @@ def main():
             # would just fail, so give it a beat. Returning False makes the
             # timeout fire once rather than repeat.
             hw._lighting_retries = 5
+            # Firmware may not keep LCD/boot/backlight settings across sleep.
+            # Downgrade earlier evidence; no setting is rewritten on resume.
+            hw.note_resume()
 
         system_bus = dbus.SystemBus()
         system_bus.add_signal_receiver(

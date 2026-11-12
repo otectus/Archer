@@ -47,6 +47,16 @@ POLKIT_ACTIONS = {
 }
 
 
+def _boolean_request(value):
+    """The 'b' argument as a native bool. dbus.Boolean subclasses int, not bool,
+    so it is converted here and nothing else truthy reaches hardware code."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dbus.Boolean):
+        return bool(value)
+    return None
+
+
 def _check_polkit(bus, sender, action_id):
     """Check polkit authorization for the calling process."""
     proxy = bus.get_object("org.freedesktop.PolicyKit1",
@@ -335,44 +345,47 @@ class ArcherDBusService(dbus.service.Object):
             self.hw.settings.set("usb_charging", level)
         return self._json_response({"success": ok})
 
+    # LCD override, backlight timeout and boot sound share one contract. The
+    # hardware manager owns the write, its persistence and the readback check;
+    # the response reports each outcome with the resulting state, and success
+    # means written and saved without a contradicting readback.
+    def _do_binary(self, command, key, enabled, sender):
+        if not self._authorize(command, sender):
+            return self._json_response({"success": False, "error": "Authorization denied"})
+        result = self.hw.apply_binary(key, _boolean_request(enabled))
+        state = (result.get("data") or {}).get(f"{key}_state")
+        if state is not None:
+            GLib.idle_add(self._binary_changed, key, json.dumps(state))
+        return self._json_response(result)
+
+    def _binary_changed(self, key, state_json):
+        if not self._stopping:
+            self.BinarySettingChanged(key, state_json)
+        return False
+
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
     def SetBacklightTimeout(self, enabled, reply=None, failure=None, sender=None):
-        return self._dispatch(lambda: self._do_SetBacklightTimeout(bool(enabled), sender=sender), reply, failure, mutating=True)
+        return self._dispatch(lambda: self._do_SetBacklightTimeout(enabled, sender=sender), reply, failure, mutating=True)
 
     def _do_SetBacklightTimeout(self, enabled, sender=None):
-        if not self._authorize("set_backlight_timeout", sender):
-            return self._json_response({"success": False, "error": "Authorization denied"})
-        ok = self.hw.set_backlight_timeout(enabled)
-        if ok:
-            self.hw.settings.set("backlight_timeout", enabled)
-        return self._json_response({"success": ok})
+        return self._do_binary("set_backlight_timeout", "backlight_timeout", enabled, sender)
 
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
     def SetLcdOverride(self, enabled, reply=None, failure=None, sender=None):
-        return self._dispatch(lambda: self._do_SetLcdOverride(bool(enabled), sender=sender), reply, failure, mutating=True)
+        return self._dispatch(lambda: self._do_SetLcdOverride(enabled, sender=sender), reply, failure, mutating=True)
 
     def _do_SetLcdOverride(self, enabled, sender=None):
-        if not self._authorize("set_lcd_override", sender):
-            return self._json_response({"success": False, "error": "Authorization denied"})
-        ok = self.hw.set_lcd_override(enabled)
-        if ok:
-            self.hw.settings.set("lcd_override", enabled)
-        return self._json_response({"success": ok})
+        return self._do_binary("set_lcd_override", "lcd_override", enabled, sender)
 
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
     def SetBootAnimationSound(self, enabled, reply=None, failure=None, sender=None):
-        return self._dispatch(lambda: self._do_SetBootAnimationSound(bool(enabled), sender=sender), reply, failure, mutating=True)
+        return self._dispatch(lambda: self._do_SetBootAnimationSound(enabled, sender=sender), reply, failure, mutating=True)
 
     def _do_SetBootAnimationSound(self, enabled, sender=None):
-        if not self._authorize("set_boot_animation_sound", sender):
-            return self._json_response({"success": False, "error": "Authorization denied"})
-        ok = self.hw.set_boot_animation_sound(enabled)
-        if ok:
-            self.hw.settings.set("boot_animation_sound", enabled)
-        return self._json_response({"success": ok})
+        return self._do_binary("set_boot_animation_sound", "boot_animation_sound", enabled, sender)
 
     @dbus.service.method(DBUS_IFACE, in_signature="s", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
@@ -507,4 +520,10 @@ class ArcherDBusService(dbus.service.Object):
 
     @dbus.service.signal(DBUS_IFACE, signature="b")
     def AudioEnhancementChanged(self, enabled):
+        pass
+
+    # Emitted after any LCD override, backlight timeout or boot sound operation
+    # so other clients reconcile. Carries the resulting *_state JSON object.
+    @dbus.service.signal(DBUS_IFACE, signature="ss")
+    def BinarySettingChanged(self, key, state_json):
         pass

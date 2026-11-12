@@ -7,6 +7,15 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### LCD override state and recovery (issue #10)
+
+- Fix LCD override on firmware whose driver readback is `-1`, as reported on the Predator Triton 500 SE PT516-52S. Archer showed that unknown readback as Off while saving and replaying On, so every attempt to turn overdrive off sent On again. The next toggle after an accepted On request now sends Off.
+- Keep three facts separate: the preference saved for startup, the last request the driver accepted in the daemon's current session, and a strictly parsed readback. `GetAllSettings` adds `lcd_override_state`, `boot_animation_sound_state` and `backlight_timeout_state`. The scalar values stay boolean or null, and `SetLcdOverride`, `SetBootAnimationSound` and `SetBacklightTimeout` keep their `b → s` signatures and polkit actions. Responses report the write, save and readback outcomes with the resulting state. The new `BinarySettingChanged` signal lets other clients reconcile.
+- Label unverified requests, the startup preference and failures in the GUI. **Turn on** and **Turn off and save** work from unknown, already-Off and mismatched states. Explain that overdrive can reduce motion blur on some panels and cause inverse ghosting on others.
+- Validate saved values before the single startup replay. Saved `true`/`false` and legacy `1`/`0` still work. Invalid values are never applied and stay in the file until replaced. Failed saves are reported instead of returning success. An unreadable settings file is kept as `settings.json.unreadable-<time>` before it is first replaced. Resume and driver reloads downgrade earlier evidence, and no setting is rewritten on resume.
+- Apply the same tri-state handling to boot animation/sound and backlight timeout. Battery calibration shows an unrecognized status as unknown and still accepts an explicit stop. It is never restarted or replayed.
+- A saved On cannot be told apart from one created by the old loop, so it is still replayed, now shown as On requested. Choose **Turn off and save** once if overdrive should be off; see [LCD override recovery](README.md#lcd-override-keeps-turning-on-or-inverse-ghosting-returns). `scripts/archer-diagnose.py` reports the saved values and daemon state of these controls, read-only.
+
 ### Phase 1 audit and sidebar
 
 - Address ARC-001 through ARC-048 from the Phase 1 audit; see [the implementation and validation record](docs/Archer-Phase-1-Update.md).

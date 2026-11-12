@@ -9,6 +9,7 @@ from datetime import datetime
 
 from gi.repository import Adw, Gdk, GLib, Gtk, PangoCairo
 
+from archer.binary import TEXTS, describe, describe_operation, normalize_binary_state, relevant, response_state
 from archer.widgets.forms import Page, label
 from archer_settings import EFFECT_IDS, EFFECT_LABELS
 
@@ -34,6 +35,81 @@ def link(group, title, subtitle, callback, icon="go-next-symbolic"):
     row.connect("activated", lambda *_: callback())
     group.add(row)
     return row
+
+
+class BinaryControlView:
+    """Switch, current-state explanation, startup preference and explicit requests for one 0/1 control.
+
+    A switch alone cannot show an unknown or unverified state, or save Off while it
+    already shows Off. The explicit rows use the same form, polkit and pending
+    guards, and programmatic updates never send a request.
+    """
+
+    def __init__(self, form, key):
+        self.form, self.key, self.texts = form, key, TEXTS[key]
+        form.group.set_description(self.texts["description"])
+        self.switch = form.switch("enabled", self.texts["title"], self.texts["subtitle"])
+        self.status = Adw.ActionRow(title="Status", use_markup=False)
+        self.saved = Adw.ActionRow(title="Saved for startup", use_markup=False)
+        for row in (self.status, self.saved):
+            row.add_css_class("property")
+            form.group.add(row)
+        self.turn_on = Adw.ButtonRow(title=self.texts["on_action"])
+        self.turn_off = Adw.ButtonRow(title=self.texts["off_action"])
+        for row, value in ((self.turn_on, True), (self.turn_off, False)):
+            row.connect("activated", lambda _row, value=value: self.request(value))
+            form.group.add(row)
+        form.result_hook = self._result
+        self._feedback_operation = None
+        self.apply(normalize_binary_state(None))
+
+    def request(self, value):
+        if self.view["actions"]:
+            self.form.request({"enabled": value})
+
+    def load(self, state):
+        # A read that started before a pending request must not replace its outcome.
+        if self.form.pending:
+            return
+        if state.get("last_operation") != self._feedback_operation:
+            # The message described an earlier outcome (another client, a restart).
+            self._feedback_operation = state.get("last_operation")
+            self.form.feedback.set_visible(False)
+        self.apply(state)
+
+    def apply(self, state, force=False):
+        self.state = state
+        view = self.view = describe(state, self.texts)
+        switch = view["mode"] == "switch"
+        self.switch.set_visible(switch)
+        self.turn_on.set_visible(not switch)
+        self.form.load({"enabled": bool(view["value"])}, force=force)
+        self.status.set_subtitle(view["status"])
+        self.saved.set_visible(view["saved"] is not None)
+        self.saved.set_subtitle(view["saved"] or "")
+        for row in (self.switch, self.turn_on, self.turn_off):
+            row.set_sensitive(view["actions"])
+
+    def _result(self, response, values):
+        state, operation = response_state(response, self.key)
+        if state is None:
+            self._feedback_operation = self.state.get("last_operation")
+            if response.get("success") and self.state.get("compatibility"):
+                self.form.feedback.set_label("Request sent. This Archer service version cannot confirm whether it took effect.")
+                return True
+            return False  # Authorization, busy and transport failures keep the form's rollback.
+        self.form.state.invalidate()  # Discard reads that began before this result.
+        self._feedback_operation = state.get("last_operation")
+        self.apply(state, force=True)
+        message, error = describe_operation(operation, state, self.texts, response.get("error"))
+        self.form.feedback.set_label(message)
+        if error:
+            self.form.feedback.add_css_class("error")
+        return True
+
+
+def binary_state(data, key):
+    return data.get(f"{key}_state") or normalize_binary_state(None)
 
 
 class PerformancePage(Page):
@@ -129,11 +205,13 @@ class BatteryPage(Page):
                                save=lambda v: state.client.set_battery_limiter(v["enabled"]), immediate=True)
         self.limit.switch("enabled", "80% charge limit")
         self.calibration = self.form("Battery calibration", "A full charge–discharge cycle recalibrates the battery gauge. Keep AC power connected throughout.",
-                                     save=lambda _: state.client.set_battery_calibration(not self.calibrating),
+                                     save=lambda _: state.client.set_battery_calibration(not self.calibrating and not self.calibration_unknown),
                                      action="Start calibration",
                                      confirmation="Keep AC power connected throughout the calibration cycle. Start only when you can leave your laptop connected.")
         self.cal_status = self.calibration.info("Calibration status")
         self.calibrating = False
+        # Unknown status offers only an explicit stop; it never restarts calibration.
+        self.calibration_unknown = False
         self.usb = self.form("USB charging when off", "Choose the battery level at which off-state USB charging stops.",
                              save=lambda v: state.client.set_usb_charging([0, 10, 20, 30][v["level"]]), immediate=True)
         self.usb.combo("level", "Charging limit", ["Disabled", "Stop at 10%", "Stop at 20%", "Stop at 30%"])
@@ -147,9 +225,12 @@ class BatteryPage(Page):
             self.source.set_subtitle(str(battery.get("status") or "Unknown"))
             self.remaining.set_subtitle(battery.get("time_remaining") or "Estimating…")
         ac = data.get("power_source_ac")
-        self.calibration.allowed = self.calibrating or ac is True
+        self.calibration.allowed = self.calibrating or self.calibration_unknown or ac is True
         self.calibration._sensitivity()
-        self.cal_status.set_subtitle("Calibration running" if self.calibrating else "Ready" if ac is True else "Power source unknown; connect AC to start" if ac is None else "Connect AC power to start")
+        self.cal_status.set_subtitle(
+            "Calibration running" if self.calibrating
+            else "Calibration status unknown. You can send an explicit stop request." if self.calibration_unknown
+            else "Ready" if ac is True else "Power source unknown; connect AC to start" if ac is None else "Connect AC power to start")
 
     def load(self, _state, data):
         features = data.get("features", [])
@@ -159,9 +240,12 @@ class BatteryPage(Page):
                               (self.calibration, "battery_calibration"), (self.usb, "usb_charging")):
             form.set_visible(present and (feature in features or form is self.status))
         self.limit.load({"enabled": bool(data.get("battery_limiter"))})
-        self.calibrating = bool(data.get("battery_calibration"))
-        self.calibration.apply_button.set_label("Stop calibration" if self.calibrating else "Start calibration")
-        self.calibration.confirmation = None if self.calibrating else "Keep AC power connected throughout the calibration cycle. Start only when you can leave your laptop connected."
+        calibration = data.get("battery_calibration")
+        self.calibrating = calibration is True
+        self.calibration_unknown = calibration is None and "battery_calibration" in features
+        stop = self.calibrating or self.calibration_unknown
+        self.calibration.apply_button.set_label("Stop calibration" if stop else "Start calibration")
+        self.calibration.confirmation = None if stop else "Keep AC power connected throughout the calibration cycle. Start only when you can leave your laptop connected."
         level = str(data.get("usb_charging", 0))
         self.usb.load({"level": {"0": 0, "10": 1, "20": 2, "30": 3}.get(level, 0)})
         self.monitor(_state, data)
@@ -184,14 +268,17 @@ class DisplayPage(Page):
             ("NVIDIA", "Use discrete graphics for maximum GPU performance."),
         ])
         self.lcd = self.form("Panel response", save=lambda v: state.client.set_lcd_override(v["enabled"]), immediate=True)
-        self.lcd.switch("enabled", "LCD override", "Reduce ghosting on supported panels. May increase power consumption.")
+        self.lcd_view = BinaryControlView(self.lcd, "lcd_override")
         state.connect("settings-changed", self.load)
 
     def load(self, _state, data):
         features = data.get("features", [])
-        self.availability(any(f in features for f in ("display_mode", "lcd_override")))
+        lcd = binary_state(data, "lcd_override")
+        # A saved preference stays visible even if the interface is missing now.
+        show_lcd = "lcd_override" in features or relevant(lcd)
+        self.availability("display_mode" in features or show_lcd)
         supported(self.graphics, features, "display_mode")
-        supported(self.lcd, features, "lcd_override")
+        self.lcd.set_visible(show_lcd)
         display = data.get("display_mode") or {}
         mode = display.get("mode", "unknown")
         self.configured.set_subtitle(mode.title() if mode != "unknown" else "Unknown")
@@ -199,7 +286,7 @@ class DisplayPage(Page):
         for key, row in zip(self.MODES, self.mode_rows):
             row.set_sensitive(key in display.get("available_modes", self.MODES))
         self.restart.set_revealed(bool(display.get("reboot_required")))
-        self.lcd.load({"enabled": bool(data.get("lcd_override"))})
+        self.lcd_view.load(lcd)
 
 
 class KeyboardPage(Page):
@@ -225,7 +312,7 @@ class KeyboardPage(Page):
         self.effects.color("color", "Effect color")
         self.effects.combo("direction", "Direction", ["Left to right", "Right to left"])
         self.backlight = self.form("Backlight", save=lambda v: state.client.set_backlight_timeout(v["enabled"]), immediate=True)
-        self.backlight.switch("enabled", "Turn off after 30 seconds of inactivity")
+        self.backlight_view = BinaryControlView(self.backlight, "backlight_timeout")
         state.connect("settings-changed", self.load)
         self.watch_style(self.preview.queue_draw)
 
@@ -264,9 +351,12 @@ class KeyboardPage(Page):
 
     def load(self, _state, data):
         features = data.get("features", [])
-        self.availability(any(f in features for f in ("keyboard_per_zone", "keyboard_effects", "backlight_timeout")))
-        for form, feature in ((self.zones, "keyboard_per_zone"), (self.effects, "keyboard_effects"), (self.backlight, "backlight_timeout")):
+        backlight = binary_state(data, "backlight_timeout")
+        show_backlight = "backlight_timeout" in features or relevant(backlight)
+        self.availability(any(f in features for f in ("keyboard_per_zone", "keyboard_effects")) or show_backlight)
+        for form, feature in ((self.zones, "keyboard_per_zone"), (self.effects, "keyboard_effects")):
             supported(form, features, feature)
+        self.backlight.set_visible(show_backlight)
         saved = data.get("saved_settings") or {}
         zone = saved.get("per_zone_mode") or {}
         self.zones.baseline_unknown = not bool(zone)
@@ -296,7 +386,7 @@ class KeyboardPage(Page):
         self.effects.load({"mode": mode, "speed": effect.get("speed", 5),
                            "brightness": effect.get("brightness", 100), "color": color,
                            "direction": 0 if effect.get("direction", 2) == 2 else 1})
-        self.backlight.load({"enabled": bool(data.get("backlight_timeout"))})
+        self.backlight_view.load(backlight)
 
 
 class AudioPage(Page):
@@ -493,7 +583,7 @@ class SystemPage(Page):
             ("gpu_model", "GPU"), ("kernel", "Kernel"), ("daemon_version", "Archer service"), ("driver_version", "Driver"))}
         self.capabilities = details.info("Available controls")
         self.boot = self.form("Startup", save=lambda v: state.client.set_boot_animation_sound(v["enabled"]), immediate=True)
-        self.boot.switch("enabled", "Boot animation and sound", "Play Acer’s startup animation and sound.")
+        self.boot_view = BinaryControlView(self.boot, "boot_animation_sound")
         group = Adw.PreferencesGroup(title="Maintenance")
         link(group, "Firmware", "BIOS information and available device updates", lambda: navigate("firmware"))
         link(group, "Advanced", "Driver overrides, service recovery, and logs", lambda: navigate("advanced"))
@@ -511,5 +601,6 @@ class SystemPage(Page):
                  "game_mode": "Game Mode", "audio_enhancement": "Noise suppression"}
         features = data.get("features", [])
         self.capabilities.set_subtitle(", ".join(names.get(key, key.replace("_", " ").capitalize()) for key in features) or "None detected")
-        supported(self.boot, features, "boot_animation_sound")
-        self.boot.load({"enabled": bool(data.get("boot_animation_sound"))})
+        boot = binary_state(data, "boot_animation_sound")
+        self.boot.set_visible("boot_animation_sound" in features or relevant(boot))
+        self.boot_view.load(boot)
