@@ -20,15 +20,14 @@ support. The concrete compile failure is independently reported in
   [#134](https://github.com/0x7375646F/Linuwu-Sense/pull/134) are open;
   [#133](https://github.com/0x7375646F/Linuwu-Sense/pull/133) is closed but its
   change is absent from HEAD. Archer retains the pinned revision and ordered
-  patches, versioned `1.0.archer2`, rather than consume an unmerged fork.
+  patches, versioned `1.0.archer3`, rather than consume an unmerged fork.
 * **acer-wmi-battery:** pinned upstream
-  `9f90d75cc9237aeed7964622d10dbdf4d2c7b518`, Archer package `0.1.0.archer1`.
+  `9f90d75cc9237aeed7964622d10dbdf4d2c7b518`, Archer package `0.1.0.archer2`.
   Upstream already handles the 6.12 `asm/unaligned.h` move. Its Makefile still
   builds for `uname -r`, and it has no merged DKMS configuration; proposed
   [DKMS support #155](https://github.com/frederik-h/acer-wmi-battery/pull/155)
   and [target selection #154](https://github.com/frederik-h/acer-wmi-battery/pull/154)
-  remain open. Archer supplies packaging and invokes Kbuild directly. No local
-  battery-driver C fork is needed.
+  remain open in the recorded upstream snapshot. Archer supplies packaging and invokes Kbuild directly. The subsequent Phase 1 update adds two local C patches for firmware-response validation and propagation of failed writes/readback.
 * **v4l2loopback:** the maintained distro `v4l2loopback-dkms` package supplies
   sources and lifecycle hooks. The audit inspected upstream HEAD
   `e27cd86` (0.15.4 development tree), its recent locking fixes and current
@@ -45,7 +44,7 @@ platform removal, timers/workqueues, PM and compiler diagnostics. These drivers
 have no local procfs/class-create shim to update. Modern WMI APIs still compile;
 the legacy global WMI calls remain an upstream dependency to monitor. Archer
 retains the kernel and daemon fan Auto restoration and watchdog patches. It also
-fixes `filp_open()` error-pointer handling in the two persistent-state writers.
+removes all kernel file-based persistence in the Phase 1 update; old binary state files are ignored. See [the Phase 1 validation record](Archer-Phase-1-Update.md) for the newer firmware/scalar patches and build results.
 
 All three removed string calls take counted sysfs input and produce temporary
 C strings. Return values from `strncpy` were unused; zero padding was unnecessary.
@@ -152,7 +151,7 @@ the final 40 lines on a build failure. Preserve logs before removing DKMS entrie
 After repairing headers/toolchains, rerun Archer or rebuild the specific target:
 
 ```sh
-sudo dkms install -m linuwu-sense -v 1.0.archer2 -k YOUR_INSTALLED_KERNEL_RELEASE
+sudo dkms install -m linuwu-sense -v 1.0.archer3 -k YOUR_INSTALLED_KERNEL_RELEASE
 ```
 
 A compiler error is different from Secure Boot. `Key was rejected by service`

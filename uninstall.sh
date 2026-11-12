@@ -13,9 +13,6 @@ source "$SCRIPT_DIR/lib/modules.sh"
 source "$SCRIPT_DIR/lib/detect.sh"
 source "$SCRIPT_DIR/lib/manifest.sh"
 
-# Move any legacy manifest into the new system path before any read.
-migrate_legacy_manifest
-
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -41,13 +38,16 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
     log "DRY RUN mode enabled. No changes will be made."
 fi
 
+migrate_legacy_manifest || exit 1
+
 section "Archer Compatibility Suite - Uninstaller"
 
 if has_manifest; then
     log "Install manifest found. Performing targeted uninstall."
     echo ""
 
-    INSTALLED_MODS=$(read_manifest_modules)
+    INSTALLED_MODS=$(read_manifest_modules) || exit 1
+    remaining_mods="$INSTALLED_MODS"
     log "Installed modules: $INSTALLED_MODS"
     echo ""
 
@@ -59,20 +59,31 @@ if has_manifest; then
         if ! is_known_module "$mod"; then
             warn "Refusing to source unknown module name '$mod' from manifest (skipping)."
             echo ""
+            uninstall_failed=1
             continue
         fi
         local_mod_file="$SCRIPT_DIR/modules/${mod}.sh"
         if [[ -f "$local_mod_file" ]]; then
             log "Uninstalling: $mod"
-            source "$local_mod_file"
+            if ! source "$local_mod_file"; then
+                uninstall_failed=1
+                continue
+            fi
             if module_uninstall; then
+                next_remaining=""
+                for remaining in $remaining_mods; do
+                    [[ "$remaining" == "$mod" ]] || next_remaining+=" $remaining"
+                done
+                retain_manifest_modules "$next_remaining" || exit 1
+                remaining_mods="$next_remaining"
                 success "Removed: $mod"
             else
                 warn "Cleanup failed for $mod; retaining the manifest for retry."
                 uninstall_failed=1
             fi
         else
-            warn "Module file not found: $local_mod_file (skipping)"
+            warn "Module file not found: $local_mod_file (retaining cleanup record)"
+            uninstall_failed=1
         fi
         echo ""
     done
@@ -81,7 +92,7 @@ if has_manifest; then
         exit 1
     fi
     # Remove manifest
-    remove_manifest
+    remove_manifest || exit 1
     log "Install manifest removed."
 
 else
@@ -89,63 +100,15 @@ else
     warn "This will attempt to remove all known components."
     echo ""
 
-    # Legacy uninstall: same as original v1 behavior
-    # 1. Disable Services (legacy DAMX daemon cleanup)
-    log "Checking for legacy DAMX daemon..."
-    run systemctl --user disable --now damx-daemon.service 2>/dev/null || true
-    run rm -f "$HOME/.config/systemd/user/damx-daemon.service"
-    run systemctl --user daemon-reload
+    # Without a manifest, use each module's ownership-aware cleanup. Do not reset
+    # independently installed GPU tools or disable unrelated pre-existing services.
+    legacy_failed=0
+    for mod in gui battery driver thermal touchpad audio power gamemode audio-enhance camera-enhance wifi firmware; do
+        source "$SCRIPT_DIR/modules/$mod.sh" || { legacy_failed=1; continue; }
+        module_uninstall || legacy_failed=1
+    done
+    [[ "$legacy_failed" -eq 0 ]] || exit 1
 
-    # Use the same version-aware cleanup with or without a manifest.
-    source "$SCRIPT_DIR/modules/driver.sh"
-    module_uninstall || exit 1
-
-    # 4. Remove other possible configs from v2 modules
-    run_sudo rm -f /etc/modprobe.d/touchpad-amd-fix.conf
-    run_sudo rm -f /etc/modprobe.d/acer-audio-amd.conf
-    archer_remove_config /etc/modprobe.d/acer-thermal-profiles.conf || exit 1
-    archer_remove_config /etc/udev/rules.d/99-acer-battery-health.rules || exit 1
-    run_sudo rm -f /etc/tlp.d/01-acer-optimize.conf
-
-    # Remove touchpad service if present
-    if [[ -f /etc/systemd/system/touchpad-fix.service ]]; then
-        run_sudo systemctl disable touchpad-fix.service 2>/dev/null || true
-        run_sudo rm -f /etc/systemd/system/touchpad-fix.service
-        run_sudo systemctl daemon-reload
-    fi
-
-    # Remove acer-wmi-battery DKMS if present
-    source "$SCRIPT_DIR/modules/battery.sh"
-    module_uninstall || exit 1
-
-    # 5. Clean application files
-    if [[ -n "${HOME:-}" && "$HOME" != "/" ]]; then
-        log "Removing application data..."
-        run rm -rf "$HOME/.local/share/damx"
-        run rm -rf "$HOME/.local/share/archer"
-    else
-        warn "HOME is unset or '/'; refusing to rm -rf legacy application data."
-    fi
-
-    # 6. Remove Archer GUI if installed
-    if [[ -d /opt/archer ]]; then
-        log "Removing Archer GUI..."
-        run_sudo systemctl disable --now archer-daemon.service 2>/dev/null || true
-        run_sudo rm -f /etc/systemd/system/archer-daemon.service
-        run_sudo systemctl daemon-reload
-        run_sudo rm -rf /opt/archer
-        run_sudo rm -f /usr/share/applications/io.github.archer.desktop
-        run_sudo rm -f /usr/share/icons/hicolor/scalable/apps/io.github.archer.svg
-        run_sudo rm -f /usr/local/bin/archer-gui
-        run_sudo rm -rf /etc/archer
-    fi
-
-    # 7. Remove enhancement configs if present
-    run_sudo rm -f /etc/gamemode.d/archer.ini
-    run_sudo rm -f /etc/pipewire/filter-chain.conf.d/archer-noise-suppress.conf
-    source "$SCRIPT_DIR/modules/camera-enhance.sh"
-    module_uninstall || exit 1
-    run_sudo systemctl disable --now fwupd.service 2>/dev/null || true
 fi
 
 section "Cleanup Complete"

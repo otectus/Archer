@@ -9,6 +9,7 @@ MODULE_DESCRIPTION="GTK4/Adwaita control panel and hardware daemon"
 _GUI_INSTALL_DIR="/opt/archer"
 _GUI_SERVICE="/etc/systemd/system/archer-daemon.service"
 _GUI_DESKTOP="/usr/share/applications/io.github.archer.desktop"
+_GUI_AUTOSTART="/etc/xdg/autostart/io.github.archer.desktop"
 _GUI_ICON="/usr/share/icons/hicolor/scalable/apps/io.github.archer.svg"
 _GUI_LAUNCHER="/usr/local/bin/archer-gui"
 _GUI_SETTINGS_DIR="/etc/archer"
@@ -22,13 +23,17 @@ module_check_installed() {
     [[ -f "$_GUI_INSTALL_DIR/archer_daemon.py" ]] && [[ -f "$_GUI_SERVICE" ]]
 }
 
-module_install() {
+module_preflight() {
     # Verify all source files exist before any sudo write so a partial install
     # doesn't leave the system in a broken state.
     local _required=(
         "$SCRIPT_DIR/gui/archer_daemon.py"
         "$SCRIPT_DIR/gui/archer_dbus.py"
         "$SCRIPT_DIR/gui/archer_ene.py"
+        "$SCRIPT_DIR/gui/archer_runtime.py"
+        "$SCRIPT_DIR/gui/archer_system.py"
+        "$SCRIPT_DIR/gui/archer_settings.py"
+        "$SCRIPT_DIR/gui/archer_battery.py"
         "$SCRIPT_DIR/gui/archer_gui.py"
         "$SCRIPT_DIR/gui/io.otectus.Archer1.conf"
         "$SCRIPT_DIR/gui/io.otectus.Archer1.policy"
@@ -37,6 +42,7 @@ module_install() {
         "$SCRIPT_DIR/gui/assets/archer.svg"
         "$SCRIPT_DIR/gui/archer/__init__.py"
         "$SCRIPT_DIR/gui/archer/application.py"
+        "$SCRIPT_DIR/gui/archer/autostart.py"
         "$SCRIPT_DIR/gui/archer/window.py"
         "$SCRIPT_DIR/gui/archer/client.py"
         "$SCRIPT_DIR/gui/archer/state.py"
@@ -51,40 +57,48 @@ module_install() {
     )
     local _src
     for _src in "${_required[@]}"; do
-        [[ -f "$_src" ]] || error "Required GUI source file missing: $_src"
+        [[ -f "$_src" ]] || { warn "Required GUI source file missing: $_src"; return 1; }
     done
-    [[ -d "$SCRIPT_DIR/gui/archer" ]] || error "Required GUI package directory missing: $SCRIPT_DIR/gui/archer"
-    [[ -d "$SCRIPT_DIR/gui/assets" ]] || error "Required GUI assets directory missing: $SCRIPT_DIR/gui/assets"
+    [[ -d "$SCRIPT_DIR/gui/archer" ]] || { warn "Required GUI package directory missing: $SCRIPT_DIR/gui/archer"; return 1; }
+    [[ -d "$SCRIPT_DIR/gui/assets" ]] || { warn "Required GUI assets directory missing: $SCRIPT_DIR/gui/assets"; return 1; }
 
+}
+
+module_install() {
+    module_preflight || return 1
     # Install dependencies
     log "Installing GUI dependencies..."
-    run_sudo pacman -S --needed --noconfirm python-gobject gtk4 libadwaita python python-cairo python-dbus
+    run_sudo pacman -S --needed --noconfirm python-gobject gtk4 libadwaita python python-cairo python-dbus polkit || return 1
 
     if [[ "${DRY_RUN:-0}" -eq 0 ]]; then
         if ! python3 -c 'import gi; gi.require_version("Gtk", "4.0"); gi.require_version("Adw", "1"); from gi.repository import Gtk, Adw; raise SystemExit(not ((Gtk.get_major_version(), Gtk.get_minor_version()) >= (4, 12) and (Adw.get_major_version(), Adw.get_minor_version()) >= (1, 6)))'; then
-            error "Archer requires GTK 4.12 and libadwaita 1.6 or newer. Update your system packages."
+            warn "Archer requires GTK 4.12 and libadwaita 1.6 or newer. Update your system packages."
+            return 1
         fi
     fi
 
+    INSTALLED_PACKAGES+=" python-gobject gtk4 libadwaita python python-cairo python-dbus polkit"
+
     # Create directories
-    run_sudo mkdir -p "$_GUI_INSTALL_DIR"
-    run_sudo mkdir -p "$_GUI_SETTINGS_DIR"
+    run_sudo install -d -o root -g root -m 0755 "$_GUI_INSTALL_DIR" /etc/dbus-1/system.d /usr/share/polkit-1/actions /usr/share/applications /usr/local/bin || return 1
+    INSTALLED_FILES+=" $_GUI_INSTALL_DIR"
+    run_sudo mkdir -p "$_GUI_SETTINGS_DIR" || return 1
+    INSTALLED_FILES+=" $_GUI_SETTINGS_DIR"
 
     # Copy application files
     log "Installing Archer GUI to $_GUI_INSTALL_DIR..."
-    run_sudo cp "$SCRIPT_DIR/gui/archer_daemon.py" "$_GUI_INSTALL_DIR/"
-    run_sudo cp "$SCRIPT_DIR/gui/archer_dbus.py" "$_GUI_INSTALL_DIR/"
-    # The daemon imports archer_ene optionally; if it is missing, keyboard
-    # colour silently falls back to the WMI path that does not apply it.
-    run_sudo cp "$SCRIPT_DIR/gui/archer_ene.py" "$_GUI_INSTALL_DIR/"
-    run_sudo cp "$SCRIPT_DIR/gui/archer_gui.py" "$_GUI_INSTALL_DIR/"
-    run_sudo cp -r "$SCRIPT_DIR/gui/archer" "$_GUI_INSTALL_DIR/"
-    run_sudo cp -r "$SCRIPT_DIR/gui/assets" "$_GUI_INSTALL_DIR/"
+    # Includes the daemon, D-Bus service, validators, ENE and system helpers.
+    run_sudo cp "$SCRIPT_DIR"/gui/archer_*.py "$_GUI_INSTALL_DIR/" || return 1
+    run_sudo cp "$SCRIPT_DIR/gui/io.github.archer.desktop" "$_GUI_INSTALL_DIR/" || return 1
+    run_sudo cp -r "$SCRIPT_DIR/gui/archer" "$_GUI_INSTALL_DIR/" || return 1
+    run_sudo cp -r "$SCRIPT_DIR/gui/assets" "$_GUI_INSTALL_DIR/" || return 1
 
     # Install D-Bus service configuration
     log "Installing D-Bus and polkit configuration..."
-    run_sudo cp "$SCRIPT_DIR/gui/io.otectus.Archer1.conf" /etc/dbus-1/system.d/
-    run_sudo cp "$SCRIPT_DIR/gui/io.otectus.Archer1.policy" /usr/share/polkit-1/actions/
+    run_sudo cp "$SCRIPT_DIR/gui/io.otectus.Archer1.conf" /etc/dbus-1/system.d/ || return 1
+    INSTALLED_FILES+=" /etc/dbus-1/system.d/io.otectus.Archer1.conf"
+    run_sudo cp "$SCRIPT_DIR/gui/io.otectus.Archer1.policy" /usr/share/polkit-1/actions/ || return 1
+    INSTALLED_FILES+=" /usr/share/polkit-1/actions/io.otectus.Archer1.policy"
 
     # Reload dbus-daemon so the new policy file takes effect immediately.
     # Without this, the daemon can't claim io.otectus.Archer1 until reboot
@@ -102,49 +116,41 @@ module_install() {
     fi
 
     # Set permissions
-    run_sudo chmod 755 "$_GUI_INSTALL_DIR/archer_daemon.py"
-    run_sudo chmod 755 "$_GUI_INSTALL_DIR/archer_gui.py"
+    run_sudo chmod 755 "$_GUI_INSTALL_DIR/archer_daemon.py" || return 1
+    run_sudo chmod 755 "$_GUI_INSTALL_DIR/archer_gui.py" || return 1
 
     # Install systemd service
     log "Installing daemon service..."
-    run_sudo cp "$SCRIPT_DIR/gui/archer-daemon.service" "$_GUI_SERVICE"
-    run_sudo systemctl daemon-reload
-    run_sudo systemctl enable archer-daemon.service
-
-    # Restart also starts an inactive service and picks up code on upgrades.
-    # The daemon's shutdown hooks restore automatic fan control first.
-    if ! run_sudo systemctl restart archer-daemon.service 2>/dev/null; then
-        warn "Daemon did not start — Linuwu-Sense driver may not be loaded yet."
-        warn "It will start automatically after reboot if the driver module is installed."
-    fi
-
-    # Verify the bus name is claimable. Best-effort: skip during dry-run and
-    # if busctl is unavailable. A failure here is a warning, not a hard error,
-    # because the daemon may legitimately not be running yet (e.g. driver
-    # module not loaded). The reboot-as-workaround footgun is gone either way.
-    if [[ "${DRY_RUN:-0}" -ne 1 ]] && has_cmd busctl; then
-        if ! busctl --no-pager list 2>/dev/null | grep -q "io.otectus.Archer1"; then
-            warn "io.otectus.Archer1 not yet visible on the system bus."
-            warn "Check 'systemctl status archer-daemon' once the driver module is loaded."
-        fi
-    fi
+    run_sudo cp "$SCRIPT_DIR/gui/archer-daemon.service" "$_GUI_SERVICE" || return 1
+    INSTALLED_FILES+=" $_GUI_SERVICE"
+    run_sudo systemctl daemon-reload || return 1
+    run_sudo systemctl enable archer-daemon.service || return 1
 
     # Install desktop entry
     log "Installing desktop entry..."
-    run_sudo cp "$SCRIPT_DIR/gui/io.github.archer.desktop" "$_GUI_DESKTOP"
+    run_sudo cp "$SCRIPT_DIR/gui/io.github.archer.desktop" "$_GUI_DESKTOP" || return 1
+    INSTALLED_FILES+=" $_GUI_DESKTOP"
 
     # Install icon
-    run_sudo mkdir -p "$(dirname "$_GUI_ICON")"
-    run_sudo cp "$SCRIPT_DIR/gui/assets/archer.svg" "$_GUI_ICON"
+    run_sudo mkdir -p "$(dirname "$_GUI_ICON")" || return 1
+    run_sudo cp "$SCRIPT_DIR/gui/assets/archer.svg" "$_GUI_ICON" || return 1
+    INSTALLED_FILES+=" $_GUI_ICON"
     run_sudo gtk-update-icon-cache /usr/share/icons/hicolor/ 2>/dev/null || true
 
     # Create launcher script
     log "Creating launcher script..."
-    run_sudo tee "$_GUI_LAUNCHER" > /dev/null <<'LAUNCHER_EOF'
+    run_sudo tee "$_GUI_LAUNCHER" > /dev/null <<'LAUNCHER_EOF' || return 1
 #!/bin/bash
 exec python3 /opt/archer/archer_gui.py "$@"
 LAUNCHER_EOF
-    run_sudo chmod 755 "$_GUI_LAUNCHER"
+    INSTALLED_FILES+=" $_GUI_LAUNCHER"
+    run_sudo chmod 755 "$_GUI_LAUNCHER" || return 1
+
+    # A user Hidden=true override takes precedence and survives upgrades.
+    log "Enabling GUI and system tray startup at desktop login..."
+    run_sudo mkdir -p "$(dirname "$_GUI_AUTOSTART")" || return 1
+    run_sudo cp "$SCRIPT_DIR/gui/io.github.archer.desktop" "$_GUI_AUTOSTART" || return 1
+    INSTALLED_FILES+=" $_GUI_AUTOSTART"
 
     # Check for Linuwu-Sense driver
     if ! dkms status 2>/dev/null | grep -q "linuwu-sense"; then
@@ -152,30 +158,41 @@ LAUNCHER_EOF
         warn "Install the 'driver' module for full hardware control."
     fi
 
+    if ! run_sudo systemctl restart archer-daemon.service; then
+        warn "Archer daemon failed to start. Inspect journalctl -u archer-daemon; limited operation does not require Linuwu."
+        return 1
+    fi
+    if [[ "${DRY_RUN:-0}" -eq 0 ]]; then
+        module_verify || return 1
+    fi
     log "Archer GUI installed."
+    log "Starts at desktop login. Disable in Preferences > Start Archer at login."
     log "Start the GUI:  archer-gui"
     log "Daemon status:  sudo systemctl status archer-daemon"
 
-    INSTALLED_FILES+=" $_GUI_INSTALL_DIR $_GUI_SERVICE $_GUI_DESKTOP $_GUI_ICON $_GUI_LAUNCHER $_GUI_SETTINGS_DIR /etc/dbus-1/system.d/io.otectus.Archer1.conf /usr/share/polkit-1/actions/io.otectus.Archer1.policy"
+    INSTALLED_FILES+=" $_GUI_INSTALL_DIR $_GUI_SERVICE $_GUI_DESKTOP $_GUI_AUTOSTART $_GUI_ICON $_GUI_LAUNCHER $_GUI_SETTINGS_DIR /etc/dbus-1/system.d/io.otectus.Archer1.conf /usr/share/polkit-1/actions/io.otectus.Archer1.policy"
     INSTALLED_PACKAGES+=" python-gobject gtk4 libadwaita python-cairo python-dbus"
 }
 
 module_uninstall() {
     log "Stopping Archer daemon..."
-    run_sudo systemctl disable --now archer-daemon.service 2>/dev/null || true
-    run_sudo rm -f "$_GUI_SERVICE"
-    run_sudo systemctl daemon-reload
+    if [[ -f "$_GUI_SERVICE" ]]; then
+        run_sudo systemctl disable --now archer-daemon.service || return 1
+    fi
+    run_sudo rm -f "$_GUI_SERVICE" || return 1
+    run_sudo systemctl daemon-reload || return 1
 
     log "Removing Archer GUI files..."
-    run_sudo rm -rf "$_GUI_INSTALL_DIR"
-    run_sudo rm -f "$_GUI_DESKTOP"
-    run_sudo rm -f "$_GUI_ICON"
-    run_sudo rm -f "$_GUI_LAUNCHER"
-    run_sudo rm -rf "$_GUI_SETTINGS_DIR"
+    run_sudo rm -rf "$_GUI_INSTALL_DIR" || return 1
+    run_sudo rm -f "$_GUI_DESKTOP" || return 1
+    run_sudo rm -f "$_GUI_AUTOSTART" || return 1
+    run_sudo rm -f "$_GUI_ICON" || return 1
+    run_sudo rm -f "$_GUI_LAUNCHER" || return 1
+    log "Saved hardware preferences retained in $_GUI_SETTINGS_DIR."
 
     log "Removing D-Bus and polkit configuration..."
-    run_sudo rm -f /etc/dbus-1/system.d/io.otectus.Archer1.conf
-    run_sudo rm -f /usr/share/polkit-1/actions/io.otectus.Archer1.policy
+    run_sudo rm -f /etc/dbus-1/system.d/io.otectus.Archer1.conf || return 1
+    run_sudo rm -f /usr/share/polkit-1/actions/io.otectus.Archer1.policy || return 1
 
     # Reload dbus-daemon so the removed policy stops being active immediately.
     if ! run_sudo systemctl reload dbus.service 2>/dev/null; then
@@ -211,5 +228,22 @@ module_verify() {
         ok=1
     fi
 
+    if [[ ! -f "$_GUI_AUTOSTART" ]]; then
+        warn "GUI login startup entry not found"
+        ok=1
+    fi
+
+    if ! systemctl is-active --quiet archer-daemon.service; then
+        warn "Archer daemon is not running; inspect journalctl -u archer-daemon."
+        ok=1
+    fi
+    if ! busctl --system --timeout=5 call io.otectus.Archer1 /io/otectus/Archer1 io.otectus.Archer1 Ping >/dev/null; then
+        warn "Archer D-Bus Ping failed"
+        ok=1
+    fi
+    if ! busctl --system --timeout=5 get-property org.freedesktop.PolicyKit1 /org/freedesktop/PolicyKit1/Authority org.freedesktop.PolicyKit1.Authority BackendName >/dev/null; then
+        warn "Polkit authority is unavailable. Hardware changes require polkit and a session authentication agent."
+        ok=1
+    fi
     return $ok
 }

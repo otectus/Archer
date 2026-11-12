@@ -16,11 +16,11 @@ module_check_installed() {
 
 module_install() {
     log "Installing fwupd..."
-    run_sudo pacman -S --needed --noconfirm fwupd
+    run_sudo pacman -S --needed --noconfirm fwupd || return 1
 
     log "Enabling fwupd service..."
-    run_sudo systemctl enable fwupd.service
-    run_sudo systemctl start fwupd.service 2>/dev/null || true
+    INSTALLED_PACKAGES+=" fwupd"
+    module_service fwupd.service start || return 1
 
     log "Scanning for supported firmware devices..."
     run_sudo fwupdmgr get-devices --no-unreported-check 2>/dev/null || true
@@ -35,8 +35,8 @@ module_install() {
 }
 
 module_uninstall() {
-    run_sudo systemctl disable --now fwupd.service 2>/dev/null || true
-    log "fwupd disabled. Package retained."
+    module_restore_services || return 1
+    log "fwupd service state restored. Package retained."
 }
 
 module_verify() {

@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# Module: Camera Enhancement (Virtual Camera)
-# Sets up v4l2loopback for virtual camera with background effects
+# Module: Loopback Camera Setup
+# Sets up v4l2loopback; a separate application must produce the video frames.
 
-MODULE_NAME="Camera Enhancement (Virtual Camera)"
+MODULE_NAME="Loopback Camera Setup"
 MODULE_ID="camera-enhance"
-MODULE_DESCRIPTION="Virtual camera with background blur (v4l2loopback)"
+MODULE_DESCRIPTION="Loopback camera setup; requires an external frame-producing application"
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/kernel.sh"
 
 _CAMERA_DKMS_CONF="/etc/dkms/v4l2loopback.conf"
 _CAMERA_PACKAGE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../driver" && pwd)"
+_CAMERA_LOAD_CONF="/etc/modules-load.d/archer-camera.conf"
 _MODPROBE_CONF="/etc/modprobe.d/archer-v4l2loopback.conf"
 
 module_detect() {
@@ -23,7 +24,7 @@ module_check_installed() {
 module_install() {
     log "Installing virtual camera dependencies..."
     [[ "${DRY_RUN:-0}" -eq 1 ]] && return 0
-    kernel_collect_targets || return 1
+    kernel_collect_targets "$KERNEL_MODULES_ROOT" || return 1
     if [[ -f "$_CAMERA_DKMS_CONF" ]] && ! grep -q '^# Archer Compatibility Suite:' "$_CAMERA_DKMS_CONF"; then
         warn "Existing $_CAMERA_DKMS_CONF is user-managed. Merge the target compiler settings from $_CAMERA_PACKAGE/v4l2loopback-dkms.conf before retrying."
         return 1
@@ -31,8 +32,8 @@ module_install() {
     run_sudo mkdir -p "${_CAMERA_DKMS_CONF%/*}" || return 1
     run_sudo cp "$_CAMERA_PACKAGE/v4l2loopback-dkms.conf" "$_CAMERA_DKMS_CONF" || return 1
     INSTALLED_FILES+=" $_CAMERA_DKMS_CONF"
-    run_sudo pacman -S --needed --noconfirm v4l2loopback-dkms python-opencv || return 1
-    INSTALLED_PACKAGES+=" v4l2loopback-dkms python-opencv"
+    run_sudo pacman -S --needed --noconfirm v4l2loopback-dkms v4l-utils || return 1
+    INSTALLED_PACKAGES+=" v4l2loopback-dkms v4l-utils"
     # pacman hooks can warn without failing pacman. Verify every target explicitly.
     local version kernel config
     config=$(pacman -Qlq v4l2loopback-dkms | grep '/dkms.conf$') || return 1
@@ -47,29 +48,27 @@ module_install() {
     done
 
     log "Configuring v4l2loopback..."
-    archer_write_config "$_MODPROBE_CONF" 'options v4l2loopback devices=1 video_nr=10 card_label="Archer Camera" exclusive_caps=1' || return 1
+    archer_write_config "$_MODPROBE_CONF" 'options v4l2loopback devices=1 card_label="Archer Camera" exclusive_caps=1' || return 1
+    archer_write_config "$_CAMERA_LOAD_CONF" v4l2loopback || return 1
     if [[ ! -d "$KERNEL_MODULES_ROOT/$(uname -r)/kernel" ]]; then
         mark_reboot_required
-        warn "Reboot into an installed kernel before loading the virtual camera."
+        warn "Reboot into an installed kernel to create the loopback device."
         return 0
     fi
-
-    run_sudo modprobe v4l2loopback devices=1 video_nr=10 card_label="Archer Camera" exclusive_caps=1 || {
-        warn "Cannot load v4l2loopback. Inspect journalctl -k for signing rejection or module errors."
-        return 1
-    }
-
-    if [[ -e /dev/video10 ]]; then
-        success "Virtual camera device created at /dev/video10"
+    if [[ -d /sys/module/v4l2loopback ]]; then
+        if ! _camera_device; then
+            warn "v4l2loopback is already loaded for another application. Reboot to apply Archer's configuration."
+            mark_reboot_required
+            return 0
+        fi
     else
-        mark_reboot_required
+        run_sudo modprobe v4l2loopback || return 1
+        _camera_device || { warn "Archer loopback camera identity could not be verified."; return 1; }
     fi
+    log "Loopback setup complete. Connect an external capture/effect producer before selecting Archer Camera in applications. No background processing is installed."
 
-    log "Select 'Archer Camera' in application settings."
-
-    INSTALLED_FILES+=" $_MODPROBE_CONF"
     # v4l2loopback is package-managed; do not claim ownership of its DKMS tree.
-    INSTALLED_PACKAGES+=" v4l2loopback-dkms python-opencv"
+    INSTALLED_PACKAGES+=" v4l2loopback-dkms v4l-utils"
 }
 
 module_uninstall() {
@@ -77,11 +76,27 @@ module_uninstall() {
         run_sudo rm -f "$_CAMERA_DKMS_CONF" || return 1
     fi
     # Other applications may be using the package-managed module.
-    archer_remove_config "$_MODPROBE_CONF" || return 1
+    archer_remove_config "$_MODPROBE_CONF" "$_CAMERA_LOAD_CONF" || return 1
+}
+
+_camera_device() {
+    local path
+    for path in /sys/class/video4linux/video*; do
+        [[ -f "$path/name" && "$(cat "$path/name")" == "Archer Camera" ]] || continue
+        if v4l2-ctl --device "/dev/${path##*/}" --info 2>/dev/null | grep -qi 'Driver name.*v4l2 loopback'; then
+            log "Archer loopback: /dev/${path##*/}"
+            return 0
+        fi
+    done
+    return 1
 }
 
 module_verify() {
-    pacman -Qi v4l2loopback-dkms &>/dev/null && return 0
-    warn "v4l2loopback-dkms not installed"
+    pacman -Qi v4l2loopback-dkms &>/dev/null && [[ -f "$_CAMERA_LOAD_CONF" ]] || return 1
+    _camera_device && return 0
+    if [[ "${REBOOT_REQUIRED:-0}" -eq 1 ]]; then
+        warn "Camera runtime check pending reboot; boot configuration is installed."
+        return 0
+    fi
     return 1
 }

@@ -1,6 +1,8 @@
 """Task-oriented hardware pages, all using the same confirmed-state forms."""
 
 import re
+import json
+import time
 import subprocess
 import threading
 from datetime import datetime
@@ -8,6 +10,7 @@ from datetime import datetime
 from gi.repository import Adw, Gdk, GLib, Gtk, PangoCairo
 
 from archer.widgets.forms import Page, label
+from archer_settings import EFFECT_IDS, EFFECT_LABELS
 
 
 PROFILES = [
@@ -18,15 +21,7 @@ PROFILES = [
     ("performance", "Turbo", "Maximum performance with more heat and fan noise."),
 ]
 
-# The effects the daemon can actually drive, in the order archer_ene.EFFECTS
-# maps them: the value saved for "mode" is an index into that list. The
-# previous list came from the WMI documentation, whose effect field this
-# firmware ignores, so its entries neither matched nor did anything. Keep the
-# two in step or the wrong effect runs.
-KEYBOARD_EFFECTS = [
-    "Static", "Breathing", "Neon", "Neon (fast)", "Wave",
-    "Meteor", "Zoom", "Shifting", "Twinkling",
-]
+KEYBOARD_EFFECTS = EFFECT_LABELS
 
 
 def supported(form, features, feature):
@@ -95,7 +90,7 @@ class PerformancePage(Page):
 
     def monitor(self, _state, data):
         ac = data.get("power_source_ac")
-        self.power.set_subtitle("Connected to AC power" if ac else "Running on battery")
+        self.power.set_subtitle("Connected to AC power" if ac is True else "Running on battery" if ac is False else "Power source unavailable")
 
     def load(self, _state, data):
         features = data.get("features", [])
@@ -151,10 +146,10 @@ class BatteryPage(Page):
             self.charge.set_subtitle(f"{battery['percentage']:.0f}%" if battery.get("percentage") is not None else "Unavailable")
             self.source.set_subtitle(str(battery.get("status") or "Unknown"))
             self.remaining.set_subtitle(battery.get("time_remaining") or "Estimating…")
-        ac = data.get("power_source_ac", False)
-        self.calibration.allowed = self.calibrating or ac
+        ac = data.get("power_source_ac")
+        self.calibration.allowed = self.calibrating or ac is True
         self.calibration._sensitivity()
-        self.cal_status.set_subtitle("Calibration running" if self.calibrating else "Ready" if ac else "Connect AC power to start")
+        self.cal_status.set_subtitle("Calibration running" if self.calibrating else "Ready" if ac is True else "Power source unknown; connect AC to start" if ac is None else "Connect AC power to start")
 
     def load(self, _state, data):
         features = data.get("features", [])
@@ -188,7 +183,6 @@ class DisplayPage(Page):
             ("Hybrid", "Use integrated graphics with NVIDIA available on demand."),
             ("NVIDIA", "Use discrete graphics for maximum GPU performance."),
         ])
-        self.mux = self.graphics.info("Hardware MUX", "Detection unavailable")
         self.lcd = self.form("Panel response", save=lambda v: state.client.set_lcd_override(v["enabled"]), immediate=True)
         self.lcd.switch("enabled", "LCD override", "Reduce ghosting on supported panels. May increase power consumption.")
         state.connect("settings-changed", self.load)
@@ -224,7 +218,8 @@ class KeyboardPage(Page):
         self.zones.spin("brightness", "Brightness (%)", 0, 100)
         self.effects = self.form("Lighting effects", "Effect settings apply separately from static zone colors.",
                                  save=self._save_effect, action="Apply effect")
-        self.effects.combo("mode", "Effect", KEYBOARD_EFFECTS)
+        self._effect_ids = list(EFFECT_IDS)
+        self.effect_row = self.effects.combo("mode", "Effect", KEYBOARD_EFFECTS)
         self.effects.spin("speed", "Speed", 0, 9)
         self.effects.spin("brightness", "Brightness (%)", 0, 100)
         self.effects.color("color", "Effect color")
@@ -248,7 +243,7 @@ class KeyboardPage(Page):
         color = self._color(values["color"])
         rgb = [int(color[i:i + 2], 16) for i in (0, 2, 4)]
         return self.state.client.set_four_zone_mode(
-            values["mode"], values["speed"], values["brightness"], 2 if values["direction"] == 0 else 1, *rgb)
+            self._effect_ids[values["mode"]], values["speed"], values["brightness"], 2 if values["direction"] == 0 else 1, *rgb)
 
     def _draw_preview(self, area, cr, width, height):
         values = self.zones.values()
@@ -284,11 +279,20 @@ class KeyboardPage(Page):
         effect = saved.get("four_zone_mode") or {}
         self.effects.baseline_unknown = not bool(effect)
         color = "#{:02x}{:02x}{:02x}".format(*(int(effect.get(k, 0)) for k in ("red", "green", "blue")))
-        # The effect list shrank when the WMI-derived entries gave way to the
-        # verified ones, so a settings file written by an older build can hold
-        # an index past the end of the list. Clamp it rather than let the row
-        # silently fall back to the first entry.
-        mode = min(int(effect.get("mode", 0)), len(KEYBOARD_EFFECTS) - 1)
+        choices = data.get("keyboard_effects")
+        if isinstance(choices, list) and choices and not self.effects.dirty and not self.effects.pending:
+            ids = [choice["id"] for choice in choices]
+            if ids != self._effect_ids:
+                self.effects.loading = True
+                self._effect_ids = ids
+                self.effect_row.set_model(Gtk.StringList.new([choice["label"] for choice in choices]))
+                self.effects.loading = False
+        if data.get("keyboard_migration_required"):
+            self.effects.group.set_description("An older saved effect has an ambiguous meaning. Select and apply the intended effect once.")
+        else:
+            self.effects.group.set_description("Effect settings apply separately from static zone colors.")
+        effect_id = effect.get("effect")
+        mode = self._effect_ids.index(effect_id) if effect_id in self._effect_ids else 0
         self.effects.load({"mode": mode, "speed": effect.get("speed", 5),
                            "brightness": effect.get("brightness", 100), "color": color,
                            "direction": 0 if effect.get("direction", 2) == 2 else 1})
@@ -325,8 +329,19 @@ class AudioPage(Page):
         def work():
             try:
                 result = subprocess.run(["systemctl", "--user", "restart", "pipewire.service"], capture_output=True, text=True, timeout=20)
-                message = ("Noise suppression is ready." if enabled else "Noise suppression is off.") if result.returncode == 0 else "Configuration saved, but audio restart failed: " + result.stderr.strip()
-            except (OSError, subprocess.TimeoutExpired) as error:
+                if result.returncode:
+                    message = "Configuration saved, but audio restart failed: " + result.stderr.strip()
+                else:
+                    found = False
+                    for _ in range(5):
+                        sources = subprocess.run(["pactl", "--format=json", "list", "sources"], capture_output=True, text=True, timeout=3)
+                        found = any(source.get("name") == "archer_noise_suppressed" for source in json.loads(sources.stdout or "[]")) if sources.returncode == 0 else False
+                        if found == enabled:
+                            break
+                        time.sleep(.4)
+                    message = ("Noise suppression is ready." if enabled else "Noise suppression is off.") if found == enabled else "Audio restarted, but the virtual microphone state could not be verified. Check PipeWire and the rnnoise plugin."
+
+            except (OSError, ValueError, TypeError, subprocess.TimeoutExpired) as error:
                 message = f"Configuration saved, but audio restart failed: {error}"
             GLib.idle_add(done, message)
 
@@ -437,7 +452,7 @@ class AdvancedPage(Page):
 
         def read():
             try:
-                result = subprocess.run(["journalctl", "-u", "archer-daemon", "-n", "100", "--no-pager"], capture_output=True, text=True, timeout=10)
+                result = subprocess.run(["journalctl", "-u", "archer-daemon", "-u", "archer-recovery", "-n", "100", "--no-pager"], capture_output=True, text=True, timeout=10)
                 text = result.stdout or "No accessible service logs. Your session may not have permission to read the system journal."
                 if result.stderr:
                     text += "\n" + result.stderr

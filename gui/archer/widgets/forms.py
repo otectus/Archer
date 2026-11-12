@@ -126,7 +126,11 @@ class Form(Gtk.Box):
         self._sensitivity()
         if self._awaiting_restart and status == "Connected":
             self._awaiting_restart = False
-            self.feedback.set_label("Service connected.")
+            recovery = self.state.settings.get("recovery") or {}
+            failed = recovery.get("status") == "failed"
+            self.feedback.set_label("Recovery failed: " + recovery.get("error", "Check the service logs.") if failed else "Service connected.")
+            if failed:
+                self.feedback.add_css_class("error")
 
     def _register(self, key, widget, get, set_value, signal):
         self.fields[key] = (get, set_value)
@@ -288,7 +292,7 @@ class Form(Gtk.Box):
             if self.restart_delay:
                 self._awaiting_restart = True
                 self.feedback.set_label("Restart requested. Waiting for the service…")
-                self.state.expect_restart(self.restart_delay)
+                self.state.expect_restart(self.restart_delay, (response.get("data") or {}).get("request"))
         else:
             error = response.get("error") or "The service could not complete this change."
             if self.immediate:

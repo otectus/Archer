@@ -1,6 +1,6 @@
 # Archer uses system packages, not pip packages.
 # Install on Arch:
-#   sudo pacman -S python-gobject python-cairo python-dbus gtk4 libadwaita
+#   sudo pacman -S python-gobject python-cairo python-dbus gtk4 libadwaita polkit
 #
 # GTK >= 4.12 and libadwaita >= 1.6 are required.
 # python-cairo renders telemetry charts and keyboard previews.

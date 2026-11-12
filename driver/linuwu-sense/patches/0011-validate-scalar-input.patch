@@ -1,0 +1,83 @@
+--- a/src/linuwu_sense.c
++++ b/src/linuwu_sense.c
+@@ -3078,6 +3078,26 @@
+  /*
+   * USB Charging
+   */
++ /* Counted unsigned scalar parser: reject signs, overflow and trailing data. */
++ static int archer_parse_scalar(const char *buf, size_t count, u8 *value)
++ {
++     char input[5];
++     size_t i, length = count;
++
++     if (!count || count >= sizeof(input) || memchr(buf, '\0', count))
++         return -EINVAL;
++     memcpy(input, buf, count);
++     if (input[length - 1] == '\n')
++         length--;
++     if (!length)
++         return -EINVAL;
++     input[length] = '\0';
++     for (i = 0; i < length; i++)
++         if (input[i] < '0' || input[i] > '9')
++             return -EINVAL;
++     return kstrtou8(input, 10, value);
++ }
++
+  static ssize_t predator_usb_charging_show(struct device *dev, struct device_attribute *attr,char *buf){
+      acpi_status status;
+      u64 result;
+@@ -3094,7 +3114,7 @@
+      acpi_status status;
+      u64 result;
+      u8 val;
+-       if (sscanf(buf, "%hhd", &val) != 1)
++       if (archer_parse_scalar(buf, count, &val))
+          return -EINVAL;
+        if ((val != 0) && (val != 10) && (val != 20) && (val != 30))
+          return -EINVAL;
+@@ -3249,7 +3269,7 @@
+                                              struct device_attribute *attr,
+                                              const char *buf, size_t count) {
+      u8 val;
+-       if (sscanf(buf, "%hhd", &val) != 1)
++       if (archer_parse_scalar(buf, count, &val))
+          return -EINVAL;
+  
+        if ((val != 0) && (val != 1))
+@@ -3278,7 +3298,7 @@
+                                              struct device_attribute *attr,
+                                              const char *buf, size_t count) {
+      u8 val;
+-       if (sscanf(buf, "%hhd", &val) != 1)
++       if (archer_parse_scalar(buf, count, &val))
+          return -EINVAL;
+        
+      if ((val != 0) && (val != 1))
+@@ -3570,7 +3590,7 @@
+      acpi_status status;
+      u64 result;
+      u8 val;
+-       if (sscanf(buf, "%hhd", &val) != 1)
++       if (archer_parse_scalar(buf, count, &val))
+          return -EINVAL;
+        if ((val != 0) && (val != 1))
+          return -EINVAL;
+@@ -3604,7 +3624,7 @@
+      acpi_status status;
+      u64 result;
+      u8 val;
+-       if (sscanf(buf, "%hhd", &val) != 1)
++       if (archer_parse_scalar(buf, count, &val))
+          return -EINVAL;
+        if ((val != 0) && (val != 1))
+          return -EINVAL;
+@@ -3637,7 +3657,7 @@
+      acpi_status status;
+      u64 result;
+      u8 val;
+-       if (sscanf(buf, "%hhd", &val) != 1)
++       if (archer_parse_scalar(buf, count, &val))
+          return -EINVAL;
+        if ((val != 0) && (val != 1))
+          return -EINVAL;

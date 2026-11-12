@@ -18,41 +18,26 @@ _battery_interface() {
 }
 
 _battery_enable() {
-    local path="$1" value=1 rule
-    if [[ "$path" == */charge_control_end_threshold ]]; then
-        value=80
-        rule='ACTION=="add|change", SUBSYSTEM=="power_supply", ATTR{type}=="Battery", TEST=="charge_control_end_threshold", ATTR{charge_control_end_threshold}="80"'
-    else
-        # Driver-level sysfs groups are not bound WMI device attributes.
-        # Run after module initialization, rather than race the module add event.
-        _battery_persist_fallback "$path" || return 1
-        echo 1 | run_sudo tee "$path" >/dev/null || return 1
-        return 0
-    fi
-    echo "$value" | run_sudo tee "$path" >/dev/null || return 1
-    archer_write_config "$_BATTERY_UDEV_RULE" "$rule" || return 1
-    run_sudo udevadm control --reload-rules || return 1
-    INSTALLED_FILES+=" $_BATTERY_UDEV_RULE"
+    _battery_persist_fallback || return 1
+    run_sudo systemctl start archer-battery-limit.service || return 1
 }
 
 _battery_persist_fallback() {
-    local path="$1"
-    if [[ -e "$_BATTERY_SERVICE" ]] && ! archer_config_owned "$_BATTERY_SERVICE"; then
-        warn "Refusing to overwrite user-managed $_BATTERY_SERVICE"
-        return 1
-    fi
-    run_sudo tee "$_BATTERY_SERVICE" >/dev/null <<SERVICE || return 1
-# Installed by Archer Compatibility Suite
-[Unit]
-Description=Archer battery charge limit
+    run_sudo install -d -o root -g root -m 0755 /usr/lib/archer /etc/archer || return 1
+    run_sudo install -o root -g root -m 0644 "$SCRIPT_DIR/gui/archer_battery.py" /usr/lib/archer/archer_battery.py || return 1
+    INSTALLED_FILES+=" /usr/lib/archer/archer_battery.py"
+    archer_write_config "$_BATTERY_SERVICE" '[Unit]
+Description=Apply Archer saved battery charge policy
 After=systemd-modules-load.service
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -c 'echo 1 > $path'
+ExecStart=/usr/bin/python3 /usr/lib/archer/archer_battery.py
+ProtectSystem=full
+ReadWritePaths=/etc/archer
 [Install]
-WantedBy=multi-user.target
-SERVICE
-    INSTALLED_FILES+=" $_BATTERY_SERVICE"
+WantedBy=multi-user.target' || return 1
+    archer_write_config "$_BATTERY_UDEV_RULE" 'ACTION=="add|change", SUBSYSTEM=="power_supply", RUN+="/usr/bin/systemctl --no-block start archer-battery-limit.service"' || return 1
+    run_sudo udevadm control --reload-rules || return 1
     run_sudo systemctl daemon-reload || return 1
     run_sudo systemctl enable archer-battery-limit.service || return 1
 }
@@ -73,7 +58,7 @@ module_install() {
     INSTALLED_FILES+=" $_BATTERY_LOAD_CONF"
     INSTALLED_DKMS+=" $DKMS_NAME/$DKMS_VERSION"
     if [[ ! -d "$KERNEL_MODULES_ROOT/$(uname -r)/kernel" ]]; then
-        _battery_persist_fallback "$_BATTERY_HEALTH_PATH" || return 1
+        _battery_persist_fallback || return 1
         mark_reboot_required
         warn "Running kernel was replaced. Reboot to load the installed module and apply the charge limit."
         return 0
@@ -95,6 +80,7 @@ module_uninstall() {
         run_sudo rm -f "$_BATTERY_SERVICE" || return 1
         run_sudo systemctl daemon-reload || return 1
     fi
+    run_sudo rm -f /usr/lib/archer/archer_battery.py || return 1
     # Retain current charge state and external package-managed drivers.
     archer_remove_config "$_BATTERY_UDEV_RULE" "$_BATTERY_LOAD_CONF" || return 1
     run_sudo udevadm control --reload-rules || return 1
@@ -107,5 +93,5 @@ module_verify() {
     local path value
     path=$(_battery_interface) || return 1
     value=$(cat "$path") || return 1
-    if [[ "$path" == */charge_control_end_threshold ]]; then [[ "$value" == 80 ]]; else [[ "$value" == 1 ]]; fi
+    if [[ "$path" == */charge_control_end_threshold ]]; then [[ "$value" =~ ^(80|100)$ ]]; else [[ "$value" =~ ^[01]$ ]]; fi
 }

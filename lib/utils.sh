@@ -70,7 +70,7 @@ run_sudo_timeout() {
 # Rebuild all installed kernel images, propagating failures.
 rebuild_initramfs() {
     source "$(dirname "${BASH_SOURCE[0]}")/kernel.sh"
-    kernel_refresh_initramfs
+    kernel_refresh_initramfs /etc /usr/bin/mkinitcpio /usr/bin/dracut
 }
 
 # Prompt for confirmation (respects --no-confirm)
@@ -106,62 +106,60 @@ has_cmd() {
     command -v "$1" &>/dev/null
 }
 
-# Safely add kernel parameters to GRUB config
-# Usage: add_grub_params "param1 param2"
-add_grub_params() {
-    local params="$1"
+# The privileged helper parses literal values, records added tokens and performs
+# the complete root-owned atomic replacement. Exit 3 means no rebuild is needed.
+_update_grub_params() {
+    local action="$1" params="$2" status=0
     if [[ -f /etc/default/grub ]]; then
-        local current
-        current=$(grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | sed 's/^GRUB_CMDLINE_LINUX_DEFAULT="//;s/"$//')
-        # Only add params not already present
-        local new_params=""
-        for p in $params; do
-            if ! echo "$current" | grep -qF "$p"; then
-                new_params="$new_params $p"
-            fi
-        done
-        if [[ -n "$new_params" ]]; then
-            log "Adding kernel parameters to GRUB:$new_params"
-            local updated="$new_params $current"
-            # Use awk for safe replacement (no sed delimiter issues)
-            local tmpfile
-            tmpfile="$(mktemp)"
-            run_sudo awk -v val="$updated" '/^GRUB_CMDLINE_LINUX_DEFAULT=/{print "GRUB_CMDLINE_LINUX_DEFAULT=\"" val "\""; next} {print}' \
-                /etc/default/grub > "$tmpfile" && run_sudo mv "$tmpfile" /etc/default/grub
-            run_sudo grub-mkconfig -o /boot/grub/grub.cfg
-        fi
-    elif [[ -d /boot/loader/entries ]]; then
-        log "systemd-boot detected. Please manually add these kernel parameters:"
-        log "  $params"
-        log "  Edit files in /boot/loader/entries/ and add to the 'options' line."
+        run_sudo python3 "$(detect_script_dir)/scripts/archer-grub.py" "$action" "$params" || status=$?
+        [[ "$status" -eq 3 ]] && return 0
+        [[ "$status" -eq 0 ]] || return 1
+        run_sudo grub-mkconfig -o /boot/grub/grub.cfg || return 1
+    elif [[ "$action" == add && -d /boot/loader/entries ]]; then
+        log "systemd-boot: add these parameters to the options line in /boot/loader/entries/: $params"
     fi
 }
 
-# Safely remove kernel parameters from GRUB config
-# Usage: remove_grub_params "param1 param2"
-remove_grub_params() {
-    local params="$1"
+add_grub_params() { _update_grub_params add "$1"; }
+remove_grub_params() { _update_grub_params remove "$1"; }
+
+check_grub_ownership() {
+    # Repair historical exposure on any update, even without the touchpad module.
     if [[ -f /etc/default/grub ]]; then
-        local needs_update=0
-        for p in $params; do
-            if grep -qF "$p" /etc/default/grub; then
-                needs_update=1
-                break
-            fi
-        done
-        if [[ "$needs_update" -eq 1 ]]; then
-            log "Removing kernel parameters from GRUB: $params"
-            local current
-            current=$(grep "^GRUB_CMDLINE_LINUX_DEFAULT=" /etc/default/grub | sed 's/^GRUB_CMDLINE_LINUX_DEFAULT="//;s/"$//')
-            local updated="$current"
-            for p in $params; do
-                updated=$(echo "$updated" | sed "s|$p||g" | tr -s ' ')
-            done
-            local tmpfile
-            tmpfile="$(mktemp)"
-            run_sudo awk -v val="$updated" '/^GRUB_CMDLINE_LINUX_DEFAULT=/{print "GRUB_CMDLINE_LINUX_DEFAULT=\"" val "\""; next} {print}' \
-                /etc/default/grub > "$tmpfile" && run_sudo mv "$tmpfile" /etc/default/grub
-            run_sudo grub-mkconfig -o /boot/grub/grub.cfg
+        local status=0
+        run_sudo python3 "$(detect_script_dir)/scripts/archer-grub.py" check || status=$?
+        [[ "$status" -eq 0 || "$status" -eq 3 ]]
+    fi
+}
+
+# Records survive interrupted installs and are replayed only for this module.
+module_service() {
+    INSTALLED_FILES+=" /var/lib/archer/module-state/$MODULE_ID.json"
+    run_sudo python3 "$(detect_script_dir)/scripts/archer-install-state.py" "$MODULE_ID" service -- "$@" || return 1
+}
+module_restore_services() {
+    run_sudo python3 "$(detect_script_dir)/scripts/archer-install-state.py" "$MODULE_ID" restore-services || return 1
+}
+module_config() {
+    INSTALLED_FILES+=" $1 /var/lib/archer/module-state/$MODULE_ID.json"
+    run_sudo python3 "$(detect_script_dir)/scripts/archer-install-state.py" "$MODULE_ID" config -- "$1" "$2" || return 1
+}
+module_remove_config() {
+    local path
+    for path in "$@"; do
+        run_sudo python3 "$(detect_script_dir)/scripts/archer-install-state.py" "$MODULE_ID" remove-config "$path" || return 1
+    done
+}
+
+# Cache denied reads as well as successful reads. Unknown is not healthy.
+read_kernel_log() {
+    if [[ "${KERNEL_LOG_AVAILABLE:-unknown}" == unknown ]]; then
+        if _CACHED_DMESG=$(dmesg 2>/dev/null); then
+            KERNEL_LOG_AVAILABLE=1
+        else
+            KERNEL_LOG_AVAILABLE=0
+            _CACHED_DMESG=""
+            warn "Kernel log unavailable to this user; log-based diagnostics are unknown. Run sudo dmesg for details."
         fi
     fi
 }

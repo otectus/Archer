@@ -220,15 +220,17 @@ install_shared_deps() {
 }
 
 run_selected_modules() {
-    local installed_names=() failed=0 previous
+    local installed_names=() failed=0 previous previous_modules
+    SKIPPED_MODULES=""
     # A driver-only update must not discard cleanup records for other modules.
     if has_manifest; then
-        for previous in $(read_manifest_modules); do
-            is_known_module "$previous" && installed_names+=("$previous")
+        previous_modules=$(read_manifest_modules) || return 1
+        for previous in $previous_modules; do
+            installed_names+=("$previous")
         done
-        INSTALLED_FILES="$(read_manifest_field files_created)"
-        INSTALLED_DKMS="$(read_manifest_field dkms_modules)"
-        INSTALLED_PACKAGES="$(read_manifest_field packages_installed)"
+        INSTALLED_FILES="$(read_manifest_field files_created)" || return 1
+        INSTALLED_DKMS="$(read_manifest_field dkms_modules)" || return 1
+        INSTALLED_PACKAGES="$(read_manifest_field packages_installed)" || return 1
     fi
 
     for i in "${!MODULE_IDS[@]}"; do
@@ -251,13 +253,18 @@ run_selected_modules() {
             local _dkms_pre="$INSTALLED_DKMS"
             local _pkgs_pre="$INSTALLED_PACKAGES"
 
-            source "$SCRIPT_DIR/modules/${id}.sh"
+            source "$SCRIPT_DIR/modules/${id}.sh" || { failed=1; continue; }
+            MODULE_SKIPPED=0
             if ! module_install; then
                 warn "Module $id failed to install. Retaining cleanup records for completed steps; continuing with remaining modules."
                 if [[ "$INSTALLED_FILES" != "$_files_pre" || "$INSTALLED_DKMS" != "$_dkms_pre" || "$INSTALLED_PACKAGES" != "$_pkgs_pre" ]]; then
                     is_in_list "$id" "${installed_names[*]}" || installed_names+=("$id")
                 fi
                 failed=1
+                continue
+            fi
+            if [[ "$MODULE_SKIPPED" -eq 1 ]]; then
+                SKIPPED_MODULES+=" $id"
                 continue
             fi
             if ! is_in_list "$id" "${installed_names[*]}"; then
@@ -275,7 +282,7 @@ run_selected_modules() {
         fi
     done
 
-    # Write manifest with only modules that actually installed cleanly.
+    # Preserve both successful modules and partial changes needing cleanup.
     local modules_joined="${installed_names[*]}"
     if [[ -z "$modules_joined" ]]; then
         warn "No modules installed successfully — skipping manifest write."
@@ -294,11 +301,15 @@ verify_modules() {
         if [[ "${MODULE_SELECTED[$i]}" -eq 1 ]]; then
             local id="${MODULE_IDS[$i]}"
             local label="${MODULE_LABELS[$i]}"
+            if is_in_list "$id" "${SKIPPED_MODULES:-}"; then
+                log "$label was skipped."
+                continue
+            fi
             total=$((total + 1))
 
             # Re-source to restore this module's function definitions (each module
             # overrides the same names: module_verify, module_install, etc.)
-            source "$SCRIPT_DIR/modules/${id}.sh"
+            source "$SCRIPT_DIR/modules/${id}.sh" || continue
             if module_verify; then
                 success "$label"
                 passed=$((passed + 1))
@@ -310,6 +321,7 @@ verify_modules() {
 
     echo ""
     log "Verification: $passed/$total modules passed"
+    [[ "$passed" -eq "$total" ]]
 }
 
 # --- Main entry point ---
@@ -325,8 +337,15 @@ main() {
         exit 0
     fi
 
+    if [[ "$DRY_RUN" -eq 0 && "$VERIFY_ONLY" -eq 0 ]]; then
+        if [[ ! -d /run/systemd/system ]] || ! systemctl show --property=Version --value >/dev/null; then
+            warn "Archer requires a running systemd system manager; this init environment is unsupported."
+            return 1
+        fi
+    fi
+
     # Move any legacy manifest into the new system path before any read.
-    migrate_legacy_manifest
+    migrate_legacy_manifest || return 1
 
     # Standalone verify mode: check installed modules from manifest
     if [[ "$VERIFY_ONLY" -eq 1 ]]; then
@@ -335,17 +354,17 @@ main() {
         fi
         section "Verifying Installed Modules"
         local mods
-        mods=$(read_manifest_modules)
+        mods=$(read_manifest_modules) || return 1
         local total=0
         local passed=0
         for id in $mods; do
+            total=$((total + 1))
             if ! is_known_module "$id"; then
                 warn "Manifest references unknown module '$id' — skipping (refusing to source untrusted name)."
                 continue
             fi
             local mod_file="$SCRIPT_DIR/modules/${id}.sh"
             if [[ -f "$mod_file" ]]; then
-                total=$((total + 1))
                 source "$mod_file"
                 if module_verify; then
                     success "$MODULE_NAME"
@@ -359,7 +378,8 @@ main() {
         done
         echo ""
         log "Verification: $passed/$total modules passed"
-        exit 0
+        [[ "$passed" -eq "$total" ]]
+        return $?
     fi
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -438,7 +458,27 @@ main() {
         confirm "Proceed with installation?" || exit 0
     fi
 
+    # Validate selected source/preconditions and the runtime before any packages change.
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        if [[ ! -d /run/systemd/system ]] || ! systemctl show --property=Version --value >/dev/null; then
+            warn "Archer requires a running systemd system manager; this init environment is unsupported."
+            return 1
+        fi
+    fi
+    if has_manifest; then
+        read_manifest_modules >/dev/null || return 1
+    fi
+    for i in "${!MODULE_IDS[@]}"; do
+        [[ "${MODULE_SELECTED[$i]}" -eq 1 ]] || continue
+        unset -f module_preflight
+        source "$SCRIPT_DIR/modules/${MODULE_IDS[$i]}.sh" || return 1
+        if declare -F module_preflight >/dev/null; then
+            module_preflight || return 1
+        fi
+    done
+
     # Install shared dependencies
+    check_grub_ownership || return 1
     install_shared_deps || return 1
 
     # Run selected modules
@@ -446,12 +486,14 @@ main() {
     run_selected_modules || installation_failed=1
 
     # Verify
-    verify_modules
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        verify_modules || installation_failed=1
+    fi
 
     # Final summary
     section "Installation Complete"
     if [[ "$installation_failed" -eq 1 ]]; then
-        warn "Some modules failed to install; see errors above. Existing manifest records were retained."
+        warn "Some modules failed installation or verification; see errors above. Existing manifest records were retained."
         return 1
     fi
     success "All selected modules have been installed."

@@ -20,37 +20,34 @@ module_install() {
     # Check for conflicting service
     if pacman -Qi power-profiles-daemon &>/dev/null; then
         warn "power-profiles-daemon is installed and conflicts with TLP."
-        if confirm "Remove power-profiles-daemon and install TLP?"; then
-            run_sudo pacman -Rns --noconfirm power-profiles-daemon
+        if confirm "Switch from power-profiles-daemon to TLP?"; then
+            module_service power-profiles-daemon.service mask --now || return 1
         else
             log "Skipping TLP installation to avoid conflicts."
+            MODULE_SKIPPED=1
             return 0
         fi
     fi
 
     log "Installing TLP..."
-    run_sudo pacman -S --needed --noconfirm tlp tlp-rdw
+    run_sudo pacman -S --needed --noconfirm tlp tlp-rdw || return 1
+
+    INSTALLED_PACKAGES+=" tlp tlp-rdw"
 
     # Mask conflicting services
-    run_sudo systemctl mask systemd-rfkill.service
-    run_sudo systemctl mask systemd-rfkill.socket
-
-    # Enable TLP
-    run_sudo systemctl enable --now tlp.service
+    module_service systemd-rfkill.service mask || return 1
+    module_service systemd-rfkill.socket mask || return 1
 
     # Write Acer-optimized config
     log "Applying Acer-optimized power settings..."
-    run_sudo tee "$_TLP_CONF" > /dev/null <<'TLP_EOF'
+    local config
+    config=$(cat <<'TLP_EOF'
 # Acer laptop optimizations - Archer Compatibility Suite
 # CPU scaling
 CPU_SCALING_GOVERNOR_ON_AC=performance
 CPU_SCALING_GOVERNOR_ON_BAT=powersave
 CPU_ENERGY_PERF_POLICY_ON_AC=balance_performance
 CPU_ENERGY_PERF_POLICY_ON_BAT=power
-
-# Platform profile
-PLATFORM_PROFILE_ON_AC=balanced
-PLATFORM_PROFILE_ON_BAT=low-power
 
 # WiFi power saving
 WIFI_PWR_ON_AC=off
@@ -63,6 +60,22 @@ RUNTIME_PM_ON_BAT=auto
 # USB autosuspend
 USB_AUTOSUSPEND=1
 TLP_EOF
+)
+    local choices
+    choices=$(cat /sys/firmware/acpi/platform_profile_choices 2>/dev/null) || choices=""
+    if [[ " $choices " == *" balanced "* ]]; then
+        config+=$'\nPLATFORM_PROFILE_ON_AC=balanced'
+    else
+        warn "No balanced platform profile; leaving TLP's AC platform profile unset."
+    fi
+    if [[ " $choices " == *" low-power "* ]]; then
+        config+=$'\nPLATFORM_PROFILE_ON_BAT=low-power'
+    else
+        warn "No low-power platform profile; leaving TLP's battery platform profile unset."
+    fi
+    module_config "$_TLP_CONF" "$config" || return 1
+    module_service tlp.service enable --now || return 1
+    run_sudo tlp start || return 1
 
     log "TLP installed and configured."
     log "View status: sudo tlp-stat -s"
@@ -72,17 +85,9 @@ TLP_EOF
 }
 
 module_uninstall() {
-    log "Removing TLP configuration..."
-    run_sudo rm -f "$_TLP_CONF"
-
-    log "Disabling TLP..."
-    run_sudo systemctl disable --now tlp.service 2>/dev/null || true
-
-    # Unmask rfkill
-    run_sudo systemctl unmask systemd-rfkill.service 2>/dev/null || true
-    run_sudo systemctl unmask systemd-rfkill.socket 2>/dev/null || true
-
-    log "TLP config removed. Package retained (remove manually with: sudo pacman -Rns tlp tlp-rdw)"
+    module_remove_config "$_TLP_CONF" || return 1
+    module_restore_services || return 1
+    log "TLP configuration removed; prior service states restored. Packages retained."
 }
 
 module_verify() {

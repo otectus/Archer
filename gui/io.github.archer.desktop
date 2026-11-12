@@ -2,6 +2,7 @@
 Name=Archer
 Comment=Acer laptop management - fan control, RGB, power profiles
 Exec=python3 /opt/archer/archer_gui.py
+TryExec=/opt/archer/archer_gui.py
 Icon=io.github.archer
 Terminal=false
 Type=Application

@@ -1,6 +1,6 @@
 # Archer control center
 
-Archer uses a native GTK4/libadwaita interface with six main destinations. The sidebar becomes an overlay on narrow windows; Display, Keyboard, Firmware, and Advanced open as subpages with a Back action.
+Archer uses a native GTK4/libadwaita interface with six main destinations. Collapse the left sidebar with its arrow button and expand it with the sidebar button in the content header, or press **Ctrl+B**. The desktop choice is saved across launches. Narrow windows use temporary overlay navigation and preserve your desktop preference. Display, Keyboard, Firmware, and Advanced open as subpages with a Back action.
 
 | Destination | What you can do |
 | --- | --- |
@@ -8,10 +8,10 @@ Archer uses a native GTK4/libadwaita interface with six main destinations. The s
 | Performance | Select a thermal profile, apply automatic/maximum/manual fan settings, and enable Game Mode. |
 | Battery | Check charge and remaining time, protect charging at 80%, calibrate, and configure off-state USB charging. |
 | Display & Keyboard | Configure graphics mode and panel response, preview zone colors, apply effects, and set backlight timeout. |
-
-Zone colours and effects reach the keyboard through the ENE K5130 controller when it is available, falling back to the sysfs/WMI path otherwise; the effect list matches the modes verified on that controller. See [the protocol notes](ENE_PROTOCOL.md).
 | Audio | Enable microphone noise suppression and find the virtual input in your applications. |
 | System | Copy device information, change startup sound, check firmware, and access Advanced recovery tools. |
+
+Zone colours and effects use the ENE K5130 controller when available, with sysfs/WMI as the fallback. Each backend has its own supported effect list; saved effects use stable names. Older integer effects that cannot be identified safely require selecting and applying the intended effect once. See [the protocol notes](ENE_PROTOCOL.md).
 
 ## Preview
 
@@ -22,7 +22,7 @@ The following screenshots use a simulated device; they do not show readings from
   <img alt="Archer Overview with native navigation, hardware summaries, and temperature history" src="screenshots/overview-light.png">
 </picture>
 
-[Light appearance](screenshots/overview-light.png) · [Dark appearance](screenshots/overview-dark.png)
+[Light appearance](screenshots/overview-light.png) · [Dark appearance](screenshots/overview-dark.png) · [Collapsed sidebar](screenshots/sidebar-collapsed.png)
 
 ## Appearance and accessibility
 
@@ -36,6 +36,7 @@ GTK 4.12 and libadwaita 1.6 or later are required. System fonts and scaling are 
 | --- | --- |
 | Ctrl+Q | Quit Archer |
 | Ctrl+, | Preferences |
+| Ctrl+B | Collapse or expand the sidebar |
 | Alt+Left | Return from a subpage |
 | Escape | Dismiss navigation or a dialog |
 | Tab / Shift+Tab | Move focus |
@@ -49,13 +50,25 @@ While a change is pending, its control group is disabled. Failed switches revert
 
 Graphics settings are labeled **Configured mode**. A successful change records a restart requirement for the current boot; it survives GUI/service restarts and clears after reboot. Archer does not reboot automatically. Firmware checks are advisory and explicit; failed checks never report that firmware is current.
 
+Driver recovery runs one ordered stop/reload/start operation. The GUI waits for its completion record after reconnecting and displays failures; **View recent service logs** includes recovery logs. Hardware writes are serialized, and another pending change receives a busy response. Authorization can remain pending for up to two minutes.
+
+Battery charge protection uses `/etc/archer/battery.json` for both the GUI and battery-only boot/device-event service. Turning it off remains effective across service restarts and device events. Calibration requires verified external power. Archer Game Mode restores each changed CPU policy and NVIDIA persistence state when disabled or after a daemon restart in the same boot. It refuses activation while TLP owns power policy; TLP may reapply its configured profile on AC transitions.
+
+Noise suppression requires the `audio-enhance` module and its rnnoise plugin. The GUI restarts PipeWire in your session and checks that the virtual microphone appears or disappears. A saved configuration is reported separately from a failed session restart or missing source.
+
 Advanced’s model overrides are explicitly persistent. The previous duplicate “one-time” controls actually wrote the persistent configuration and have been removed. Existing custom fan curves remain visible as active; applying another fan mode stops curve control first. This UI does not add a new curve editor.
 
 Closing hides the window only when a system tray host is available and the preference is enabled. Without a tray host it exits normally. If the tray disappears while the window is hidden, Archer presents the window again. Quit always exits.
 
-Appearance, window geometry, and tray behavior are stored in `$XDG_CONFIG_HOME/archer/gui.json` (normally `~/.config/archer/gui.json`). Hardware settings remain in `/etc/archer/settings.json` and continue to use D-Bus/polkit authorization.
+Appearance, window geometry, sidebar visibility, and tray behavior are stored in `$XDG_CONFIG_HOME/archer/gui.json` (normally `~/.config/archer/gui.json`). Hardware settings use validated schema version 2 in `/etc/archer/settings.json`, with the shared battery policy above, and continue to use D-Bus/polkit authorization.
 
 ## System tray
+
+The GUI module enables Archer at desktop login by default, opening the control center and registering its system tray icon when a tray host is available. Existing installations can enable this by rerunning `./install.sh --modules gui --no-confirm`.
+
+Turn **Preferences → Start Archer at login** off to disable automatic startup for your account, or on to restore it. The change takes effect at your next login; it does not quit the current GUI or stop the hardware daemon. Closing to the tray remains a separate preference.
+
+Startup uses the [XDG desktop autostart standard](https://specifications.freedesktop.org/autostart/latest/): `/etc/xdg/autostart/io.github.archer.desktop` supplies the installation default, and `$XDG_CONFIG_HOME/autostart/io.github.archer.desktop` (normally `~/.config/autostart/`) stores your override. Your choice survives upgrades. Uninstall removes the system entry; retained user overrides cannot launch Archer when its executable is absent. Desktops must support XDG autostart; standalone compositors may require enabling their session's autostart support.
 
 Right-click Archer's tray icon to open this menu:
 

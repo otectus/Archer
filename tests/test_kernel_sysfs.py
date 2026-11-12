@@ -41,6 +41,7 @@ class KernelSysfsTests(unittest.TestCase):
             threshold = battery / 'charge_control_end_threshold'
             threshold.write_text('100')
             hw = daemon.HardwareManager.__new__(daemon.HardwareManager)
+            hw.settings = daemon.SettingsStore(str(Path(tmp) / "settings.json"))
             hw.sense_base = None
             self.assertFalse(hw.get_battery_limiter())
             self.assertTrue(hw.set_battery_limiter(True))

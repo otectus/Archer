@@ -139,7 +139,7 @@ class DriverSourceTests(unittest.TestCase):
         # Compile the actual patched fan implementation, substituting only kernel
         # services and WMI transport. This cannot access an EC or the host sysfs.
         start = self.source.index(' static int cpu_fan_speed = 0;')
-        end = self.source.index(' /*\n  * persistent predator states.', start)
+        end = self.source.index(' /*\n  * Runtime-only predator states;', start)
         body = self.source[start:end]
         harness = Path(__file__).with_name('helpers') / 'fan_harness.c'
         cfile = self.root / 'fan-test.c'

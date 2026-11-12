@@ -3,7 +3,7 @@
 `source.conf` is the single update point for the repository URL, full upstream
 commit and Archer DKMS version. This package uses upstream commit
 [`73a25ec243a44ba2b1703e8d0a76fa2735062506`](https://github.com/0x7375646F/Linuwu-Sense/commit/73a25ec243a44ba2b1703e8d0a76fa2735062506),
-with DKMS version `1.0.archer2`. It does not install moving `main` content.
+with DKMS version `1.0.archer3`. It does not install moving `main` content.
 
 `prepare.sh DIRECTORY [LOCAL_GIT_REPO]` delegates to the reusable `driver/prepare.sh` and checks out that exact commit,
 checks/applies each patch named in `patches/series` with `git apply --check` and `git apply`, and generates
@@ -11,7 +11,7 @@ the DKMS metadata. Any mismatch stops preparation before installation. It never
 runs upstream's `make install`, module-signing shell commands, or service.
 Reusing an identical destination is a no-op; a modified destination is an error. `modules/driver.sh` prepares a new
 temporary tree, compares existing sources on reinstall, and copies validated
-sources into root-owned `/usr/src/linuwu-sense-1.0.archer2`.
+sources into root-owned `/usr/src/linuwu-sense-1.0.archer3`.
 
 The patch series is ordered and intentionally separate from GUI code:
 
@@ -26,6 +26,10 @@ The patch series is ordered and intentionally separate from GUI code:
 | `0007` | Reject empty, truncated, embedded-NUL and incomplete/extra RGB commands; check persistent file error pointers. |
 | `0008` | Probe-selected legacy single-provider platform-profile adapter. |
 | `0009` | Header and callback compatibility for older kernels. |
+| `0010` | Remove all kernel settings-file reads/writes and unsafe state replay, initialize fans to Auto, and validate ACPI type/pointer/length before copying or logging battery/keyboard replies. |
+| `0011` | Counted scalar parser: reject empty, signed, overflowing, embedded-NUL and trailing input before USB/battery/display/keyboard firmware calls. |
+
+The final driver no longer reads or writes `/etc/predator_state`, `/etc/nitro_state`, `/etc/four_zone_kb_state`, or `/etc/per_zone_kb_state`. Existing files are ignored and retained for manual archival. Standalone driver users must reapply desired lighting/profile settings after boot; Archer owns validated userspace persistence. Earlier patches mention file persistence because the ordered series preserves their original context; patch `0010` removes that code entirely, including duplicate file closes.
 
 The driver protocol/quirk evidence and physical test procedure are in
 [ANV16S-41 support](../../docs/anv16s-41.md). Source and derived driver patches
@@ -70,7 +74,7 @@ provider is not assumed to be AMD PMF: use the before/after diagnostic report.
    patches once merged upstream. Keep the standard `nitro_sense/fan_speed` ABI.
 3. Increment `DKMS_VERSION` whenever the source, patch set or build logic changes.
    Do not silently replace the contents of an already registered version.
-4. Run Bats and `LINUWU_TEST_REPO=/path/to/upstream python3 -m unittest discover -s tests -v`.
+4. Run Bats and `LINUWU_TEST_REPO=/path/to/linuwu BATTERY_TEST_REPO=/path/to/battery python3 -m unittest discover -s tests -v`.
    This validates reproducible preparation, refusal on mismatched source/pins,
    unchanged existing DMI entries, and the real fan parser/rollback code with
    simulated WMI. CI fetches upstream explicitly to run these tests.

@@ -23,10 +23,15 @@ TIMEOUT = 5.0
 # Setters that may legitimately take longer than TIMEOUT. envycontrol can
 # reflow the X/Wayland session config; fwupd can scan slow SPI flash.
 LONG_TIMEOUTS = {
-    "set_display_mode": 60.0,
+    "get_all_settings": 35.0,
+    "get_monitoring_data": 15.0,
+    "get_display_mode": 15.0,
+    "set_display_mode": 620.0,
+    "set_modprobe_parameter": 620.0,
+    "remove_modprobe_parameter": 620.0,
     "get_firmware_info": 40.0,
-    "restart_daemon": 10.0,
-    "restart_drivers_and_daemon": 15.0,
+    "restart_daemon": 180.0,
+    "restart_drivers_and_daemon": 180.0,
 }
 
 DBUS_NAME = "io.otectus.Archer1"
@@ -131,7 +136,7 @@ class ArcherClient:
             return {"success": False, "error": DAEMON_OFFLINE_HINT}
 
         method_name, args_fn = mapping
-        timeout = LONG_TIMEOUTS.get(command, TIMEOUT)
+        timeout = LONG_TIMEOUTS.get(command, 180.0 if command.startswith(("set_", "remove_", "restart_")) else TIMEOUT)
         try:
             method = getattr(self._dbus_iface, method_name)
             if args_fn and params:
@@ -228,7 +233,7 @@ class ArcherClient:
 
     def set_four_zone_mode(self, mode, speed, brightness, direction, r, g, b):
         return self._send_command("set_four_zone_mode", {
-            "mode": mode, "speed": speed, "brightness": brightness,
+            **({"effect": mode} if isinstance(mode, str) else {"mode": mode}), "speed": speed, "brightness": brightness,
             "direction": direction, "red": r, "green": g, "blue": b,
         })
 

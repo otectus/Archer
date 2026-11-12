@@ -23,12 +23,12 @@ module_detect() {
 }
 
 module_check_installed() {
-    kernel_profile_path >/dev/null
+    kernel_profile_path "$KERNEL_SYS_ROOT" >/dev/null
 }
 
 module_install() {
     # A working native provider needs no force-generation override.
-    if [[ -f "$_THERMAL_PROFILE" ]] || kernel_profile_path >/dev/null; then
+    if [[ -f "$_THERMAL_PROFILE" ]] || kernel_profile_path "$KERNEL_SYS_ROOT" >/dev/null; then
         log "Existing platform-profile provider is active; retaining its profiles."
         return 0
     fi
@@ -51,7 +51,7 @@ module_uninstall() {
 
 module_verify() {
     local path profile
-    if path=$(kernel_profile_path); then
+    if path=$(kernel_profile_path "$KERNEL_SYS_ROOT"); then
         profile=$(cat "$path") || return 1
         log "Active thermal profile: $profile"
         return 0

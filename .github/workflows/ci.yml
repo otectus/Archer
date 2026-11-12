@@ -50,10 +50,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Fetch upstream Git objects (preparation validates the pinned commit)
-        run: git clone --no-checkout https://github.com/0x7375646F/Linuwu-Sense.git /tmp/linuwu-upstream
+        run: |
+          git clone --no-checkout https://github.com/0x7375646F/Linuwu-Sense.git /tmp/linuwu-upstream
+          git clone --no-checkout https://github.com/frederik-h/acer-wmi-battery.git /tmp/battery-upstream
       - name: Test mock sysfs, fan C code, exact DMI patch and packaging failures
         env:
           LINUWU_TEST_REPO: /tmp/linuwu-upstream
+          BATTERY_TEST_REPO: /tmp/battery-upstream
         run: python3 -m unittest discover -s tests -v
 
   python-lint:
@@ -108,7 +111,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install GTK test runtime
-        run: pacman -Syu --noconfirm python python-gobject python-cairo python-dbus gtk4 libadwaita xorg-server-xvfb xorg-xauth dbus
+        run: pacman -Syu --noconfirm python python-gobject python-cairo python-dbus gtk4 libadwaita xorg-server-xvfb xorg-xauth dbus pipewire noise-suppression-for-voice
+      - name: Verify the real audio filter in an isolated PipeWire server
+        run: python tests/audio_smoke.py
       - name: Check pure data contracts
         run: python tests/gui_contract_test.py
       - name: Check interactions and layouts

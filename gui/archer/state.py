@@ -35,6 +35,8 @@ class AppState(GObject.Object):
         self._attempt = 0
         self._matches = []
         self._watchdog = 0
+        self._recovery_request = None
+        self._recovery_deadline = 0
 
     @property
     def writable(self):
@@ -52,6 +54,8 @@ class AppState(GObject.Object):
 
     def refresh(self, reconnect=False):
         if self.closed:
+            return
+        if self.status == "Restarting" and not reconnect:
             return
         if self._fetching:
             self._refresh_again = True
@@ -82,6 +86,17 @@ class AppState(GObject.Object):
             self.refresh()
             return False
         if isinstance(data, dict) and data:
+            recovery = data.get("recovery") or {}
+            if self._recovery_request and (recovery.get("request") != self._recovery_request or recovery.get("status") == "running"):
+                if time.monotonic() < self._recovery_deadline:
+                    self._status("Restarting")
+                    self._retry = GLib.timeout_add_seconds(2, self._reconnect)
+                    return False
+                self.error = "Recovery completion could not be verified. Check the service logs."
+                self._status("Offline")
+                self._recovery_request = None
+                return False
+            self._recovery_request = None
             self.settings = data
             self.error = ""
             self._attempt = 0
@@ -137,19 +152,25 @@ class AppState(GObject.Object):
         if self.closed:
             return
         data = normalize_telemetry(data)
+        had_sample = bool(self.live)
         old_ac = self.live.get("power_source_ac")
+        old_backend = self.live.get("keyboard_backend")
         self.live = data
         self.last_sample = time.monotonic()
         self.emit("telemetry", data)
-        if old_ac is not None and old_ac != data.get("power_source_ac"):
+        if had_sample and (old_ac != data.get("power_source_ac") or old_backend != data.get("keyboard_backend")):
             self.refresh()
         # After a disconnect, settings must be reconciled before enabling writes.
         if self.status not in ("Connected", "Restarting") and not self._fetching:
             self.refresh(reconnect=True)
 
-    def expect_restart(self, delay):
+    def expect_restart(self, delay, request=None):
         if self._retry:
             GLib.source_remove(self._retry)
+        self.invalidate()
+        self._refresh_again = False
+        self._recovery_request = request
+        self._recovery_deadline = time.monotonic() + 360
         self._status("Restarting")
         self._retry = GLib.timeout_add_seconds(delay, self._reconnect)
 

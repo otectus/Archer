@@ -29,7 +29,18 @@ busctl introspect io.otectus.Archer1 /io/otectus/Archer1
 journalctl -u archer-daemon.service -b --no-pager -n 100
 ```
 
-The installer can finish with a warning if the daemon fails to start. Treat an inactive daemon or failed D-Bus check as an incomplete deployment and resolve the journal error before testing controls.
+The installer exits nonzero if the daemon cannot start, its D-Bus Ping fails, or polkit is unavailable. `bash install.sh --verify` also exits nonzero on failed checks. Resolve the reported error before testing controls; an installed file or enabled unit alone does not establish a working service. Lightweight desktop sessions need a polkit authentication agent for interactive authorization.
+
+The hardware daemon retains `ProtectSystem=full`. After polkit authorization it requests fixed, allowlisted operations from `archer_system.py` through transient systemd services, outside the daemon's read-only `/etc` view. Audio edits are limited to Archer's filter; graphics changes require `/usr/bin/envycontrol`; driver recovery has one ordered stop/reload/start operation. Subprocess deadlines and transient-unit runtime limits bound these operations. Recovery records in `/etc/archer/recovery.json` let the reconnecting GUI distinguish completion from a failed reload.
+
+The [Phase 1 implementation record](Archer-Phase-1-Update.md) maps all 48 audit findings to changes and validation. Upgrade details:
+
+- Every installation/update checks existing GRUB ownership before package changes, including GUI-only updates. GRUB parameter edits accept a single literal quoted command-line assignment, preserve complete tokens, record only Archer-added tokens, and make a root-owned atomic replacement with a backup. If an earlier file was user-owned or group/other-writable, Archer repairs permissions and stops for administrator review of that file before proceeding or running `grub-mkconfig`. It does not execute content from the unsafe file to validate it.
+- Old binary driver state files are ignored. Saved ambiguous integer keyboard effects require one explicit reselection; stable effect names then survive backend changes.
+- `/etc/archer/battery.json` is the charge-policy source of truth. The old always-80% rule is replaced on battery-module upgrade. Upgrade both `battery` and `gui` when both were installed.
+- Audio enhancement moves to the running PipeWire service's configuration directory. Both enabled and `.disabled` legacy files are handled, retaining a disabled preference. Administrator-modified legacy files require review instead of silent deletion.
+- Per-module state under `/var/lib/archer/module-state/` records original service enablement/activity and installed configuration hashes. Package dependencies remain installed on uninstall. Historical service states that were never recorded cannot be reconstructed; uninstall conservatively leaves them alone.
+- Failed, missing, and unknown cleanup modules remain in `/var/lib/archer/install-manifest.json` for retry. Malformed manifests stop cleanup. Dry-run and help do not migrate or delete manifests or build packages.
 
 On a supported desktop, confirm:
 
@@ -39,6 +50,7 @@ On a supported desktop, confirm:
 4. A denied or failed profile change reveals the Performance page and its error. Offline/stale state disables changes while Open and Exit remain usable.
 5. Closing hides the window when close-to-tray is enabled. Exit removes the icon and ends the GUI process; dirty edits receive a discard confirmation. Starting Archer again works.
 6. Removing/restarting the tray host recovers access to the GUI and registers the tray again when a host returns.
+7. Collapse and expand the sidebar with its buttons and Ctrl+B; restart the GUI and resize through narrow overlay navigation to confirm the saved desktop preference.
 
 For desktop accessibility and hardware checks, use the [GUI validation matrix](gui.md#development-and-verification). Validate profile/fan response and AC/battery restrictions on real supported hardware.
 

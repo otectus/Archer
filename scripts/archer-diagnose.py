@@ -50,10 +50,18 @@ def collect(root=Path("/sys"), commands=True):
         for group in ("nitro_sense", "predator_sense", "four_zoned_kb"):
             path = base / group
             if path.is_dir():
-                report["sense"][str(path)] = {
-                    p.name: {"value": read(p), "mode": oct(p.stat().st_mode & 0o777)}
-                    for p in sorted(path.iterdir()) if p.is_file()
-                }
+                entries = {}
+                report["sense"][str(path)] = entries
+                try:
+                    children = sorted(path.iterdir())
+                except OSError as error:
+                    entries["unavailable"] = str(error)
+                    continue
+                for node in children:
+                    try:
+                        entries[node.name] = {"value": read(node), "mode": oct(node.stat().st_mode & 0o777)}
+                    except OSError as error:
+                        entries[node.name] = {"value": None, "unavailable": str(error)}
     for path in sorted((root / "class/hwmon").glob("hwmon*")):
         fans = list(path.glob("fan*_input"))
         if fans:

@@ -9,6 +9,7 @@ gi.require_version("Adw", "1")
 from gi.repository import Adw, Gio, GLib, Gtk
 
 from archer import __version__
+from archer.autostart import Autostart
 from archer.client import ArcherClient
 from archer.pages.controls import (
     AdvancedPage, AudioPage, BatteryPage, DisplayPage, FirmwarePage,
@@ -46,17 +47,19 @@ class ArcherWindow(Adw.ApplicationWindow):
         self._load_css()
         self.toast_overlay = Adw.ToastOverlay()
         self.set_content(self.toast_overlay)
-        self.split = Adw.OverlaySplitView(min_sidebar_width=220, max_sidebar_width=250)
+        self.split = Adw.OverlaySplitView(min_sidebar_width=220, max_sidebar_width=250,
+                                          pin_sidebar=True, show_sidebar=self.preferences.data["sidebar_visible"])
         self.toast_overlay.set_child(self.split)
         self._build_sidebar()
         self._build_content()
+        self.split.connect("notify::collapsed", self._sidebar_layout_changed)
+        self.split.connect("notify::show-sidebar", self._sidebar_changed)
+        self._sidebar_changed()
         breakpoint = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 900sp"))
         breakpoint.add_setter(self.split, "collapsed", True)
-        breakpoint.add_setter(self.sidebar_button, "visible", True)
         self.add_breakpoint(breakpoint)
         compact = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 600sp"))
         compact.add_setter(self.split, "collapsed", True)
-        compact.add_setter(self.sidebar_button, "visible", True)
         compact.add_setter(self.pages["overview"].grid, "max-children-per-line", 1)
         compact.add_setter(self.split, "min-sidebar-width", 0.0)
         compact.add_setter(self.header, "decoration-layout", ":close")
@@ -103,6 +106,9 @@ class ArcherWindow(Adw.ApplicationWindow):
         toolbar = Adw.ToolbarView()
         header = Adw.HeaderBar(show_end_title_buttons=False)
         header.set_title_widget(label("Archer", "heading"))
+        self.sidebar_hide_button = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text="Collapse sidebar (Ctrl+B)")
+        self.sidebar_hide_button.connect("clicked", lambda *_: self.toggle_sidebar())
+        header.pack_end(self.sidebar_hide_button)
         toolbar.add_top_bar(header)
         self.sidebar = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.sidebar.add_css_class("navigation-sidebar")
@@ -127,8 +133,8 @@ class ArcherWindow(Adw.ApplicationWindow):
         self.header = Adw.HeaderBar()
         self.header_title = Adw.WindowTitle(title="Overview", subtitle="Archer")
         self.header.set_title_widget(self.header_title)
-        self.sidebar_button = Gtk.Button(icon_name="sidebar-show-symbolic", tooltip_text="Show navigation", visible=False)
-        self.sidebar_button.connect("clicked", lambda *_: self.split.set_show_sidebar(not self.split.get_show_sidebar()))
+        self.sidebar_button = Gtk.Button(icon_name="sidebar-show-symbolic", tooltip_text="Expand sidebar (Ctrl+B)")
+        self.sidebar_button.connect("clicked", lambda *_: self.toggle_sidebar())
         self.header.pack_start(self.sidebar_button)
         self.back_button = Gtk.Button(icon_name="go-previous-symbolic", tooltip_text="Back (Alt+Left)", visible=False)
         self.back_button.connect("clicked", lambda *_: self.go_back())
@@ -178,6 +184,26 @@ class ArcherWindow(Adw.ApplicationWindow):
             self.navigation[parent].add(page)
             self.navigation_pages[key] = parent
         self.stack.connect("notify::visible-child-name", self._navigation_changed)
+
+    def toggle_sidebar(self):
+        visible = not self.split.get_show_sidebar()
+        self.split.set_show_sidebar(visible)
+        if not self.split.get_collapsed():
+            self.preferences.save(sidebar_visible=visible)
+        if visible:
+            self.sidebar.grab_focus()
+        else:
+            self.sidebar_button.grab_focus()
+
+    def _sidebar_layout_changed(self, *_):
+        # Overlay navigation is temporary; resizing must preserve the desktop choice.
+        self.split.set_show_sidebar(False if self.split.get_collapsed() else self.preferences.data["sidebar_visible"])
+
+    def _sidebar_changed(self, *_):
+        visible = self.split.get_show_sidebar()
+        self.sidebar_button.set_visible(not visible)
+        for button in (self.sidebar_button, self.sidebar_hide_button):
+            button.update_state([Gtk.AccessibleState.EXPANDED], [visible])
 
     def _selected(self, _list, row):
         if row is None or not hasattr(self, "stack"):
@@ -241,14 +267,15 @@ class ArcherWindow(Adw.ApplicationWindow):
     def _install_actions(self):
         for name, callback in (("preferences", self.show_preferences), ("about", self.show_about),
                                ("shortcuts", self.show_shortcuts), ("quit", self.request_quit),
-                               ("back", self.go_back), ("escape", self._escape)):
+                               ("back", self.go_back), ("escape", self._escape), ("toggle-sidebar", self.toggle_sidebar)):
             action = Gio.SimpleAction.new(name, None)
             action.connect("activate", lambda _action, _parameter, cb=callback: cb())
             self.add_action(action)
         app = self.get_application()
         if app:
             for action, shortcuts in {"quit": ["<Control>q"], "preferences": ["<Control>comma"],
-                                      "back": ["<Alt>Left"], "escape": ["Escape"], "shortcuts": ["<Control>question"]}.items():
+                                      "back": ["<Alt>Left"], "escape": ["Escape"], "shortcuts": ["<Control>question"],
+                                      "toggle-sidebar": ["<Control>b"]}.items():
                 app.set_accels_for_action("win." + action, shortcuts)
 
     def _escape(self):
@@ -273,6 +300,21 @@ class ArcherWindow(Adw.ApplicationWindow):
         group.add(appearance)
         page.add(group)
         behavior = Adw.PreferencesGroup(title="Window behavior")
+        autostart = Autostart()
+        startup = Adw.SwitchRow(title="Start Archer at login", subtitle="Open the control center and system tray automatically when you log in.")
+        startup.set_active(autostart.is_enabled())
+
+        def change_startup(*_):
+            if startup.get_active() == autostart.is_enabled():
+                return
+            try:
+                autostart.set_enabled(startup.get_active())
+            except OSError as error:
+                startup.set_active(autostart.is_enabled())
+                self.add_toast(Adw.Toast(title=f"Could not change login startup: {error}"))
+
+        startup.connect("notify::active", change_startup)
+        behavior.add(startup)
         tray = Adw.SwitchRow(title="Keep running in the system tray", subtitle="When a tray host is available, closing the window hides it. Quit always exits Archer.")
         tray.set_active(self.preferences.data["close_to_tray"])
         tray.connect("notify::active", lambda *_: self.preferences.save(close_to_tray=tray.get_active()))
@@ -294,7 +336,7 @@ class ArcherWindow(Adw.ApplicationWindow):
         return about
 
     def show_shortcuts(self):
-        dialog = Adw.AlertDialog(heading="Keyboard shortcuts", body="Ctrl+Q — Quit Archer\nCtrl+, — Preferences\nAlt+Left — Back\nEscape — Close navigation or a dialog\nTab / Shift+Tab — Move focus\nSpace / Enter — Activate a control")
+        dialog = Adw.AlertDialog(heading="Keyboard shortcuts", body="Ctrl+Q — Quit Archer\nCtrl+, — Preferences\nCtrl+B — Collapse or expand sidebar\nAlt+Left — Back\nEscape — Close navigation or a dialog\nTab / Shift+Tab — Move focus\nSpace / Enter — Activate a control")
         dialog.add_response("close", "Close")
         dialog.present(self)
         return dialog

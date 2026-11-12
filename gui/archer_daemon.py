@@ -2,7 +2,7 @@
 """
 Archer Compatibility Suite - System Daemon
 Runs as root, communicates with Linuwu-Sense driver via sysfs.
-Exposes a Unix socket for GUI communication.
+Exposes io.otectus.Archer1 on the system D-Bus.
 """
 
 import json
@@ -13,12 +13,18 @@ import re
 from numbers import Integral
 import signal
 import shutil
+import shlex
 import subprocess
 import sys
 import threading
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+import archer_battery
+import uuid
+from archer_runtime import run_command
+from archer_settings import SettingsStore, validate, EFFECT_IDS, WMI_EFFECT_IDS, EFFECT_LABELS
 
 # Direct ENE K5130 backlight backend. On PHN16S-71 the WMI path applies
 # brightness but silently discards colour and effect mode, so keyboard
@@ -46,6 +52,10 @@ DRIVER_BASE_PATHS = [
 # System paths
 PLATFORM_PROFILE = "/sys/firmware/acpi/platform_profile"
 PLATFORM_PROFILE_CLASS = "/sys/class/platform-profile"
+BATTERY_CALIBRATION_PATH = "/sys/bus/wmi/drivers/acer-wmi-battery/calibration_mode"
+CPUFREQ_DIR = "/sys/devices/system/cpu/cpufreq"
+AUDIO_CONF = "/etc/pipewire/pipewire.conf.d/archer-noise-suppress.conf"
+AUDIO_PLUGIN = "/usr/lib/ladspa/librnnoise_ladspa.so"
 BATTERY_HEALTH_PATH = "/sys/bus/wmi/drivers/acer-wmi-battery/health_mode"
 PLATFORM_PROFILE_CHOICES = "/sys/firmware/acpi/platform_profile_choices"
 DRIVER_MODULE_PATH = "/sys/module/linuwu_sense"
@@ -120,27 +130,14 @@ _SHELL_META = (";", "&&", "||", "$(", "`")
 
 
 def run_cmd(cmd, timeout=10, shell_meta_ok=False):
-    """Run a shell command and return stdout.
+    """Text-only compatibility wrapper for read probes; mutations use run_command.
 
-    shell_meta_ok must be True for any command that contains pipes or
-    substitutions. The default of False catches future regressions where a
-    user-supplied value flows into a shell string.
+    Even legacy static pipelines get process-group cleanup and exit-code checks.
     """
-    if not shell_meta_ok:
-        for tok in _SHELL_META:
-            if tok in cmd:
-                logger.error(
-                    f"run_cmd refused: shell metacharacter {tok!r} in command "
-                    f"(set shell_meta_ok=True if intentional): {cmd!r}"
-                )
-                return ""
-    try:
-        result = subprocess.run(
-            cmd, shell=True, capture_output=True, text=True, timeout=timeout
-        )
-        return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    if not shell_meta_ok and any(token in cmd for token in _SHELL_META):
         return ""
+    result = run_command(["/bin/sh", "-c", cmd] if shell_meta_ok else shlex.split(cmd), timeout)
+    return result.stdout if result.success else ""
 
 
 class _TtlCache:
@@ -182,53 +179,6 @@ _HWMON_FAN_NAMES = (
     "it87", "dell_smm_hwmon",
 )
 _HWMON_GPU_TEMP_NAMES = ("nvidia", "amdgpu", "nouveau")
-
-
-# --- Persistent Settings Store ---
-class SettingsStore:
-    """Saves and loads user-applied settings so they survive reboots."""
-
-    def __init__(self, path=SETTINGS_FILE):
-        self.path = path
-        self._data = {}
-        self._load()
-
-    def _load(self):
-        try:
-            with open(self.path) as f:
-                self._data = json.load(f)
-            logger.info(f"Loaded saved settings from {self.path}")
-        except FileNotFoundError:
-            self._data = {}
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"Could not load settings from {self.path}: {e}")
-            self._data = {}
-
-    def _save(self):
-        try:
-            os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            tmp = self.path + ".tmp"
-            with open(tmp, "w") as f:
-                json.dump(self._data, f, indent=2)
-            os.replace(tmp, self.path)
-        except OSError as e:
-            logger.error(f"Failed to save settings to {self.path}: {e}")
-
-    def get(self, key, default=None):
-        return self._data.get(key, default)
-
-    def set(self, key, value):
-        self._data[key] = value
-        self._save()
-
-    def remove(self, key):
-        if key in self._data:
-            del self._data[key]
-            self._save()
-
-    @property
-    def data(self):
-        return dict(self._data)
 
 
 # --- Fan Curve Engine ---
@@ -351,6 +301,9 @@ class HardwareManager:
         self.features = []
         self.driver_status = "not_installed"
         self._fan_lock = threading.RLock()
+        self._ene_lock = threading.Lock()
+        self._firmware_lock = threading.Lock()
+        self._cpu_sample_lock = threading.Lock()
         self.settings = settings_store or SettingsStore()
         self._game_mode_active = False
         self._game_mode_saved = {}
@@ -375,9 +328,9 @@ class HardwareManager:
         if restore_settings:
             try:
                 self._restore_saved_settings()
-            except Exception:
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                logger.error("Optional settings restoration failed: %s", error)
                 self.shutdown_fan_curves()
-                raise
 
     def _detect_driver(self):
         self.driver_base = None
@@ -482,14 +435,18 @@ class HardwareManager:
             self.features.append("battery_info")
         if "battery_limiter" not in self.features and self._battery_limit_path():
             self.features.append("battery_limiter")
+        if "battery_calibration" not in self.features and self._battery_calibration_path():
+            self.features.append("battery_calibration")
+        if self.audio_available():
+            self.features.append("audio_enhancement")
         # Display mode (envycontrol)
         if _PROBE_CACHE.get_or_compute(
             "which-envycontrol",
-            lambda: run_cmd("which envycontrol 2>/dev/null", shell_meta_ok=True),
+            lambda: "/usr/bin/envycontrol" if os.path.isfile("/usr/bin/envycontrol") else "",
         ):
             self.features.append("display_mode")
-        # Game mode (always available)
-        self.features.append("game_mode")
+        if "thermal_profiles" in self.features or self._epp_paths():
+            self.features.append("game_mode")
         # USB wake policy
         if os.path.exists("/proc/acpi/wakeup"):
             self.features.append("usb_wake_policy")
@@ -508,7 +465,7 @@ class HardwareManager:
             effect = self.settings.get("four_zone_mode")
             if effect and "keyboard_effects" in self.features:
                 ok = self.set_four_zone_mode(
-                    effect["mode"], effect["speed"], effect["brightness"],
+                    effect.get("effect", effect.get("mode")), effect["speed"], effect["brightness"],
                     effect["direction"], effect["red"], effect["green"], effect["blue"],
                 )
                 if ok:
@@ -542,11 +499,18 @@ class HardwareManager:
         self.settings.remove("fan_speed")
 
         # Battery limiter
-        bl_lim = self.settings.get("battery_limiter")
-        if bl_lim is not None and "battery_limiter" in self.features:
-            ok = self.set_battery_limiter(bl_lim)
-            if ok:
-                restored.append("battery_limiter")
+        if "battery_limiter" in self.features:
+            policy_path = Path(self.settings.path).with_name("battery.json")
+            # GUI-only installs preserve firmware state until a choice was saved.
+            bl_lim = self.settings.get("battery_limiter")
+            try:
+                if policy_path.exists():
+                    with archer_battery.policy_lock(policy_path):
+                        bl_lim = archer_battery.read_policy(policy_path)
+                if bl_lim is not None and self.set_battery_limiter(bl_lim):
+                    restored.append("battery_limiter")
+            except (OSError, ValueError) as error:
+                logger.error("Battery policy could not be restored: %s", error)
 
         # USB charging
         usb = self.settings.get("usb_charging")
@@ -577,10 +541,8 @@ class HardwareManager:
                 if self.start_fan_curve(target, curve_data["points"]):
                     restored.append(key)
 
-        # Game mode
-        if self.settings.get("game_mode_active"):
-            self.activate_game_mode()
-            restored.append("game_mode")
+        # Reconcile interrupted transactions before accepting new Game Mode work.
+        self._recover_game_mode()
 
         if restored:
             logger.info(f"Restored saved settings: {restored}")
@@ -620,26 +582,10 @@ class HardwareManager:
         return ok, None if ok else "Failed to write profile"
 
     def _sync_button_led(self, profile):
-        """Colour the performance-mode button LED after the active profile.
-
-        That is what the LED does from the factory. Once the ENE backend takes
-        the controller over, the firmware stops driving it, so the daemon has
-        to keep it in step or the button just goes dark.
-
-        Failures are logged and swallowed on purpose: a lighting detail must
-        never make a thermal profile change report failure.
-        """
         if not getattr(self, "ene_ready", False):
-            return
-        if not self.settings.get("button_follows_profile", True):
-            return
-        try:
-            archer_ene.set_button_for_profile(
-                profile, overrides=self.settings.get("button_colours"))
-        except Exception as exc:
-            logger.warning(f"Could not update the button LED: {exc}")
+            return False
+        return self._ene_call("set_button_for_profile", profile, 100, self.settings.get("button_colours", {}))
 
-    # --- Fan Control ---
     @staticmethod
     def _valid_fan_value(value):
         return isinstance(value, Integral) and not isinstance(value, bool) and 0 <= value <= 100
@@ -678,15 +624,23 @@ class HardwareManager:
         return self._write_fan_speed(cpu, gpu)
 
     # --- Battery Features ---
+    def _battery_calibration_path(self):
+        for path in (self._sense_path("battery_calibration"), BATTERY_CALIBRATION_PATH):
+            if path and read_sysfs(path) in ("0", "1"):
+                return path
+        return None
+
     def get_battery_calibration(self):
-        path = self._sense_path("battery_calibration")
+        path = self._battery_calibration_path()
         if not path:
             return None
         val = read_sysfs(path)
         return val == "1" if val else None
 
     def set_battery_calibration(self, enabled):
-        path = self._sense_path("battery_calibration")
+        if enabled and self.get_power_source() is not True:
+            return False
+        path = self._battery_calibration_path()
         if not path:
             return False
         return write_sysfs(path, "1" if enabled else "0")
@@ -717,9 +671,15 @@ class HardwareManager:
         path = self._battery_limit_path()
         if not path:
             return False
-        if path.endswith("charge_control_end_threshold"):
-            return write_sysfs(path, "80" if enabled else "100")
-        return write_sysfs(path, "1" if enabled else "0")
+        # Lock together with the boot/device-event helper so a stale event cannot
+        # replace a newly selected policy. Failed persistence is surfaced to D-Bus.
+        policy = Path(self.settings.path).with_name("battery.json")
+        with archer_battery.policy_lock(policy):
+            value = ("80" if enabled else "100") if path.endswith("charge_control_end_threshold") else ("1" if enabled else "0")
+            if not write_sysfs(path, value) or read_sysfs(path) != value:
+                return False
+            archer_battery.write_policy(bool(enabled), policy)
+        return True
 
     def get_usb_charging(self):
         path = self._sense_path("usb_charging")
@@ -728,6 +688,10 @@ class HardwareManager:
         return read_sysfs(path)
 
     def set_usb_charging(self, level):
+        try:
+            validate("usb_charging", level)
+        except ValueError:
+            return False
         path = self._sense_path("usb_charging")
         if not path:
             return False
@@ -774,89 +738,99 @@ class HardwareManager:
     # reports success and reads back the exact colours it was given while the
     # LEDs never change, which is why it cannot be trusted as verification.
 
-    def set_per_zone_mode(self, zone1, zone2, zone3, zone4, brightness):
-        if getattr(self, "ene_ready", False):
-            try:
-                return archer_ene.set_per_zone(zone1, zone2, zone3, zone4,
-                                               brightness)
-            except Exception as exc:
-                logger.error(f"ENE per-zone write failed: {exc}")
-                return False
-        path = self._driver_path("four_zoned_kb/per_zone_mode")
-        if not path:
+    def _ene_call(self, operation, *values):
+        if not hasattr(self, "_ene_lock"):
+            self._ene_lock = threading.Lock()
+        with self._ene_lock:
+            result = run_command([sys.executable, str(Path(__file__).with_name("archer_ene.py")),
+                                  operation, json.dumps(values)], timeout=30)
+        if not result.success:
+            logger.error("Lighting operation failed: %s", result.stderr or result.stdout)
             return False
-        val = f"{zone1},{zone2},{zone3},{zone4},{brightness}"
-        return write_sysfs(path, val)
+        try:
+            return bool(json.loads(result.stdout).get("success"))
+        except (ValueError, AttributeError):
+            return False
+
+    def keyboard_effects(self):
+        ids = EFFECT_IDS if getattr(self, "ene_ready", False) else WMI_EFFECT_IDS
+        return [{"id": key, "label": EFFECT_LABELS[EFFECT_IDS.index(key)]} for key in ids]
+
+    def effect_id(self, value):
+        ids = EFFECT_IDS if getattr(self, "ene_ready", False) else WMI_EFFECT_IDS
+        if isinstance(value, str):
+            return value if value in ids else None
+        # Compatibility for old D-Bus clients: integer indices use the active backend's ABI.
+        return ids[value] if isinstance(value, Integral) and not isinstance(value, bool) and 0 <= value < len(ids) else None
+
+    def set_per_zone_mode(self, zone1, zone2, zone3, zone4, brightness):
+        try:
+            validate("per_zone_mode", dict(zip(("zone1", "zone2", "zone3", "zone4", "brightness"),
+                                               (zone1, zone2, zone3, zone4, brightness))))
+        except ValueError:
+            return False
+        if getattr(self, "ene_ready", False):
+            return self._ene_call("set_per_zone", zone1, zone2, zone3, zone4, brightness)
+        path = self._driver_path("four_zoned_kb/per_zone_mode")
+        return bool(path) and write_sysfs(path, f"{zone1},{zone2},{zone3},{zone4},{brightness}")
 
     def poll_profile_led(self):
-        """Keep the button LED in step with the profile, whoever changed it.
-
-        set_thermal_profile() only covers changes made through Archer. The
-        Plasma widget, powerprofilesctl, the driver's own restore and the
-        hardware mode button all write platform_profile directly, and the LED
-        would silently drift out of step with the machine. Reading one small
-        sysfs file on a timer is cheap and catches every writer.
-
-        Returns True so the GLib timeout keeps re-arming.
-        """
-        if getattr(self, "ene_ready", False):
-            profile = read_sysfs(platform_profile_paths()[0])
-            if profile and profile != getattr(self, "_led_profile", None):
+        profile = self.get_thermal_profile()
+        if profile and profile != getattr(self, "_led_profile", None):
+            if self._sync_button_led(profile):
                 self._led_profile = profile
-                self._sync_button_led(profile)
+        was_ready = getattr(self, "ene_ready", False)
+        ready = bool(archer_ene and archer_ene.available())
+        if ready != was_ready:
+            self._detect_features()
+            if self.driver_status == "auto_restore_failed" and "fan_control" in self.features:
+                self.features.remove("fan_control")
+            if ready:
+                self._lighting_retries = 5
+        if getattr(self, "_lighting_retries", 0):
+            self._lighting_retries -= 1
+            if ready and self.reapply_lighting():
+                self._lighting_retries = 0
+            elif not self._lighting_retries:
+                logger.error("Lighting could not be restored after five attempts; check HID enumeration and retry in Keyboard")
         return True
 
     def reapply_lighting(self):
-        """Re-send the saved lighting state. Called after resume.
-
-        The ENE does not keep its state across a suspend and the driver does
-        not restore it, so without this the keyboard comes back under whatever
-        the EC decides.
-
-        Deliberately narrow: lighting only. A resume is not the moment to start
-        rewriting the thermal profile or the fans, so those are left alone even
-        though the same settings file holds them.
-        """
-        if not getattr(self, "ene_ready", False):
+        # Called on a bounded background worker. Rediscovery is repeated on resume.
+        self.ene_ready = bool(archer_ene and archer_ene.available())
+        if not self.ene_ready:
             return False
-        try:
-            if self.settings.get("last_keyboard_mode") == "effect":
-                e = self.settings.get("four_zone_mode") or {}
-                if e:
-                    self.set_four_zone_mode(
-                        e.get("mode", 0), e.get("speed", 5),
-                        e.get("brightness", 100), e.get("direction", 2),
-                        e.get("red", 0), e.get("green", 0), e.get("blue", 255),
-                    )
-            else:
-                pz = self.settings.get("per_zone_mode") or {}
-                if pz:
-                    self.set_per_zone_mode(
-                        pz["zone1"], pz["zone2"], pz["zone3"], pz["zone4"],
-                        pz["brightness"],
-                    )
-            profile = read_sysfs(platform_profile_paths()[0])
-            if profile:
-                self._sync_button_led(profile)
-            logger.info("Lighting reapplied after resume")
-            return True
-        except Exception as exc:
-            logger.error(f"Reapplying lighting after resume failed: {exc}")
+        if self.settings.get("last_keyboard_mode") == "effect":
+            effect = self.settings.get("four_zone_mode")
+            if effect and not self.set_four_zone_mode(effect.get("effect", effect.get("mode")), effect["speed"],
+                                                      effect["brightness"], effect["direction"], effect["red"], effect["green"], effect["blue"]):
+                return False
+        else:
+            zones = self.settings.get("per_zone_mode")
+            if zones and not self.set_per_zone_mode(zones["zone1"], zones["zone2"], zones["zone3"], zones["zone4"], zones["brightness"]):
+                return False
+        profile = self.get_thermal_profile()
+        if profile and not self._sync_button_led(profile):
             return False
+        logger.info("Saved lighting restored")
+        return True
 
     def set_four_zone_mode(self, mode, speed, brightness, direction, r, g, b):
-        if getattr(self, "ene_ready", False):
-            try:
-                return archer_ene.set_effect(mode, brightness, r, g, b,
-                                             speed=speed, direction=direction)
-            except Exception as exc:
-                logger.error(f"ENE effect write failed: {exc}")
-                return False
-        path = self._driver_path("four_zoned_kb/four_zone_mode")
-        if not path:
+        effect = self.effect_id(mode)
+        if not effect:
             return False
-        val = f"{mode},{speed},{brightness},{direction},{r},{g},{b}"
-        return write_sysfs(path, val)
+        try:
+            validate("four_zone_mode", {"effect": effect, "speed": speed, "brightness": brightness,
+                                        "direction": direction, "red": r, "green": g, "blue": b})
+        except ValueError:
+            return False
+        if getattr(self, "ene_ready", False):
+            return self._ene_call("set_effect", EFFECT_IDS.index(effect), brightness, r, g, b, speed, direction)
+        path = self._driver_path("four_zoned_kb/four_zone_mode")
+        wire_mode = WMI_EFFECT_IDS.index(effect)
+        if effect in ("wave", "shifting") and direction == 0:
+            return False
+        return bool(path) and write_sysfs(path, f"{wire_mode},{speed},{brightness},{direction},{r},{g},{b}")
 
     # --- LCD & Boot ---
     def get_lcd_override(self):
@@ -961,13 +935,24 @@ class HardwareManager:
         return self._read_cpu_usage() or 0
 
     def _read_cpu_usage(self):
-        """Get CPU usage percentage."""
-        # Static literal awk pipeline; shell_meta_ok=True intentionally.
-        usage = run_cmd(
-            "awk '/^cpu / {u=$2+$4; t=$2+$4+$5; printf \"%.0f\", u/t*100}' /proc/stat",
-            shell_meta_ok=True,
-        )
-        return int(usage) if usage and usage.isdigit() else None
+        """Interval CPU time; guest counters are already included in user/nice."""
+        try:
+            fields = Path("/proc/stat").read_text().splitlines()[0].split()
+            if fields[0] != "cpu" or len(fields) < 5:
+                return None
+            counters = [int(value) for value in fields[1:9]]
+            total = sum(counters)
+            idle = counters[3] + (counters[4] if len(counters) > 4 else 0)
+            if not hasattr(self, "_cpu_sample_lock"):
+                self._cpu_sample_lock = threading.Lock()
+            with self._cpu_sample_lock:
+                previous = getattr(self, "_cpu_sample", None)
+                self._cpu_sample = total, idle
+            if previous is None or total <= previous[0] or idle < previous[1]:
+                return None
+            return round(max(0, min(100, 100 * (1 - (idle - previous[1]) / (total - previous[0])))))
+        except (OSError, ValueError, IndexError):
+            return None
 
     def get_gpu_usage(self):
         return self._read_gpu_usage() or 0
@@ -1025,14 +1010,22 @@ class HardwareManager:
         return cpu_rpm, gpu_rpm
 
     def get_power_source(self):
-        """Check if running on AC power."""
+        """True only for verified external power; None means unavailable."""
+        states = []
         for supply in sysfs_children(POWER_SUPPLY_DIR):
-            supply_dir = str(supply)
-            supply_type = read_sysfs(os.path.join(supply_dir, "type"))
-            if supply_type and supply_type.lower() == "mains":
-                online = read_sysfs(os.path.join(supply_dir, "online"))
-                return online == "1"
-        return True  # Default to AC if unknown
+            kind = (read_sysfs(supply / "type") or "").lower()
+            if kind == "mains" or kind.startswith("usb") or kind == "wireless":
+                online = read_sysfs(supply / "online")
+                if online in ("0", "1"):
+                    states.append(online == "1")
+        if any(states):
+            return True
+        statuses = [read_sysfs(battery / "status") for battery in battery_supply_paths()]
+        if "Charging" in statuses:
+            return True
+        if "Discharging" in statuses or states:
+            return False
+        return None
 
     def get_system_info(self):
         """Get general system information."""
@@ -1051,7 +1044,7 @@ class HardwareManager:
             "lspci-gpu",
             lambda: run_cmd(
                 "lspci 2>/dev/null | grep -iE 'vga|3d' | head -1 | sed 's/.*: //'",
-                shell_meta_ok=True,
+                timeout=3, shell_meta_ok=True,
             ),
         )
         driver_version = read_sysfs(
@@ -1065,7 +1058,7 @@ class HardwareManager:
             "laptop_type": self.laptop_type,
             "driver_version": driver_version,
             "daemon_version": VERSION,
-            "kernel": run_cmd("uname -r"),
+            "kernel": os.uname().release,
         }
 
     def get_all_settings(self):
@@ -1094,10 +1087,14 @@ class HardwareManager:
             "fan_curve": self.get_fan_curve_state(),
             "display_mode": self.get_display_mode() if "display_mode" in self.features else None,
             "game_mode": self.get_game_mode(),
+            "audio_enhancement": self.get_audio_enhancement(),
+            "keyboard_effects": self.keyboard_effects(),
+            "keyboard_migration_required": self.settings.get("keyboard_migration_required", False),
             "firmware_info": self.get_firmware_info(check=False),
             "driver_status": self.driver_status,
             "sense_base": self.sense_base,
             "driver_override": read_sysfs("/etc/modprobe.d/linuwu-sense.conf") or "Disabled",
+            "recovery": self.get_recovery_status(),
             "saved_settings": self.settings.data,
         }
 
@@ -1114,6 +1111,8 @@ class HardwareManager:
             "metric_validity": {key: value is not None for key, value in readings.items()},
             "battery_info": self.get_battery_info(),
             "power_source_ac": self.get_power_source(),
+            "thermal_profile": self.get_thermal_profile(),
+            "keyboard_backend": "ene" if getattr(self, "ene_ready", False) else "wmi",
         }
 
     # --- Fan Curve Methods ---
@@ -1157,15 +1156,15 @@ class HardwareManager:
                 return False
         if len({point[0] for point in points}) != len(points):
             return False
-        self._fan_curve_engine.start(target, points)
         self.settings.set(f"fan_curve_{target}", {"enabled": True, "points": points})
+        self._fan_curve_engine.start(target, points)
         logger.info("Fan curve started for %s", target)
         return True
 
     def _disable_saved_curves(self):
-        for target in ("cpu", "gpu"):
-            saved = self.settings.get(f"fan_curve_{target}", {})
-            self.settings.set(f"fan_curve_{target}", {"enabled": False, "points": saved.get("points", [])})
+        values = {f"fan_curve_{target}": {"enabled": False, "points": self.settings.get(f"fan_curve_{target}", {}).get("points", [])}
+                  for target in ("cpu", "gpu")}
+        self.settings.update(values)
 
     def stop_fan_curve(self, target=None):
         if target not in (None, "cpu", "gpu"):
@@ -1186,7 +1185,7 @@ class HardwareManager:
     def get_display_mode(self):
         mode = _PROBE_CACHE.get_or_compute(
             "envycontrol-query",
-            lambda: run_cmd("envycontrol --query 2>/dev/null", shell_meta_ok=True),
+            lambda: run_cmd("/usr/bin/envycontrol --query", timeout=3),
         )
         available_modes = ["integrated", "hybrid", "nvidia"]
         return {
@@ -1195,100 +1194,157 @@ class HardwareManager:
             "reboot_required": bool(read_sysfs("/proc/sys/kernel/random/boot_id")) and self.settings.get("display_change_boot") == read_sysfs("/proc/sys/kernel/random/boot_id"),
         }
 
-    def set_display_mode(self, mode):
-        valid_modes = ["integrated", "hybrid", "nvidia"]
-        if mode not in valid_modes:
-            return {"success": False, "error": f"Invalid mode '{mode}'. Available: {valid_modes}"}
-        if not _PROBE_CACHE.get_or_compute(
-            "which-envycontrol",
-            lambda: run_cmd("which envycontrol 2>/dev/null", shell_meta_ok=True),
-        ):
-            return {"success": False, "error": "envycontrol not installed"}
-        # Static format string with whitelisted mode value (validated above);
-        # the trailing 2>&1 makes this a shell construct.
-        result = run_cmd(f"envycontrol -s {mode} 2>&1", timeout=30, shell_meta_ok=True)
-        if not result or "error" in result.lower():
-            logger.warning(f"Display mode change may have failed: {result}")
-            return {"success": False, "error": f"envycontrol failed: {result or 'no output'}", "mode": mode}
-        self.settings.set("display_change_boot", read_sysfs("/proc/sys/kernel/random/boot_id"))
-        self.settings.set("display_configured_mode", mode)
-        logger.info(f"Display mode set to {mode}: {result}")
-        return {"success": True, "mode": mode, "reboot_required": True, "output": result}
-
-    def detect_mux(self):
-        """Check DRM topology to see if internal panel is on iGPU or dGPU."""
-        mux_info = {"has_mux": False, "active_gpu": "unknown"}
+    def _system_operation(self, action, value="", deferred=False):
+        duration = 450 if action in ("display", "override", "remove-override") else 30 if action == "audio" else 300
+        arguments = ["systemd-run", "--quiet", "--collect", "--property=ProtectHome=yes", "--property=PrivateTmp=yes",
+                     "--property=TimeoutStopSec=10", f"--property=RuntimeMaxSec={duration}"]
+        if deferred:
+            value = uuid.uuid4().hex
+            arguments += ["--unit=archer-recovery", "--on-active=2s", "--timer-property=RemainAfterElapse=no",
+                          "--timer-property=AccuracySec=100ms", "--no-block"]
+        else:
+            arguments += ["--wait", "--pipe"]
+        arguments += ["/usr/bin/python3", "/opt/archer/archer_system.py", action]
+        if value:
+            arguments.append(value)
+        result = run_command(arguments, timeout=15 if deferred else duration + 15)
+        if not result.success:
+            return {"success": False, "error": result.stderr or result.stdout or "System operation timed out"}
+        if deferred:
+            return {"success": True, "data": {"scheduled": True, "request": value}}
         try:
-            drm_path = Path("/sys/class/drm")
-            for card in sorted(drm_path.glob("card*-*")):
-                status = read_sysfs(card / "status")
-                if status and status.lower() == "connected":
-                    card_name = card.name
-                    if "eDP" in card_name or "LVDS" in card_name:
-                        # Determine which GPU the internal panel is on
-                        device_link = card / "device"
-                        if device_link.exists():
-                            vendor = read_sysfs(device_link / "vendor")
-                            if vendor:
-                                if vendor == "0x10de":
-                                    mux_info["active_gpu"] = "nvidia"
-                                    mux_info["has_mux"] = True
-                                elif vendor in ("0x8086", "0x1002"):
-                                    mux_info["active_gpu"] = "igpu"
-                        break
-        except Exception as e:
-            logger.error(f"MUX detection error: {e}")
-        return mux_info
+            response = json.loads(result.stdout)
+            return response if isinstance(response, dict) else {"success": False, "error": "Invalid system helper response"}
+        except ValueError:
+            return {"success": False, "error": "Invalid system helper response"}
+
+    def get_recovery_status(self):
+        try:
+            data = json.loads(Path(self.settings.path).with_name("recovery.json").read_text())
+            if not isinstance(data, dict) or data.get("boot_id") != read_sysfs("/proc/sys/kernel/random/boot_id"):
+                return None
+            if data.get("status") == "running" and time.time() - float(data.get("updated", 0)) > 330:
+                data.update(status="failed", error="Recovery timed out. Check the service logs before retrying.")
+            return data
+        except (OSError, ValueError, TypeError):
+            return None
+
+    def set_display_mode(self, mode):
+        if mode not in ("hybrid", "nvidia", "integrated"):
+            return {"success": False, "error": "Invalid graphics mode"}
+        result = self._system_operation("display", mode)
+        if result.get("success"):
+            self.settings.update({"display_change_boot": read_sysfs("/proc/sys/kernel/random/boot_id"),
+                                  "display_configured_mode": mode})
+            result.update(mode=mode, reboot_required=True)
+        return result
+
+    @staticmethod
+    def audio_available():
+        return os.path.isfile(AUDIO_PLUGIN) and (os.path.isfile(AUDIO_CONF) or os.path.isfile(AUDIO_CONF + ".disabled"))
+
+    def get_audio_enhancement(self):
+        return {"noise_suppression": self.audio_available() and os.path.isfile(AUDIO_CONF)}
+
+    def set_audio_enhancement(self, enabled):
+        result = self._system_operation("audio", "on" if enabled else "off")
+        if result.get("success"):
+            self.settings.set("audio_enhancement", {"noise_suppression": bool(enabled)})
+        return result
 
     # --- Game Mode ---
-    def _find_epp_path(self):
-        """Find energy_performance_preference sysfs file."""
-        for i in range(16):
-            path = f"/sys/devices/system/cpu/cpu{i}/cpufreq/energy_performance_preference"
-            if os.path.exists(path):
-                return path
-        return None
+    @staticmethod
+    def _epp_paths():
+        return {path.parent.name: path for path in sorted(Path(CPUFREQ_DIR).glob("policy*/energy_performance_preference"))
+                if re.fullmatch(r"policy\d+", path.parent.name)}
+
+    def _recover_game_mode(self):
+        saved = self.settings.get("game_mode_saved_state")
+        if saved and saved.get("boot_id") == read_sysfs("/proc/sys/kernel/random/boot_id"):
+            self._game_mode_saved = saved
+            self._game_mode_active = True
+            result = self.deactivate_game_mode()
+            if not result["success"]:
+                logger.error("Game Mode recovery incomplete: %s", result.get("error"))
+        else:
+            self.settings.update({"game_mode_active": False}, remove=("game_mode_saved_state",))
 
     def activate_game_mode(self):
-        """Save current profile/EPP and set everything to performance."""
+        """Transactional profile, per-policy EPP and identified NVIDIA changes."""
         if self._game_mode_active:
-            return
-        # Save current state
-        self._game_mode_saved["platform_profile"] = self.get_thermal_profile()
-        epp_path = self._find_epp_path()
-        if epp_path:
-            self._game_mode_saved["epp"] = read_sysfs(epp_path) or "balance_performance"
-            self._game_mode_saved["epp_path"] = epp_path
-        # Apply performance settings
-        self.set_thermal_profile("performance")
-        if epp_path:
-            write_sysfs(epp_path, "performance")
-        # Start nvidia persistence mode
-        run_cmd("nvidia-smi -pm 1 2>/dev/null")
+            return {"success": True, "data": self.get_game_mode()}
+        if run_command(["systemctl", "is-active", "--quiet", "tlp.service"], 3).success:
+            return {"success": False, "error": "TLP owns power policy. Disable TLP before using Archer Game Mode."}
+        saved = {"boot_id": read_sysfs("/proc/sys/kernel/random/boot_id"), "epp": {}, "nvidia": {}}
+        choices = self.get_thermal_profile_choices()
+        if "performance" in choices:
+            profile = self.get_thermal_profile()
+            if profile in choices:
+                saved["platform_profile"] = profile
+        for name, path in self._epp_paths().items():
+            previous = read_sysfs(path)
+            available = (read_sysfs(path.with_name("energy_performance_available_preferences")) or "").split()
+            if previous and "performance" in available:
+                saved["epp"][name] = previous
+        query = run_command(["nvidia-smi", "--query-gpu=uuid,persistence_mode", "--format=csv,noheader"], 3)
+        if query.success:
+            for line in query.stdout.splitlines():
+                fields = [value.strip() for value in line.split(",")]
+                if len(fields) == 2 and re.fullmatch(r"GPU-[a-fA-F0-9-]+", fields[0]) and fields[1] in ("Enabled", "Disabled"):
+                    saved["nvidia"][fields[0]] = int(fields[1] == "Enabled")
+        if not any((saved.get("platform_profile"), saved["epp"], saved["nvidia"])):
+            return {"success": False, "error": "No supported Game Mode controls"}
+        # Persist the original values before the first write, including crash recovery.
+        self.settings.update({"game_mode_saved_state": saved, "game_mode_active": True})
+        self._game_mode_saved = saved
         self._game_mode_active = True
-        self.settings.set("game_mode_active", True)
-        self.settings.set("game_mode_saved_state", self._game_mode_saved)
-        logger.info("Game mode activated")
+        try:
+            if saved.get("platform_profile"):
+                ok, error = self.set_thermal_profile("performance")
+                if not ok:
+                    raise OSError(error or "Profile change failed")
+            paths = self._epp_paths()
+            for name in saved["epp"]:
+                if name not in paths or not write_sysfs(paths[name], "performance") or read_sysfs(paths[name]) != "performance":
+                    raise OSError(f"EPP change failed for {name}")
+            for gpu, previous in saved["nvidia"].items():
+                if not previous and not run_command(["nvidia-smi", "-i", gpu, "-pm", "1"], 5).success:
+                    raise OSError(f"NVIDIA persistence change failed for {gpu}")
+        except (OSError, ValueError) as error:
+            rollback = self.deactivate_game_mode()
+            return {"success": False, "error": str(error), "rollback": rollback}
+        return {"success": True, "data": self.get_game_mode()}
 
     def deactivate_game_mode(self):
-        """Restore saved profile and EPP values."""
         if not self._game_mode_active:
-            return
-        saved_profile = self._game_mode_saved.get("platform_profile", "balanced")
-        saved_epp = self._game_mode_saved.get("epp", "balance_performance")
-        self.set_thermal_profile(saved_profile)
-        epp_path = self._game_mode_saved.get("epp_path") or self._find_epp_path()
-        if epp_path:
-            write_sysfs(epp_path, saved_epp)
-        run_cmd("nvidia-smi -pm 0 2>/dev/null")
+            return {"success": True, "data": self.get_game_mode()}
+        saved = self._game_mode_saved
+        errors = []
+        profile = saved.get("platform_profile")
+        if profile and profile in self.get_thermal_profile_choices():
+            ok, error = self.set_thermal_profile(profile)
+            if not ok:
+                errors.append(error or "Profile restoration failed")
+        paths = self._epp_paths()
+        for name, value in saved.get("epp", {}).items():
+            # Offline policies disappear; never substitute a different policy.
+            if name in paths and (not write_sysfs(paths[name], value) or read_sysfs(paths[name]) != value):
+                errors.append(f"EPP restoration failed for {name}")
+        for gpu, value in saved.get("nvidia", {}).items():
+            if not run_command(["nvidia-smi", "-i", gpu, "-pm", str(value)], 5).success:
+                errors.append(f"NVIDIA persistence restoration failed for {gpu}")
+        if errors:
+            return {"success": False, "error": "; ".join(errors), "data": self.get_game_mode()}
+        self.settings.update({"game_mode_active": False}, remove=("game_mode_saved_state",))
         self._game_mode_active = False
         self._game_mode_saved = {}
-        self.settings.set("game_mode_active", False)
-        self.settings.remove("game_mode_saved_state")
-        logger.info("Game mode deactivated")
+        return {"success": True, "data": self.get_game_mode()}
 
     def get_game_mode(self):
-        return {"active": self._game_mode_active}
+        components = list(self._game_mode_saved.get("epp", {})) + list(self._game_mode_saved.get("nvidia", {}))
+        if self._game_mode_saved.get("platform_profile"):
+            components.append("platform_profile")
+        return {"active": self._game_mode_active, "components": components}
 
     # --- USB Wake Policy ---
     def get_usb_wake_sources(self):
@@ -1349,75 +1405,55 @@ class HardwareManager:
             return info
         if not check:
             return info
-        info["checked_at"] = time.time()
+        ttl = 10 if info.get("status") == "error" else 60
+        if time.monotonic() - getattr(self, "_firmware_checked", -float("inf")) < ttl:
+            return info
+        if not hasattr(self, "_firmware_lock"):
+            self._firmware_lock = threading.Lock()
+        if not self._firmware_lock.acquire(blocking=False):
+            return {**info, "status": "checking"}
         try:
-            result = subprocess.run(["fwupdmgr", "get-updates", "--json"],
-                                    capture_output=True, text=True, timeout=30)
-            # fwupd uses exit 2 for a successful query with no updates.
-            if result.returncode not in (0, 2):
-                raise RuntimeError(result.stderr.strip() or "Firmware check failed")
-            payload = json.loads(result.stdout) if result.stdout.strip() else {}
-            if not isinstance(payload, dict):
-                raise ValueError("Unexpected firmware response")
-            info["updates"] = payload.get("Devices", [])
-            info["status"] = "updates" if info["updates"] else "current"
-            info.pop("error", None)
-        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
-            info["status"] = "error"
-            info["error"] = str(error)
-            info["updates"] = []
-        self._firmware_cache = dict(info)
-        return info
+            info["checked_at"] = time.time()
+            try:
+                result = run_command(["fwupdmgr", "get-updates", "--json"], timeout=30)
+                # fwupd uses exit 2 for a successful query with no updates.
+                if result.timed_out or result.returncode not in (0, 2):
+                    raise RuntimeError(result.stderr.strip() or "Firmware check failed")
+                payload = json.loads(result.stdout) if result.stdout.strip() else {}
+                if not isinstance(payload, dict):
+                    raise ValueError("Unexpected firmware response")
+                info["updates"] = payload.get("Devices", [])
+                if not isinstance(info["updates"], list) or any(not isinstance(device, dict) for device in info["updates"]):
+                    raise ValueError("Unexpected firmware device list")
+                info["status"] = "updates" if info["updates"] else "current"
+                info.pop("error", None)
+            except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+                info["status"] = "error"
+                info["error"] = str(error)
+                info["updates"] = []
+            self._firmware_cache = dict(info)
+            return dict(info)
+
+        finally:
+            self._firmware_checked = time.monotonic()
+            self._firmware_lock.release()
 
     # --- Driver Management ---
     def restart_daemon(self):
-        # Schedule via systemd-run with a 2s delay so the D-Bus reply
-        # for RestartDaemon has time to flush before SIGTERM lands. The
-        # previous synchronous systemctl restart killed the daemon
-        # before the reply reached the GUI.
-        run_cmd(
-            "systemd-run --on-active=2s --no-block "
-            "systemctl restart archer-daemon.service"
-        )
+        return self._system_operation("restart", deferred=True)
 
     def restart_drivers_and_daemon(self):
-        self.stop_fan_curve()
-        # Same deferred-restart trick. modprobe runs before the daemon
-        # restart so the new daemon picks up the freshly-loaded module.
-        # Each step is its own systemd-run unit so a modprobe failure
-        # doesn't abort the daemon restart.
-        run_cmd(
-            "systemd-run --on-active=1s --no-block "
-            "/bin/sh -c 'modprobe -r linuwu_sense; modprobe linuwu_sense'",
-            shell_meta_ok=True,
-        )
-        run_cmd(
-            "systemd-run --on-active=3s --no-block "
-            "systemctl restart archer-daemon.service"
-        )
+        if "fan_control" in self.features and not self.stop_fan_curve():
+            return {"success": False, "error": "Could not restore automatic fans"}
+        return self._system_operation("reload", deferred=True)
 
     def set_modprobe_parameter(self, param):
-        """Set a permanent modprobe parameter for linuwu_sense."""
-        conf = "/etc/modprobe.d/linuwu-sense.conf"
-        try:
-            Path(conf).write_text(f"options linuwu_sense {param}=1\n")
-            return True
-        except OSError as e:
-            logger.error(f"Failed to write modprobe config: {e}")
-            return False
+        if param not in ("nitro_v4", "predator_v4", "enable_all"):
+            return {"success": False, "error": "Invalid driver parameter"}
+        return self._system_operation("override", param)
 
     def remove_modprobe_parameter(self):
-        conf = "/etc/modprobe.d/linuwu-sense.conf"
-        try:
-            Path(conf).unlink(missing_ok=True)
-            return True
-        except OSError:
-            return False
-
-    def force_driver_parameter(self, param):
-        """Force a one-time driver parameter reload."""
-        if self.driver_base:
-            write_sysfs(os.path.join(self.driver_base, "force_parameter"), param)
+        return self._system_operation("remove-override")
 
 
 # --- Main ---
@@ -1491,8 +1527,7 @@ def main():
             # PrepareForSleep(False) arrives before that. Writing immediately
             # would just fail, so give it a beat. Returning False makes the
             # timeout fire once rather than repeat.
-            GLib.timeout_add_seconds(
-                2, lambda: (hw.reapply_lighting(), False)[1])
+            hw._lighting_retries = 5
 
         system_bus = dbus.SystemBus()
         system_bus.add_signal_receiver(
@@ -1505,7 +1540,7 @@ def main():
 
         # Catch profile changes made outside Archer, so the button LED cannot
         # drift out of step with the machine.
-        GLib.timeout_add_seconds(3, hw.poll_profile_led)
+        # The D-Bus telemetry worker polls provider changes and retries lighting.
     except Exception as e:
         # Not fatal: everything else still works, lighting just will not
         # survive a suspend.
@@ -1513,11 +1548,9 @@ def main():
 
     def signal_handler(sig, frame):
         logger.info("Shutting down...")
+        _dbus_service.close(wait=False)
         hw.shutdown_fan_curves()
-        hw.deactivate_game_mode()
         main_loop.quit()
-        cleanup_pid()
-        sys.exit(0)
 
     signal.signal(signal.SIGTERM, signal_handler)
     signal.signal(signal.SIGINT, signal_handler)
@@ -1527,6 +1560,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        _dbus_service.close()
         hw.shutdown_fan_curves()
         hw.deactivate_game_mode()
         cleanup_pid()

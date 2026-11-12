@@ -1,0 +1,67 @@
+--- a/acer-wmi-battery.c
++++ b/acer-wmi-battery.c
+@@ -252,10 +252,14 @@
+ 	return status;
+ }
+ 
+-static void update_state(void)
++static acpi_status update_state(void)
+ {
+ 	struct battery_info old_state = battery_status;
+-	get_battery_health_control_status(&battery_status);
++	struct battery_info updated;
++	acpi_status status = get_battery_health_control_status(&updated);
++	if (ACPI_FAILURE(status))
++		return status;
++	battery_status = updated;
+ 	if (battery_status.calibration_mode != old_state.calibration_mode)
+ 		pr_info("%s calibration mode\n",
+ 			battery_status.calibration_mode ? "enabled" :
+@@ -263,6 +267,7 @@
+ 	if (battery_status.health_mode != old_state.health_mode)
+ 		pr_info("%s health mode\n",
+ 			battery_status.health_mode ? "enabled" : "disabled");
++	return AE_OK;
+ }
+ 
+ static ssize_t temperature_show(struct device_driver *driver, char *buf)
+@@ -299,14 +304,16 @@
+ 	bool param_val;
+ 	int err;
+ 	if (battery_status.health_mode < 0)
+-		return 0;
++		return -EOPNOTSUPP;
+ 
+ 	err = kstrtobool(buf, &param_val);
+ 	if (err)
+ 		return err;
+ 
+-	set_battery_health_control(HEALTH_MODE, param_val);
+-	update_state();
++	if (ACPI_FAILURE(set_battery_health_control(HEALTH_MODE, param_val)))
++		return -EIO;
++	if (ACPI_FAILURE(update_state()) || battery_status.health_mode != param_val)
++		return -EIO;
+ 
+ 	return count;
+ }
+@@ -327,14 +334,16 @@
+ 	int err;
+ 
+ 	if (battery_status.calibration_mode < 0)
+-		return 0;
++		return -EOPNOTSUPP;
+ 
+ 	err = kstrtobool(buf, &param_val);
+ 	if (err)
+ 		return err;
+ 
+-	set_battery_health_control(CALIBRATION_MODE, param_val);
+-	update_state();
++	if (ACPI_FAILURE(set_battery_health_control(CALIBRATION_MODE, param_val)))
++		return -EIO;
++	if (ACPI_FAILURE(update_state()) || battery_status.calibration_mode != param_val)
++		return -EIO;
+ 
+ 	return count;
+ }

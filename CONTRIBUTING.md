@@ -89,7 +89,7 @@ module_uninstall()       # Reverse installation
 module_verify()          # Return 0 if working correctly
 ```
 
-2. Register in `install.sh`:
+2. Register in `lib/modules.sh`:
    - Add the ID to `MODULE_IDS` array
    - Add the label to `MODULE_LABELS` array
 

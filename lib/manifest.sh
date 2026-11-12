@@ -24,26 +24,30 @@ _LEGACY_MANIFEST_CANDIDATES=(
 # the start of install.sh / uninstall.sh.
 migrate_legacy_manifest() {
     [[ -f "$MANIFEST_FILE" ]] && return 0
+    [[ "${DRY_RUN:-0}" -eq 1 ]] && return 0
 
     local src
     for src in "${_LEGACY_MANIFEST_CANDIDATES[@]}"; do
         [[ -z "$src" ]] && continue
         [[ -f "$src" ]] || continue
 
+        python3 "$(detect_script_dir)/scripts/archer-manifest.py" "$src" read modules_installed >/dev/null || return 1
         log "Migrating legacy manifest $src -> $MANIFEST_FILE"
-        run_sudo mkdir -p "$MANIFEST_DIR"
-        run_sudo chmod 755 "$MANIFEST_DIR"
-        run_sudo cp "$src" "$MANIFEST_FILE"
-        run_sudo chmod 644 "$MANIFEST_FILE"
+        run_sudo mkdir -p "$MANIFEST_DIR" || return 1
+        run_sudo chmod 755 "$MANIFEST_DIR" || return 1
+        run_sudo cp "$src" "$MANIFEST_FILE" || return 1
+        run_sudo chmod 644 "$MANIFEST_FILE" || return 1
 
         # Older DAMX manifests used the module ID "core-damx" for what is now "driver".
         if has_cmd sed; then
-            run_sudo sed -i 's/"core-damx"/"driver"/g' "$MANIFEST_FILE"
+            run_sudo sed -i 's/"core-damx"/"driver"/g' "$MANIFEST_FILE" || return 1
         fi
+
+        python3 "$(detect_script_dir)/scripts/archer-manifest.py" "$MANIFEST_FILE" read modules_installed >/dev/null || return 1
 
         # Best-effort cleanup of the legacy file (only if writable by us).
         if [[ -w "$src" ]]; then
-            rm -f "$src"
+            run rm -f "$src" || return 1
         fi
         return 0
     done
@@ -58,117 +62,18 @@ write_manifest() {
     local dkms_str="$3"
     local packages_str="$4"
 
-    run_sudo mkdir -p "$MANIFEST_DIR"
-    run_sudo chmod 755 "$MANIFEST_DIR"
-
-    local tmpfile
-    tmpfile="$(mktemp)"
-
-    if has_cmd jq; then
-        jq -n \
-            --arg date "$(date -Iseconds)" \
-            --arg version "$INSTALLER_VERSION" \
-            --arg model "$ACER_PRODUCT_NAME" \
-            --arg family "$MODEL_FAMILY" \
-            --arg kernel "$KERNEL_VERSION" \
-            --arg modules "$modules_str" \
-            --arg files "$files_str" \
-            --arg dkms "$dkms_str" \
-            --arg packages "$packages_str" \
-            '{
-                install_date: $date,
-                installer_version: $version,
-                acer_model: $model,
-                model_family: $family,
-                kernel_version: $kernel,
-                modules_installed: ($modules | split(" ") | map(select(. != ""))),
-                files_created: ($files | split(" ") | map(select(. != ""))),
-                dkms_modules: ($dkms | split(" ") | map(select(. != ""))),
-                packages_installed: ($packages | split(" ") | map(select(. != "")))
-            }' > "$tmpfile"
-    else
-        # Python fallback: pass values via environment to prevent injection
-        ARCHER_VERSION="$INSTALLER_VERSION" \
-        ARCHER_MODEL="$ACER_PRODUCT_NAME" \
-        ARCHER_FAMILY="$MODEL_FAMILY" \
-        ARCHER_KERNEL="$KERNEL_VERSION" \
-        ARCHER_MODULES="$modules_str" \
-        ARCHER_FILES="$files_str" \
-        ARCHER_DKMS="$dkms_str" \
-        ARCHER_PKGS="$packages_str" \
-        ARCHER_MANIFEST="$tmpfile" \
-        python3 -c "
-import json, datetime, os
-manifest = {
-    'install_date': datetime.datetime.now().isoformat(),
-    'installer_version': os.environ['ARCHER_VERSION'],
-    'acer_model': os.environ['ARCHER_MODEL'],
-    'model_family': os.environ['ARCHER_FAMILY'],
-    'kernel_version': os.environ['ARCHER_KERNEL'],
-    'modules_installed': os.environ['ARCHER_MODULES'].split(),
-    'files_created': os.environ['ARCHER_FILES'].split(),
-    'dkms_modules': os.environ['ARCHER_DKMS'].split(),
-    'packages_installed': os.environ['ARCHER_PKGS'].split()
-}
-with open(os.environ['ARCHER_MANIFEST'], 'w') as f:
-    json.dump(manifest, f, indent=2)
-"
-    fi
-
-    run_sudo install -m 0644 "$tmpfile" "$MANIFEST_FILE"
-    rm -f "$tmpfile"
+    run_sudo python3 "$(detect_script_dir)/scripts/archer-manifest.py" "$MANIFEST_FILE" write \
+        "$modules_str" "$files_str" "$dkms_str" "$packages_str" \
+        "$INSTALLER_VERSION" "${ACER_PRODUCT_NAME:-Unknown}" "${MODEL_FAMILY:-unknown}" "${KERNEL_VERSION:-unknown}" || return 1
     log "Install manifest written to $MANIFEST_FILE"
 }
 
-# Read installed modules from manifest. Returns space-separated list of module IDs.
-read_manifest_modules() {
-    if [[ ! -f "$MANIFEST_FILE" ]]; then
-        echo ""
-        return 1
-    fi
-    if has_cmd jq; then
-        jq -r '.modules_installed // [] | join(" ")' "$MANIFEST_FILE"
-    else
-        ARCHER_MANIFEST="$MANIFEST_FILE" python3 -c "
-import json, os, sys
-try:
-    with open(os.environ['ARCHER_MANIFEST']) as f:
-        data = json.load(f)
-except (OSError, json.JSONDecodeError) as e:
-    print('', flush=True)
-    sys.stderr.write(f'manifest read failed: {e}\n')
-    sys.exit(1)
-print(' '.join(data.get('modules_installed', [])))
-"
-    fi
-}
-
-# Read a specific field from manifest.
+read_manifest_modules() { read_manifest_field modules_installed; }
 read_manifest_field() {
-    local field="$1"
-    if [[ ! -f "$MANIFEST_FILE" ]]; then
-        echo ""
-        return 1
-    fi
-    if has_cmd jq; then
-        jq -r --arg f "$field" '.[$f] // "" | if type == "array" then join(" ") else tostring end' "$MANIFEST_FILE"
-    else
-        ARCHER_MANIFEST="$MANIFEST_FILE" ARCHER_FIELD="$field" python3 -c "
-import json, os, sys
-try:
-    with open(os.environ['ARCHER_MANIFEST']) as f:
-        data = json.load(f)
-except (OSError, json.JSONDecodeError) as e:
-    print('', flush=True)
-    sys.stderr.write(f'manifest read failed: {e}\n')
-    sys.exit(1)
-val = data.get(os.environ['ARCHER_FIELD'], [])
-if isinstance(val, list):
-    print(' '.join(val))
-else:
-    print(val)
-"
-    fi
+    python3 "$(detect_script_dir)/scripts/archer-manifest.py" "$MANIFEST_FILE" read "$1"
+}
+retain_manifest_modules() {
+    run_sudo python3 "$(detect_script_dir)/scripts/archer-manifest.py" "$MANIFEST_FILE" retain "$1" || return 1
 }
 
 # Check if manifest exists.
@@ -178,5 +83,5 @@ has_manifest() {
 
 # Remove the manifest file.
 remove_manifest() {
-    run_sudo rm -f "$MANIFEST_FILE"
+    run_sudo rm -f "$MANIFEST_FILE" || return 1
 }

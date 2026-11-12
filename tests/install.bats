@@ -162,3 +162,117 @@ DRIVER
     [[ "$output" == *'systemctl restart archer-daemon.service'* ]]
     [[ "$output" == *'/gui/archer /opt/archer/'* ]]
 }
+
+@test "GUI install records login startup and uninstall removes it" {
+    source "$BATS_TEST_DIRNAME/../modules/gui.sh"
+    SCRIPT_DIR="$BATS_TEST_DIRNAME/.."
+    DRY_RUN=1
+    dkms() { echo 'linuwu-sense/1.0.archer2: installed'; }
+    module_install > "$BATS_TEST_TMPDIR/install-output"
+    [[ "$INSTALLED_FILES" == *" $_GUI_AUTOSTART "* ]]
+    output="$(cat "$BATS_TEST_TMPDIR/install-output")"
+    [[ "$output" == *"cp $SCRIPT_DIR/gui/io.github.archer.desktop $_GUI_AUTOSTART"* ]]
+    [[ "$output" == *"cp $SCRIPT_DIR/gui/io.github.archer.desktop /opt/archer/"* ]]
+    output="$(module_uninstall)"
+    [[ "$output" == *"rm -f $_GUI_AUTOSTART"* ]]
+}
+
+@test "GUI verification detects a missing login startup entry" {
+    source "$BATS_TEST_DIRNAME/../modules/gui.sh"
+    _GUI_INSTALL_DIR="$BATS_TEST_TMPDIR"
+    _GUI_DESKTOP="$BATS_TEST_TMPDIR/desktop"
+    _GUI_AUTOSTART="$BATS_TEST_TMPDIR/autostart"
+    touch "$_GUI_INSTALL_DIR/archer_daemon.py" "$_GUI_DESKTOP"
+    systemctl() { return 0; }
+    busctl() { return 0; }
+    output="$(module_verify)" && status=0 || status=$?
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'GUI login startup entry not found'* ]]
+    touch "$_GUI_AUTOSTART"
+    module_verify
+}
+
+@test "real package modules propagate failure under the installer conditional" {
+    for module in audio wifi power gamemode firmware audio-enhance; do
+        source "$BATS_TEST_DIRNAME/../modules/$module.sh"
+        run_sudo() { return 37; }
+        pacman() { return 1; }
+        INSTALLED_FILES='' INSTALLED_PACKAGES=''
+        if module_install; then
+            echo "Package failure was swallowed by $module"
+            return 1
+        fi
+        [ -z "$INSTALLED_PACKAGES" ]
+    done
+}
+
+@test "GUI deployment does not continue after an essential copy failure" {
+    source "$BATS_TEST_DIRNAME/../modules/gui.sh"
+    run_sudo() {
+        [[ "$1" != cp ]] || return 1
+        [[ "$*" != *'systemctl restart'* ]] || touch "$BATS_TEST_TMPDIR/restarted"
+    }
+    if module_install; then return 1; fi
+    [ ! -f "$BATS_TEST_TMPDIR/restarted" ]
+}
+
+@test "verification returns failure for a selected broken module" {
+    SCRIPT_DIR="$BATS_TEST_TMPDIR"
+    mkdir -p "$SCRIPT_DIR/modules"
+    echo 'module_verify() { return 1; }' > "$SCRIPT_DIR/modules/driver.sh"
+    MODULE_SELECTED=(1 0 0 0 0 0 0 0 0 0 0 0 0)
+    ! verify_modules
+}
+
+@test "native GameMode installs when multilib is unavailable" {
+    source "$BATS_TEST_DIRNAME/../modules/gamemode.sh"
+    pacman() { return 1; }
+    run_sudo() { echo "$*" >> "$BATS_TEST_TMPDIR/commands"; }
+    module_config() { [[ "$1" == /etc/gamemode.ini ]]; }
+    INSTALLED_PACKAGES=''
+    module_install
+    [[ "$INSTALLED_PACKAGES" == *gamemode* ]]
+    [[ "$INSTALLED_PACKAGES" != *lib32* ]]
+    ! grep -q lib32 "$BATS_TEST_TMPDIR/commands"
+}
+
+@test "a declined power transition is skipped without an installed record" {
+    source "$BATS_TEST_DIRNAME/../modules/power.sh"
+    pacman() { return 0; }
+    confirm() { return 1; }
+    run_sudo() { return 99; }
+    INSTALLED_FILES='' INSTALLED_PACKAGES='' MODULE_SKIPPED=0
+    module_install
+    [ "$MODULE_SKIPPED" -eq 1 ]
+    [ -z "$INSTALLED_FILES$INSTALLED_PACKAGES" ]
+}
+
+@test "legacy manifest migration is read-only during dry run" {
+    DRY_RUN=1
+    MANIFEST_FILE="$BATS_TEST_TMPDIR/new/manifest.json"
+    local legacy="$BATS_TEST_TMPDIR/old.json"
+    echo '{"modules_installed":["driver"]}' > "$legacy"
+    _LEGACY_MANIFEST_CANDIDATES=("$legacy")
+    run_sudo() { touch "$BATS_TEST_TMPDIR/mutated"; }
+    migrate_legacy_manifest
+    [ -f "$legacy" ]
+    [ ! -e "$BATS_TEST_TMPDIR/mutated" ]
+}
+
+@test "denied kernel logs are cached and reported as unknown" {
+    KERNEL_LOG_AVAILABLE=unknown
+    dmesg() { echo attempt >> "$BATS_TEST_TMPDIR/dmesg-calls"; return 1; }
+    read_kernel_log
+    read_kernel_log
+    [ "$KERNEL_LOG_AVAILABLE" -eq 0 ]
+    [ "$(wc -l < "$BATS_TEST_TMPDIR/dmesg-calls")" -eq 1 ]
+}
+
+@test "unsupported init fails before manifest migration or installation" {
+    systemctl() { return 1; }
+    migrate_legacy_manifest() { touch "$BATS_TEST_TMPDIR/migrated"; }
+    install_shared_deps() { touch "$BATS_TEST_TMPDIR/packages"; }
+    if main --modules audio --no-confirm; then return 1; fi
+    [ ! -e "$BATS_TEST_TMPDIR/migrated" ]
+    [ ! -e "$BATS_TEST_TMPDIR/packages" ]
+}

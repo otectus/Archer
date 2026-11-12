@@ -7,6 +7,17 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
 
 ## [Unreleased]
 
+### Phase 1 audit and sidebar
+
+- Address ARC-001 through ARC-048 from the Phase 1 audit; see [the implementation and validation record](docs/Archer-Phase-1-Update.md).
+- Secure GRUB ownership, literal-token edits and backups; retire kernel file persistence and validate firmware replies and counted scalar input. Advance Linuwu to `1.0.archer3` and the battery fallback to `0.1.0.archer2`.
+- Propagate installation, verification, persistence and subprocess failures; retain cleanup records, restore prior service states, and preserve administrator edits. Make dry-run/help read-only and require a supported systemd runtime.
+- Keep D-Bus responsive during authorization/probes with bounded workers; sequence recovery through fixed systemd helpers and report completion after reconnecting.
+- Share one battery policy, use backend-specific stable keyboard effects and verified HID descriptors, restore every Game Mode policy transactionally, and report current CPU usage and external profile changes.
+- Load and verify the real PipeWire virtual microphone, handle disabled-file migration/cleanup, use system-managed EnvyControl, make multilib optional, and describe the camera module as loopback setup requiring an external producer.
+- Add accessible sidebar collapse/expand buttons and Ctrl+B, preserve navigation and drafts, and save the desktop visibility preference across launches and responsive layout changes.
+- Preserve desktop-login startup preferences and existing tray behavior.
+
 ### Keyboard lighting (ENE K5130)
 
 - Drive keyboard backlight through the ENE K5130 controller, which is the only
@@ -16,8 +27,7 @@ and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.
   profile, following writers outside Archer so the LED cannot drift out of step.
 - Reapply lighting after resume, which neither the driver nor the controller
   restores on its own.
-- Replace the WMI-documented effect list with the nine modes verified on the
-  controller, and clamp effect indexes saved by older builds.
+- Use nine ENE modes and eight WMI modes, with stable saved identities and explicit reselection for ambiguous legacy indexes.
 - Install `archer_ene.py` alongside the daemon; without it the optional import
   fails silently and colour support disappears.
 

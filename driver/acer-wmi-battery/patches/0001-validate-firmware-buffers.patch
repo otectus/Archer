@@ -1,0 +1,63 @@
+--- a/acer-wmi-battery.c
++++ b/acer-wmi-battery.c
+@@ -98,7 +98,7 @@
+ 	if (!obj)
+ 		return AE_ERROR;
+ 
+-	if (obj->type != ACPI_TYPE_BUFFER) {
++	if (obj->type != ACPI_TYPE_BUFFER || !obj->buffer.pointer) {
+ 		kfree(obj);
+ 		return AE_ERROR;
+ 	}
+@@ -148,19 +148,19 @@
+ 	obj = output.pointer;
+ 	if (!obj)
+ 		return AE_ERROR;
+-	else if (obj->type != ACPI_TYPE_BUFFER) {
+-		kfree(obj);
+-		return AE_ERROR;
+-	}
+-
+-	ret = *((struct get_battery_health_control_status_output *)
+-			obj->buffer.pointer);
++	else if (obj->type != ACPI_TYPE_BUFFER || !obj->buffer.pointer) {
++		kfree(obj);
++		return AE_ERROR;
++	}
++
+ 	if (obj->buffer.length != 8) {
+ 		pr_err("WMI battery status call returned a buffer of "
+ 		       "unexpected length %d\n", obj->buffer.length);
+ 		kfree(obj);
+ 		return AE_ERROR;
+ 	}
++
++	memcpy(&ret, obj->buffer.pointer, sizeof(ret));
+ 
+ 	bat_status->health_mode = ret.uFunctionList & HEALTH_MODE ?
+ 					  ret.uFunctionStatus[0] > 0 :
+@@ -187,7 +187,6 @@
+ 		.uFunctionStatus = (u8)function_status,
+ 		.uReservedIn = { 0x0, 0x0, 0x0, 0x0, 0x0 }
+ 	};
+-	struct set_battery_health_control_output ret;
+ 
+ 	struct acpi_buffer input = {
+ 		sizeof(struct set_battery_health_control_input), &params
+@@ -203,12 +202,10 @@
+ 
+ 	if (!obj)
+ 		return AE_ERROR;
+-	else if (obj->type != ACPI_TYPE_BUFFER) {
+-		kfree(obj);
+-		return AE_ERROR;
+-	}
+-
+-	ret = *((struct set_battery_health_control_output *)obj->buffer.pointer);
++	else if (obj->type != ACPI_TYPE_BUFFER || !obj->buffer.pointer) {
++		kfree(obj);
++		return AE_ERROR;
++	}
+ 
+ 	if (obj->buffer.length != 4) {
+ 		pr_err("WMI battery status set operation returned "

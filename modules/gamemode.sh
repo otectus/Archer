@@ -18,44 +18,38 @@ module_check_installed() {
 }
 
 module_install() {
-    log "Installing GameMode..."
-    run_sudo pacman -S --needed --noconfirm gamemode lib32-gamemode
-
-    log "Creating GameMode configuration..."
-    run_sudo mkdir -p /etc/gamemode.d
-    run_sudo tee /etc/gamemode.d/archer.ini > /dev/null <<'GAMEMODE_EOF'
+    log "Installing native GameMode..."
+    run_sudo pacman -S --needed --noconfirm gamemode || return 1
+    INSTALLED_PACKAGES+=" gamemode"
+    if pacman -Si lib32-gamemode >/dev/null 2>&1; then
+        run_sudo pacman -S --needed --noconfirm lib32-gamemode || return 1
+        INSTALLED_PACKAGES+=" lib32-gamemode"
+    else
+        log "32-bit GameMode is optional; enable multilib if your games require it."
+    fi
+    module_config /etc/gamemode.ini '# Installed by Archer Compatibility Suite
 [general]
 reaper_freq=5
 desiredgov=performance
 softrealtime=auto
 renice=10
-ioprio=0
-
-[gpu]
-apply_gpu_optimisations=accept-responsibility
-nv_powermizer_mode=1
-
-[custom]
-start=notify-send "Game Mode" "Performance mode activated"
-end=notify-send "Game Mode" "Performance mode deactivated"
-GAMEMODE_EOF
-
-    log "GameMode installed. Use 'gamemoderun <command>' to launch games."
-
-    INSTALLED_FILES+=" /etc/gamemode.d/archer.ini"
-    INSTALLED_PACKAGES+=" gamemode lib32-gamemode"
+ioprio=0' || return 1
+    if [[ -f /etc/gamemode.d/archer.ini ]] && declare -F read_manifest_field >/dev/null &&
+       [[ " $(read_manifest_field files_created) " == *" /etc/gamemode.d/archer.ini "* ]]; then
+        run_sudo rm -f /etc/gamemode.d/archer.ini || return 1
+    fi
+    log "GameMode installed. Use gamemoderun to launch a game."
 }
 
 module_uninstall() {
-    log "Removing GameMode configuration..."
-    run_sudo rm -f /etc/gamemode.d/archer.ini
-    run_sudo rmdir /etc/gamemode.d 2>/dev/null || true
+    module_remove_config /etc/gamemode.ini || return 1
+    if [[ -f /etc/gamemode.d/archer.ini ]] && declare -F read_manifest_field >/dev/null &&
+       [[ " $(read_manifest_field files_created) " == *" /etc/gamemode.d/archer.ini "* ]]; then
+        run_sudo rm -f /etc/gamemode.d/archer.ini || return 1
+    fi
 }
 
 module_verify() {
-    if has_cmd gamemoded; then
-        return 0
-    fi
-    warn "gamemoded not found"
-    return 1
+    has_cmd gamemoded && [[ -f /etc/gamemode.ini ]] || return 1
+    grep -q '^desiredgov=performance$' /etc/gamemode.ini || return 1
 }

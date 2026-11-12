@@ -7,3 +7,5 @@
 0007-counted-sysfs-input.patch
 0008-legacy-platform-profile.patch
 0009-older-kernel-headers.patch
+0010-retire-file-state-validate-firmware.patch
+0011-validate-scalar-input.patch

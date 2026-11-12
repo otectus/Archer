@@ -125,7 +125,8 @@ detect_audio() {
         AUDIO_CODEC=$(cat /proc/asound/card*/codec* 2>/dev/null | grep "Codec:" | head -1 | sed 's/.*Codec: //' || echo "")
     fi
     SOF_ACTIVE=0
-    local dmesg_out="${_CACHED_DMESG:-$(dmesg 2>/dev/null || echo "")}"
+    read_kernel_log
+    local dmesg_out="${_CACHED_DMESG:-}"
     if echo "$dmesg_out" | grep -qi "sof.*firmware\|sof-audio"; then
         SOF_ACTIVE=1
     fi
@@ -136,7 +137,8 @@ detect_touchpad() {
     HAS_I2C_TOUCHPAD=0
     TOUCHPAD_ERRORS=0
 
-    local dmesg_out="${_CACHED_DMESG:-$(dmesg 2>/dev/null || echo "")}"
+    read_kernel_log
+    local dmesg_out="${_CACHED_DMESG:-}"
     if echo "$dmesg_out" | grep -qi "i2c_hid_acpi.*ELAN\|i2c_hid_acpi.*SYN\|i2c_hid_acpi.*MSFT\|i2c.*hid.*touchpad"; then
         HAS_I2C_TOUCHPAD=1
     fi
@@ -166,7 +168,7 @@ detect_kernel() {
         return 1
     fi
     SUPPORTS_THERMAL_PROFILES=0
-    if kernel_profile_path >/dev/null; then SUPPORTS_THERMAL_PROFILES=1; fi
+    if kernel_profile_path "$KERNEL_SYS_ROOT" >/dev/null; then SUPPORTS_THERMAL_PROFILES=1; fi
     IS_CACHYOS=0
     [[ "$KERNEL_VERSION" == *cachyos* ]] && IS_CACHYOS=1
     KERNEL_HEADERS=$(kernel_header_package "$KERNEL_VERSION") || KERNEL_HEADERS=""
@@ -193,7 +195,7 @@ detect_distro() {
         endeavouros) DISTRO_FAMILY="arch" ;;
         manjaro)     DISTRO_FAMILY="arch" ;;
         garuda)      DISTRO_FAMILY="arch" ;;
-        artix)       DISTRO_FAMILY="arch" ;;
+        artix)       DISTRO_FAMILY="unsupported-init" ;;
         *)           DISTRO_FAMILY="unknown" ;;
     esac
 
@@ -208,7 +210,7 @@ detect_distro() {
 # Run all detection functions
 detect_all() {
     # Cache expensive command outputs for reuse across detection functions
-    _CACHED_DMESG=$(dmesg 2>/dev/null || echo "")
+    read_kernel_log
     _CACHED_LSPCI=$(lspci 2>/dev/null || echo "")
 
     detect_dmi

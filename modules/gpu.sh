@@ -29,7 +29,7 @@ module_install() {
     fi
 
     if [[ "${DRY_RUN:-0}" -eq 0 ]]; then
-        kernel_collect_targets || return 1
+        kernel_collect_targets "$KERNEL_MODULES_ROOT" || return 1
         local kernel
         for kernel in "${KERNEL_TARGETS[@]}"; do
             # Catch pacman hooks that warned but let the package transaction succeed.
@@ -44,14 +44,18 @@ module_install() {
         done
     fi
 
-    # Install EnvyControl
-    if [[ -n "$AUR_HELPER" ]]; then
-        log "Installing EnvyControl via $AUR_HELPER..."
-        run $AUR_HELPER -S --needed --noconfirm envycontrol
-    else
-        log "No AUR helper found. Installing EnvyControl via pip..."
-        run pip install envycontrol --break-system-packages 2>/dev/null || warn "pip install encountered issues."
+    # A root daemon requires a system-managed executable, never a user pip install.
+    if ! pacman -Q envycontrol >/dev/null 2>&1; then
+        if pacman -Si envycontrol >/dev/null 2>&1; then
+            run_sudo pacman -S --needed --noconfirm envycontrol || return 1
+        elif [[ -n "$AUR_HELPER" ]]; then
+            run "$AUR_HELPER" -S --needed --noconfirm envycontrol || return 1
+        else
+            warn "Install the EnvyControl system package using an AUR helper, then retry."
+            return 1
+        fi
     fi
+    INSTALLED_PACKAGES+=" envycontrol"
 
     # GPU mode selection
     log "GPU Switching Modes:"
@@ -73,7 +77,8 @@ module_install() {
     # Resolve the executable before limiting PATH to distro tools. This bypasses
     # interactive /usr/local wrappers without replacing a system executable.
     local envycontrol_path
-    envycontrol_path=$(command -v envycontrol) || return 1
+    envycontrol_path=/usr/bin/envycontrol
+    [[ "${DRY_RUN:-0}" -eq 1 || -x "$envycontrol_path" ]] || return 1
     if [[ "$gpu_mode" = "hybrid" ]]; then
         run_sudo env PATH=/usr/bin:/bin "$envycontrol_path" -s hybrid --rtd3 2 || return 1
     else
@@ -92,7 +97,8 @@ module_uninstall() {
     log "Resetting GPU configuration..."
     if has_cmd envycontrol; then
         local envycontrol_path
-        envycontrol_path=$(command -v envycontrol) || return 1
+        envycontrol_path=/usr/bin/envycontrol
+        [[ "${DRY_RUN:-0}" -eq 1 || -x "$envycontrol_path" ]] || return 1
         run_sudo env PATH=/usr/bin:/bin "$envycontrol_path" --reset || return 1
         rebuild_initramfs || return 1
     fi
@@ -100,12 +106,20 @@ module_uninstall() {
 }
 
 module_verify() {
-    if has_cmd envycontrol; then
+    if [[ -x /usr/bin/envycontrol ]]; then
         local mode
-        mode=$(envycontrol --query 2>/dev/null || echo "unknown")
+        mode=$(/usr/bin/envycontrol --query) || return 1
+        case "$mode" in hybrid|integrated|nvidia) ;; *) warn "Unrecognized GPU mode: $mode"; return 1 ;; esac
         log "Current GPU mode: $mode"
         return 0
     fi
     warn "EnvyControl not found"
     return 1
+}
+
+module_preflight() {
+    if [[ -z "$AUR_HELPER" ]] && ! pacman -Q envycontrol >/dev/null 2>&1 && ! pacman -Si envycontrol >/dev/null 2>&1; then
+        warn "GPU setup requires the system EnvyControl package or an AUR helper."
+        return 1
+    fi
 }

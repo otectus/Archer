@@ -83,7 +83,11 @@ setup() {
     echo 100 > "$supply/charge_control_end_threshold"
     _BATTERY_UDEV_RULE="$BATS_TEST_TMPDIR/rule"
     INSTALLED_FILES=''
-    run_sudo() { if [[ "$1" == udevadm ]]; then return 0; fi; "$@"; }
+    _battery_persist_fallback() { INSTALLED_FILES+=" $_BATTERY_UDEV_RULE"; }
+    run_sudo() {
+        [[ "$*" == 'systemctl start archer-battery-limit.service' ]] || return 1
+        PYTHONPATH="$BATS_TEST_DIRNAME/../gui" python3 -c 'from pathlib import Path; import sys; from archer_battery import apply; apply(Path(sys.argv[1]), Path(sys.argv[2]))' "$KERNEL_SYS_ROOT" "$BATS_TEST_TMPDIR/battery.json"
+    }
     external_install_dkms() { echo 'Unexpected DKMS install'; return 1; }
     log() { :; }
     module_install

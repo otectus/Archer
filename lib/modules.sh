@@ -17,7 +17,7 @@ MODULE_LABELS=(
     "Archer GUI (Control Panel)"
     "Game Mode Support"
     "Audio Enhancement (Noise Suppression)"
-    "Camera Enhancement (Virtual Camera)"
+    "Loopback Camera Setup (External Producer Required)"
     "Firmware Update Advisor"
 )
 

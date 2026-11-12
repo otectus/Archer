@@ -18,20 +18,22 @@ module_check_installed() {
 module_install() {
     # Ensure firmware is up to date
     log "Installing/updating wireless firmware packages..."
-    run_sudo pacman -S --needed --noconfirm linux-firmware
+    run_sudo pacman -S --needed --noconfirm linux-firmware || return 1
+    INSTALLED_PACKAGES+=" linux-firmware"
+    read_kernel_log
 
     case "$WIFI_CHIPSET" in
         mediatek)
             log "MediaTek chipset detected: $WIFI_DEVICE"
-            _fix_mediatek
+            _fix_mediatek || return 1
             ;;
         intel)
             log "Intel chipset detected: $WIFI_DEVICE"
-            _fix_intel
+            _fix_intel || return 1
             ;;
         realtek)
             log "Realtek chipset detected: $WIFI_DEVICE"
-            _fix_realtek
+            _fix_realtek || return 1
             ;;
         qualcomm)
             log "Qualcomm/Atheros chipset detected: $WIFI_DEVICE"
@@ -45,13 +47,13 @@ module_install() {
     esac
 
     # Common: ensure Bluetooth service is running
-    _setup_bluetooth
+    _setup_bluetooth || return 1
 
     # Common: ensure NetworkManager is running
     if has_cmd nmcli; then
         if ! systemctl is-active --quiet NetworkManager.service 2>/dev/null; then
             log "Enabling NetworkManager..."
-            run_sudo systemctl enable --now NetworkManager.service
+            module_service NetworkManager.service enable --now || return 1
         fi
     fi
 
@@ -61,16 +63,16 @@ module_install() {
 
 _fix_mediatek() {
     # Check for firmware loading failures
-    if dmesg 2>/dev/null | grep -qi "mt79.*firmware.*failed\|mt79.*firmware.*error"; then
+    if echo "${_CACHED_DMESG:-}" | grep -qi "mt79.*firmware.*failed\|mt79.*firmware.*error"; then
         warn "MediaTek firmware loading failure detected."
         log "Attempting PCIe device reset..."
 
         local pci_addr
         pci_addr=$(lspci -D 2>/dev/null | grep -i "mediatek.*network\|mediatek.*wireless" | awk '{print $1}')
         if [[ -n "$pci_addr" ]]; then
-            echo 1 | run_sudo tee "/sys/bus/pci/devices/$pci_addr/remove" > /dev/null 2>&1 || true
+            echo 1 | run_sudo tee "/sys/bus/pci/devices/$pci_addr/remove" > /dev/null 2>&1 || return 1
             sleep 2
-            echo 1 | run_sudo tee /sys/bus/pci/rescan > /dev/null 2>&1 || true
+            echo 1 | run_sudo tee /sys/bus/pci/rescan > /dev/null 2>&1 || return 1
             log "PCIe device reset completed."
         else
             warn "Could not find MediaTek PCI address for reset."
@@ -98,17 +100,17 @@ _fix_intel() {
     # Check rfkill status
     if rfkill list bluetooth 2>/dev/null | grep -qi "Soft blocked: yes"; then
         log "Bluetooth is soft-blocked. Unblocking..."
-        run_sudo rfkill unblock bluetooth
+        run_sudo rfkill unblock bluetooth || return 1
     fi
     if rfkill list wifi 2>/dev/null | grep -qi "Soft blocked: yes"; then
         log "WiFi is soft-blocked. Unblocking..."
-        run_sudo rfkill unblock wifi
+        run_sudo rfkill unblock wifi || return 1
     fi
 
     # Intel AX210/AX211/BE200 may need specific firmware
     if echo "$WIFI_DEVICE" | grep -qi "AX210\|AX211\|BE200"; then
         log "Intel AX210/AX211/BE200 detected. Checking firmware..."
-        if dmesg 2>/dev/null | grep -qi "iwlwifi.*firmware.*error\|iwlwifi.*no suitable firmware"; then
+        if echo "${_CACHED_DMESG:-}" | grep -qi "iwlwifi.*firmware.*error\|iwlwifi.*no suitable firmware"; then
             warn "Intel WiFi firmware issue detected."
             log "Try: sudo pacman -S linux-firmware (already done above)"
             mark_reboot_required
@@ -132,17 +134,19 @@ _fix_realtek() {
 _setup_bluetooth() {
     if ! pacman -Qi bluez &>/dev/null; then
         log "Installing Bluetooth packages..."
-        run_sudo pacman -S --needed --noconfirm bluez bluez-utils
+        run_sudo pacman -S --needed --noconfirm bluez bluez-utils || return 1
+        INSTALLED_PACKAGES+=" bluez bluez-utils"
     fi
 
     if ! systemctl is-active --quiet bluetooth.service 2>/dev/null; then
         log "Enabling Bluetooth service..."
-        run_sudo systemctl enable --now bluetooth.service
+        module_service bluetooth.service enable --now || return 1
     fi
 }
 
 module_uninstall() {
-    log "WiFi module: No persistent changes to remove."
+    module_restore_services || return 1
+    log "WiFi/Bluetooth prior service states restored."
     log "Firmware packages retained as they are standard system components."
 }
 

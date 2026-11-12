@@ -28,6 +28,8 @@ A modular compatibility suite for Acer laptops running Arch Linux and Arch-based
 - Manjaro
 - Garuda Linux
 
+A running systemd system manager is required. Artix and other init systems are not supported by this installer.
+
 ## Architecture
 
 Archer uses a root daemon with a D-Bus system service for secure hardware control:
@@ -49,12 +51,12 @@ Archer GUI (GTK4/Adwaita)  ──  D-Bus (io.otectus.Archer1)  ──  Archer Da
 ### 1. Linuwu-Sense Kernel Driver (driver)
 Installs the [Linuwu-Sense](https://github.com/0x7375646F/Linuwu-Sense) kernel driver via DKMS for fan speed control, RGB keyboard access, and battery management at the hardware level. Blacklists the default `acer_wmi` module for exclusive hardware access.
 
-ANV16S-41 fan support is implemented through an exact driver DMI match and the existing Nitro v4 WMI protocol. It is **awaiting physical validation on the issue reporter's BIOS V1.12 hardware**. Archer installs a pinned upstream revision with an isolated patch series as `linuwu-sense/1.0.archer2`; DKMS 1.0 is migrated, matching kernel headers are required, and activation requires a reboot. See the [driver package/update guide](driver/linuwu-sense/README.md) and [ANV16S-41 diagnostics and safe validation procedure](docs/anv16s-41.md).
+ANV16S-41 fan support is implemented through an exact driver DMI match and the existing Nitro v4 WMI protocol. It is **awaiting physical validation on the issue reporter's BIOS V1.12 hardware**. Archer installs a pinned upstream revision with an isolated patch series as `linuwu-sense/1.0.archer3`; DKMS 1.0 is migrated, matching kernel headers are required, and activation requires a reboot. See the [driver package/update guide](driver/linuwu-sense/README.md) and [ANV16S-41 diagnostics and safe validation procedure](docs/anv16s-41.md).
 
 Manual speeds are not restored across daemon starts. Stopping manual control or either curve restores both fans to firmware Auto; failed writes trigger an Auto attempt. Independent native platform-profile providers are preserved.
 
 ### 2. Battery Charge Limit (battery)
-Installs the [acer-wmi-battery](https://github.com/frederik-h/acer-wmi-battery) DKMS module to limit charging to 80%, extending battery lifespan. Persists across reboots via a udev rule. Prefers an existing standard battery charge threshold or Linuwu interface; otherwise installs a pinned upstream source with Archer DKMS packaging.
+Sets a persistent charge policy, defaulting to an 80% limit. Prefers an existing standard battery threshold or Linuwu interface; otherwise installs the pinned [acer-wmi-battery](https://github.com/frederik-h/acer-wmi-battery) fallback. The GUI and battery-only boot/device-event service share `/etc/archer/battery.json`, so disabling the limit survives reboot and device events.
 
 ### 3. GPU Switching (gpu)
 Installs [EnvyControl](https://github.com/bayasdev/envycontrol) for NVIDIA Optimus hybrid graphics management. Supports three modes:
@@ -69,9 +71,7 @@ Addresses I2C HID touchpad detection failures common on several Acer models. App
 - GRUB kernel parameters (`i8042.reset i8042.nomux`)
 
 ### 5. Audio Fix (audio)
-Installs SOF firmware and ALSA UCM configuration. Platform-specific fixes:
-- **AMD**: Configures SOF driver, disables legacy ACP PDM conflicts
-- **Intel**: Validates SOF firmware loading, rebuilds initramfs if needed
+Installs SOF firmware, ALSA UCM configuration, and diagnostic tools. Uses the kernel's AMD driver selection and removes Archer's obsolete ACP `enable` directives. On Intel, readable kernel logs can identify missing SOF firmware that needs an initramfs rebuild. Unavailable logs are reported as unknown.
 
 ### 6. WiFi/Bluetooth Troubleshooting (wifi)
 Chipset-aware diagnostics and fixes:
@@ -86,6 +86,8 @@ Installs [TLP](https://linrunner.de/tlp/) with an Acer-optimized configuration:
 - WiFi power management, USB autosuspend
 - Runtime PM for PCI devices (NVIDIA GPU power saving)
 
+Writes configuration before running `tlp start`; platform-profile overrides are emitted only when supported. Switching from power-profiles-daemon retains its package and records its service state. Uninstall restores recorded service/mask states and preserves administrator-edited configuration. Archer's manual Game Mode is unavailable while TLP owns power policy.
+
 ### 8. Kernel Thermal Profiles (thermal)
 Reuses working native or Linuwu-Sense platform profiles. It never removes the Linuwu blacklist to load a second Acer WMI owner, and does not force Predator generation flags on Nitro. The driver module preserves an existing independent provider such as AMD PMF; available choices come from sysfs.
 
@@ -98,7 +100,9 @@ GTK4/Adwaita control panel with a root daemon for real-time hardware management.
 - **Audio** — Noise suppression with clear setup and audio restart feedback
 - **System** — Device information, startup behavior, firmware checks, and Advanced driver/recovery tools
 - **Appearance** — System theme by default, optional Light/Dark overrides, high contrast and supported system accent colors
+- **Collapsible sidebar** — Collapse/expand buttons and **Ctrl+B**, with the desktop preference saved across launches
 - **System tray** — Right-click for **Open**, **Profile** (Eco, Quiet, Balanced, Performance, Turbo as supported), and **Exit**; current profile stays synchronized with the GUI. Close-to-tray and tray-host recovery are supported.
+- **Automatic startup** — The GUI and tray start at desktop login by default. Disable or re-enable this for your account in **Preferences → Start Archer at login**.
 
 Requires **GTK 4.12+ and libadwaita 1.6+**. See the [control center guide](docs/gui.md) for navigation, shortcuts, saving behavior, and GUI verification.
 
@@ -109,13 +113,13 @@ For installation, upgrades, and release checks, see the [deployment guide](docs/
 > **Note**: Requires a display server (X11 or Wayland). Install the driver module first for full hardware control.
 
 ### 10. Game Mode (gamemode)
-Installs [GameMode](https://github.com/FeralInteractive/gamemode) for automatic performance optimization during gaming. Switches CPU governor to performance, adjusts GPU power mode, and applies I/O priority tuning. The Archer daemon also provides a Game Mode toggle for manual activation.
+Installs [GameMode](https://github.com/FeralInteractive/gamemode) with governor and scheduling settings in `/etc/gamemode.ini`; an existing administrator configuration is preserved. Native GameMode works without multilib; 32-bit support is installed only when available. Archer's separate manual toggle temporarily changes supported platform profiles, all available CPU EPP policies, and identified NVIDIA persistence settings, then restores their prior values. Failed changes roll back and retain recovery state if restoration fails.
 
 ### 11. Audio Enhancement (audio-enhance)
-Sets up real-time microphone noise suppression via PipeWire and [rnnoise](https://github.com/xiph/rnnoise). Creates an "Archer Noise Suppression" virtual audio source that can be selected in any application for clean, noise-free input.
+Sets up microphone noise suppression through PipeWire and [rnnoise](https://github.com/xiph/rnnoise). Requires the system LADSPA plugin and loads a filter from `/etc/pipewire/pipewire.conf.d/`. After restarting PipeWire, select **Archer Noise Suppression** as the application's input. Disabled configurations survive upgrades and are removed by uninstall.
 
-### 12. Camera Enhancement (camera-enhance)
-Installs [v4l2loopback](https://github.com/umlaeute/v4l2loopback) to create an "Archer Camera" virtual device for background blur and camera effects. Provides the foundation for AI-powered camera processing.
+### 12. Loopback Camera Setup (camera-enhance)
+Installs [v4l2loopback](https://github.com/v4l2loopback/v4l2loopback) with boot loading and an **Archer Camera** device using a free video number. An external capture/effect application must feed it frames before applications can use it. Archer does not install background blur or a frame producer. Existing loopback users may require a reboot to apply the new device options.
 
 ### 13. Firmware Advisor (firmware)
 Installs [fwupd](https://fwupd.org/) for firmware update detection. Displays current BIOS version and checks the Linux Vendor Firmware Service (LVFS) for available updates. Advisory only — never performs automatic updates.
@@ -277,7 +281,7 @@ Archer/
 - **AUR Helpers**: Modules that install AUR packages (GPU, audio-enhance) prefer `paru` or `yay` if available, with manual fallback otherwise. Battery driver sources use pinned DKMS packaging. The installer never installs an AUR helper for you.
 - **D-Bus / Polkit**: The daemon registers as `io.otectus.Archer1` on the system bus. Read-only methods are unprivileged. Mutating methods require polkit authorization, cached per session (`auth_admin_keep`). System-level operations (restart, modprobe) always prompt (`auth_admin`).
 - **Install Manifest**: Stored at `/var/lib/archer/install-manifest.json` (root-owned, 0644). Tracks installed modules, files, DKMS modules, and packages for clean uninstallation. Manifests from older user-home locations (`~/.local/share/archer/`, legacy `~/.local/share/damx/`) are migrated automatically on the next install or uninstall run.
-- **Fan Curve Safety**: The fan curve engine includes a watchdog that restores EC automatic control if the daemon crashes or 3 consecutive control ticks fail.
+- **Fan Curve Safety**: The curve worker attempts firmware Auto after three failed control ticks. Daemon shutdown, systemd's `ExecStopPost`, and driver lifecycle hooks also attempt Auto restoration. No kernel file-based settings or manual speeds are replayed.
 
 ## Troubleshooting
 
@@ -331,7 +335,7 @@ module_uninstall()       # Reverse installation
 module_verify()          # Return 0 if working correctly
 ```
 
-Then add the module ID and label to the `MODULE_IDS` and `MODULE_LABELS` arrays in `install.sh`, and update the recommendation logic in `lib/detect.sh`.
+Then add the module ID and label to the `MODULE_IDS` and `MODULE_LABELS` arrays in `lib/modules.sh`, and update the recommendation logic in `lib/detect.sh`.
 
 ---
 

@@ -20,36 +20,28 @@ module_check_installed() {
 module_install() {
     # Install essential audio firmware and tools
     log "Installing audio firmware and utilities..."
-    run_sudo pacman -S --needed --noconfirm sof-firmware alsa-ucm-conf alsa-utils
+    run_sudo pacman -S --needed --noconfirm sof-firmware alsa-ucm-conf alsa-utils || return 1
 
+    INSTALLED_PACKAGES+=" sof-firmware alsa-ucm-conf alsa-utils"
     local rebuild_initramfs=0
 
     if [[ "$CPU_VENDOR" = "AuthenticAMD" ]]; then
-        log "AMD platform detected. Configuring SOF audio driver..."
-        run_sudo tee "$_AUDIO_AMD_CONF" > /dev/null <<'EOF'
-# AMD audio configuration for Acer laptops
-# Installed by Archer Compatibility Suite
-
-# Enable SOF driver for AMD ACP
-options snd_pci_acp3x enable=1
-# Disable legacy ACP PDM drivers to avoid conflicts
-options snd_acp3x_pdm_dma enable=0
-options snd_acp6x_pdm_dma enable=0
-EOF
-        INSTALLED_FILES+=" $_AUDIO_AMD_CONF"
-        rebuild_initramfs=1
-    else
-        log "Intel platform detected. Checking SOF driver status..."
-        if dmesg 2>/dev/null | grep -qi "sof.*firmware.*missing\|sof.*fw.*not found"; then
-            warn "SOF firmware may not be loaded in initramfs."
+        log "Using kernel-selected AMD audio drivers; no blanket ACP override is applied."
+        if [[ -f "$_AUDIO_AMD_CONF" ]] && grep -q 'Installed by Archer Compatibility Suite' "$_AUDIO_AMD_CONF"; then
+            module_remove_config "$_AUDIO_AMD_CONF" || return 1
             rebuild_initramfs=1
-        else
-            log "SOF firmware appears to be loading correctly."
+        fi
+    else
+        read_kernel_log
+        if [[ "${KERNEL_LOG_AVAILABLE:-0}" == 1 ]]; then
+            if echo "$_CACHED_DMESG" | grep -qi 'sof.*firmware.*missing\|sof.*fw.*not found'; then
+                warn "SOF firmware may not be loaded in initramfs."
+                rebuild_initramfs=1
+            fi
         fi
     fi
-
     if [[ "$rebuild_initramfs" -eq 1 ]]; then
-        rebuild_initramfs
+        rebuild_initramfs || return 1
     fi
 
     # Display current audio status
@@ -69,15 +61,14 @@ EOF
     log "  2. Run: pavucontrol (set profile to 'Analog Duplex')"
     log "  3. Check: wpctl status (for PipeWire users)"
 
-    INSTALLED_PACKAGES+=" sof-firmware alsa-ucm-conf alsa-utils"
     mark_reboot_required
 }
 
 module_uninstall() {
     log "Removing audio configuration..."
-    if [[ -f "$_AUDIO_AMD_CONF" ]]; then
-        run_sudo rm -f "$_AUDIO_AMD_CONF"
-        rebuild_initramfs
+    if [[ -f "$_AUDIO_AMD_CONF" ]] && grep -q "Installed by Archer Compatibility Suite" "$_AUDIO_AMD_CONF"; then
+        module_remove_config "$_AUDIO_AMD_CONF" || return 1
+        rebuild_initramfs || return 1
     fi
     log "Audio packages retained as they are standard system components."
 }

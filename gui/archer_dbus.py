@@ -4,8 +4,10 @@ Archer D-Bus Service — exposes HardwareManager over system D-Bus with polkit a
 
 import json
 import logging
-import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
+
+from archer_settings import object_request
 
 import dbus
 import dbus.service
@@ -53,7 +55,7 @@ def _check_polkit(bus, sender, action_id):
 
     subject = ("system-bus-name", {"name": sender})
     result = authority.CheckAuthorization(
-        subject, action_id, {}, dbus.UInt32(1), ""  # 1 = AllowUserInteraction
+        subject, action_id, {}, dbus.UInt32(1), "", timeout=120  # 1 = AllowUserInteraction
     )
     is_authorized = bool(result[0])
     if not is_authorized:
@@ -66,21 +68,94 @@ class ArcherDBusService(dbus.service.Object):
 
     def __init__(self, hw_manager, bus=None):
         self.hw = hw_manager
+        self._read_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="archer-read")
+        self._write_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="archer-write")
+        self._monitor_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="archer-monitor")
+        self._read_slots = threading.BoundedSemaphore(4)
+        self._write_slots = threading.BoundedSemaphore(1)
+        self._telemetry_pending = False
+        self._maintenance_pending = False
+        self._last_profile = None
+        self._stopping = False
         self._bus = bus or dbus.SystemBus()
         self._bus_name = dbus.service.BusName(DBUS_NAME, self._bus)
         super().__init__(self._bus, DBUS_PATH)
         logger.info(f"D-Bus service registered: {DBUS_NAME} at {DBUS_PATH}")
         # Push telemetry on a timer so the GUI doesn't have to poll. Returns
         # True so GLib keeps re-arming the timeout.
-        GLib.timeout_add_seconds(TELEMETRY_INTERVAL_S, self._emit_telemetry)
+        self._timer = GLib.timeout_add_seconds(TELEMETRY_INTERVAL_S, self._emit_telemetry)
+
+    def close(self, wait=True):
+        self._stopping = True
+        if self._timer:
+            GLib.source_remove(self._timer)
+            self._timer = 0
+        for pool in (self._read_pool, self._write_pool, self._monitor_pool):
+            pool.shutdown(wait=wait, cancel_futures=True)
+
+    def _dispatch(self, work, reply, failure, mutating=False):
+        if self._stopping:
+            response = self._json_response({"success": False, "error": "Archer is shutting down"})
+            return reply(response) if reply is not None else response
+        if reply is None:
+            return work()  # Direct unit-test calls; exported calls always supply callbacks.
+        slots = self._write_slots if mutating else self._read_slots
+        pool = self._write_pool if mutating else self._read_pool
+        if not slots.acquire(blocking=False):
+            reply(self._json_response({"success": False, "error": "Archer is busy; retry when the current operation finishes"}))
+            return
+
+        def run():
+            try:
+                response = work()
+            except Exception as error:
+                logger.warning("Operation failed: %s", error)
+                response = self._json_response({"success": False, "error": str(error)})
+            finally:
+                slots.release()
+
+            def done():
+                reply(response)
+                return False
+            GLib.idle_add(done)
+        pool.submit(run)
 
     def _emit_telemetry(self):
-        try:
-            payload = json.dumps(self.hw.get_monitoring_data())
-            self.TelemetryUpdated(payload)
-        except Exception as e:
-            # Don't let a transient sysfs hiccup kill the timer.
-            logger.warning(f"TelemetryUpdated emit failed: {e}")
+        if self._stopping:
+            return False
+        if not self._telemetry_pending:
+            self._telemetry_pending = True
+
+            def collect():
+                try:
+                    data = self.hw.get_monitoring_data()
+                except Exception as error:
+                    logger.warning("Telemetry collection failed: %s", error)
+                    data = None
+
+                def publish():
+                    self._telemetry_pending = False
+                    if data is not None and not self._stopping:
+                        self.TelemetryUpdated(json.dumps(data))
+                        profile = data.get("thermal_profile")
+                        if profile and profile != self._last_profile:
+                            self._last_profile = profile
+                            GLib.idle_add(self.ProfileChanged, profile)
+                    return False
+                GLib.idle_add(publish)
+            self._monitor_pool.submit(collect)
+        if not self._maintenance_pending and hasattr(self.hw, "poll_profile_led") and self._write_slots.acquire(blocking=False):
+            self._maintenance_pending = True
+
+            def maintain():
+                try:
+                    self.hw.poll_profile_led()
+                except Exception as error:
+                    logger.warning("Lighting maintenance failed: %s", error)
+                finally:
+                    self._maintenance_pending = False
+                    self._write_slots.release()
+            self._monitor_pool.submit(maintain)
         return True
 
     def _authorize(self, command, sender):
@@ -88,7 +163,7 @@ class ArcherDBusService(dbus.service.Object):
         action_id = POLKIT_ACTIONS.get(command)
         if not action_id:
             return True  # Read-only commands need no auth
-        return _check_polkit(self._bus, sender, action_id)
+        return not self._stopping and _check_polkit(self._bus, sender, action_id) and not self._stopping
 
     def _json_response(self, data):
         """Serialize response to JSON string for D-Bus transport."""
@@ -102,38 +177,59 @@ class ArcherDBusService(dbus.service.Object):
         return self._json_response({"success": True, "data": {"version": self.hw.settings.get("daemon_version", "2.0.1")}})
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def GetAllSettings(self, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetAllSettings(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_GetAllSettings(sender=sender), reply, failure, mutating=False)
+
+    def _do_GetAllSettings(self, sender=None):
         return self._json_response({"success": True, "data": self.hw.get_all_settings()})
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def GetMonitoringData(self, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetMonitoringData(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_GetMonitoringData(sender=sender), reply, failure, mutating=False)
+
+    def _do_GetMonitoringData(self, sender=None):
         return self._json_response({"success": True, "data": self.hw.get_monitoring_data()})
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def GetSupportedFeatures(self, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetSupportedFeatures(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_GetSupportedFeatures(sender=sender), reply, failure, mutating=False)
+
+    def _do_GetSupportedFeatures(self, sender=None):
         return self._json_response({"success": True, "data": {"features": self.hw.features}})
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def GetFanCurve(self, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetFanCurve(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_GetFanCurve(sender=sender), reply, failure, mutating=False)
+
+    def _do_GetFanCurve(self, sender=None):
         return self._json_response({"success": True, "data": self.hw.get_fan_curve_state()})
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def GetDisplayMode(self, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetDisplayMode(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_GetDisplayMode(sender=sender), reply, failure, mutating=False)
+
+    def _do_GetDisplayMode(self, sender=None):
         return self._json_response({"success": True, "data": self.hw.get_display_mode()})
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def GetGameMode(self, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetGameMode(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_GetGameMode(sender=sender), reply, failure, mutating=False)
+
+    def _do_GetGameMode(self, sender=None):
         return self._json_response({"success": True, "data": self.hw.get_game_mode()})
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def GetUsbPowerPolicy(self, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetUsbPowerPolicy(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_GetUsbPowerPolicy(sender=sender), reply, failure, mutating=False)
+
+    def _do_GetUsbPowerPolicy(self, sender=None):
         usb_level = self.hw.get_usb_charging()
         wake = self.hw.get_usb_wake_sources()
         return self._json_response({"success": True, "data": {
@@ -142,33 +238,36 @@ class ArcherDBusService(dbus.service.Object):
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
-    def GetFirmwareInfo(self, reply, failure, sender=None):
-        def check():
-            try:
-                data = self.hw.get_firmware_info()
-                response = self._json_response({"success": data.get("status") != "error",
-                                                "data": data, "error": data.get("error", "")})
-                GLib.idle_add(lambda: reply(response))
-            except Exception as error:
-                GLib.idle_add(failure, dbus.exceptions.DBusException(str(error)))
-        threading.Thread(target=check, daemon=True).start()
+    def GetFirmwareInfo(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_GetFirmwareInfo(sender=sender), reply, failure, mutating=False)
+
+    def _do_GetFirmwareInfo(self, sender=None):
+        data = self.hw.get_firmware_info()
+        return self._json_response({"success": data.get("status") != "error",
+                                    "data": data, "error": data.get("error", "")})
 
     # --- Mutating Methods (polkit-protected) ---
 
     @dbus.service.method(DBUS_IFACE, in_signature="s", out_signature="s",
-                         sender_keyword="sender")
-    def SetThermalProfile(self, profile, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetThermalProfile(self, profile, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetThermalProfile(profile, sender=sender), reply, failure, mutating=True)
+
+    def _do_SetThermalProfile(self, profile, sender=None):
         if not self._authorize("set_thermal_profile", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         ok, err = self.hw.set_thermal_profile(profile)
         if ok:
             self.hw.settings.set("thermal_profile", profile)
-            self.ProfileChanged(profile)
+            GLib.idle_add(self.ProfileChanged, profile)
         return self._json_response({"success": ok, "error": err})
 
     @dbus.service.method(DBUS_IFACE, in_signature="ii", out_signature="s",
-                         sender_keyword="sender")
-    def SetFanSpeed(self, cpu, gpu, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetFanSpeed(self, cpu, gpu, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetFanSpeed(cpu, gpu, sender=sender), reply, failure, mutating=True)
+
+    def _do_SetFanSpeed(self, cpu, gpu, sender=None):
         if not self._authorize("set_fan_speed", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         ok = self.hw.set_fan_speed(cpu, gpu)
@@ -177,8 +276,11 @@ class ArcherDBusService(dbus.service.Object):
         return self._json_response({"success": ok})
 
     @dbus.service.method(DBUS_IFACE, in_signature="s", out_signature="s",
-                         sender_keyword="sender")
-    def SetFanCurve(self, params_json, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetFanCurve(self, params_json, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetFanCurve(params_json, sender=sender), reply, failure, mutating=True)
+
+    def _do_SetFanCurve(self, params_json, sender=None):
         if not self._authorize("set_fan_curve", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         try:
@@ -195,8 +297,11 @@ class ArcherDBusService(dbus.service.Object):
             return self._json_response({"success": False, "error": str(error)})
 
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
-                         sender_keyword="sender")
-    def SetBatteryCalibration(self, enabled, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetBatteryCalibration(self, enabled, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetBatteryCalibration(bool(enabled), sender=sender), reply, failure, mutating=True)
+
+    def _do_SetBatteryCalibration(self, enabled, sender=None):
         if not self._authorize("set_battery_calibration", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         ok = self.hw.set_battery_calibration(enabled)
@@ -205,8 +310,11 @@ class ArcherDBusService(dbus.service.Object):
         return self._json_response({"success": ok})
 
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
-                         sender_keyword="sender")
-    def SetBatteryLimiter(self, enabled, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetBatteryLimiter(self, enabled, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetBatteryLimiter(bool(enabled), sender=sender), reply, failure, mutating=True)
+
+    def _do_SetBatteryLimiter(self, enabled, sender=None):
         if not self._authorize("set_battery_limiter", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         ok = self.hw.set_battery_limiter(enabled)
@@ -215,8 +323,11 @@ class ArcherDBusService(dbus.service.Object):
         return self._json_response({"success": ok})
 
     @dbus.service.method(DBUS_IFACE, in_signature="i", out_signature="s",
-                         sender_keyword="sender")
-    def SetUsbCharging(self, level, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetUsbCharging(self, level, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetUsbCharging(level, sender=sender), reply, failure, mutating=True)
+
+    def _do_SetUsbCharging(self, level, sender=None):
         if not self._authorize("set_usb_charging", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         ok = self.hw.set_usb_charging(level)
@@ -225,8 +336,11 @@ class ArcherDBusService(dbus.service.Object):
         return self._json_response({"success": ok})
 
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
-                         sender_keyword="sender")
-    def SetBacklightTimeout(self, enabled, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetBacklightTimeout(self, enabled, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetBacklightTimeout(bool(enabled), sender=sender), reply, failure, mutating=True)
+
+    def _do_SetBacklightTimeout(self, enabled, sender=None):
         if not self._authorize("set_backlight_timeout", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         ok = self.hw.set_backlight_timeout(enabled)
@@ -235,8 +349,11 @@ class ArcherDBusService(dbus.service.Object):
         return self._json_response({"success": ok})
 
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
-                         sender_keyword="sender")
-    def SetLcdOverride(self, enabled, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetLcdOverride(self, enabled, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetLcdOverride(bool(enabled), sender=sender), reply, failure, mutating=True)
+
+    def _do_SetLcdOverride(self, enabled, sender=None):
         if not self._authorize("set_lcd_override", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         ok = self.hw.set_lcd_override(enabled)
@@ -245,8 +362,11 @@ class ArcherDBusService(dbus.service.Object):
         return self._json_response({"success": ok})
 
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
-                         sender_keyword="sender")
-    def SetBootAnimationSound(self, enabled, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetBootAnimationSound(self, enabled, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetBootAnimationSound(bool(enabled), sender=sender), reply, failure, mutating=True)
+
+    def _do_SetBootAnimationSound(self, enabled, sender=None):
         if not self._authorize("set_boot_animation_sound", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         ok = self.hw.set_boot_animation_sound(enabled)
@@ -255,116 +375,125 @@ class ArcherDBusService(dbus.service.Object):
         return self._json_response({"success": ok})
 
     @dbus.service.method(DBUS_IFACE, in_signature="s", out_signature="s",
-                         sender_keyword="sender")
-    def SetPerZoneMode(self, params_json, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetPerZoneMode(self, params_json, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetPerZoneMode(params_json, sender=sender), reply, failure, mutating=True)
+
+    def _do_SetPerZoneMode(self, params_json, sender=None):
         if not self._authorize("set_per_zone_mode", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        p = json.loads(params_json)
+        p = object_request(params_json, "per_zone_mode")
         ok = self.hw.set_per_zone_mode(p["zone1"], p["zone2"], p["zone3"], p["zone4"], p["brightness"])
         if ok:
-            self.hw.settings.set("per_zone_mode", p)
-            self.hw.settings.set("last_keyboard_mode", "per_zone")
+            self.hw.settings.update({"per_zone_mode": p, "last_keyboard_mode": "per_zone"})
         return self._json_response({"success": ok})
 
     @dbus.service.method(DBUS_IFACE, in_signature="s", out_signature="s",
-                         sender_keyword="sender")
-    def SetFourZoneMode(self, params_json, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetFourZoneMode(self, params_json, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetFourZoneMode(params_json, sender=sender), reply, failure, mutating=True)
+
+    def _do_SetFourZoneMode(self, params_json, sender=None):
         if not self._authorize("set_four_zone_mode", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        p = json.loads(params_json)
-        ok = self.hw.set_four_zone_mode(p["mode"], p["speed"], p["brightness"],
+        p = object_request(params_json, "four_zone_mode")
+        effect = self.hw.effect_id(p.get("effect", p.get("mode")))
+        ok = self.hw.set_four_zone_mode(effect, p["speed"], p["brightness"],
                                         p["direction"], p["red"], p["green"], p["blue"])
         if ok:
-            self.hw.settings.set("four_zone_mode", p)
-            self.hw.settings.set("last_keyboard_mode", "effect")
+            p["effect"] = effect
+            self.hw.settings.update({"four_zone_mode": p, "last_keyboard_mode": "effect", "keyboard_migration_required": False})
         return self._json_response({"success": ok})
 
     @dbus.service.method(DBUS_IFACE, in_signature="s", out_signature="s",
-                         sender_keyword="sender")
-    def SetDisplayMode(self, mode, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetDisplayMode(self, mode, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetDisplayMode(mode, sender=sender), reply, failure, mutating=True)
+
+    def _do_SetDisplayMode(self, mode, sender=None):
         if not self._authorize("set_display_mode", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         result = self.hw.set_display_mode(mode)
         return self._json_response(result)
 
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
-                         sender_keyword="sender")
-    def SetGameMode(self, enabled, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetGameMode(self, enabled, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetGameMode(bool(enabled), sender=sender), reply, failure, mutating=True)
+
+    def _do_SetGameMode(self, enabled, sender=None):
         if not self._authorize("set_game_mode", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        if enabled:
-            self.hw.activate_game_mode()
-        else:
-            self.hw.deactivate_game_mode()
-        return self._json_response({"success": True, "data": {"active": enabled}})
+        result = self.hw.activate_game_mode() if enabled else self.hw.deactivate_game_mode()
+        return self._json_response(result)
 
     @dbus.service.method(DBUS_IFACE, in_signature="sb", out_signature="s",
-                         sender_keyword="sender")
-    def SetUsbWake(self, device, enabled, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetUsbWake(self, device, enabled, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetUsbWake(device, bool(enabled), sender=sender), reply, failure, mutating=True)
+
+    def _do_SetUsbWake(self, device, enabled, sender=None):
         if not self._authorize("set_usb_wake", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         ok = self.hw.set_usb_wake(device, enabled)
         return self._json_response({"success": ok})
 
     @dbus.service.method(DBUS_IFACE, in_signature="s", out_signature="s",
-                         sender_keyword="sender")
-    def SetAudioEnhancement(self, params_json, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetAudioEnhancement(self, params_json, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetAudioEnhancement(params_json, sender=sender), reply, failure, mutating=True)
+
+    def _do_SetAudioEnhancement(self, params_json, sender=None):
         if not self._authorize("set_audio_enhancement", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        params = json.loads(params_json)
-        noise = params.get("noise_suppression", False)
-        conf = "/etc/pipewire/filter-chain.conf.d/archer-noise-suppress.conf"
-        conf_disabled = conf + ".disabled"
-        try:
-            if noise:
-                if os.path.exists(conf_disabled) and not os.path.exists(conf):
-                    os.rename(conf_disabled, conf)
-            else:
-                if os.path.exists(conf):
-                    os.rename(conf, conf_disabled)
-            self.hw.settings.set("audio_enhancement", {"noise_suppression": noise})
-            # Tell the GUI to restart pipewire in the calling user's
-            # session. The daemon runs as root, so `systemctl --user
-            # restart pipewire` here would target root's user manager
-            # and never touch the actual user's pipewire instance.
-            self.AudioEnhancementChanged(noise)
-            return self._json_response({"success": True, "data": {"noise_suppression": noise}})
-        except OSError as e:
-            return self._json_response({"success": False, "error": str(e)})
+        params = object_request(params_json, "audio_enhancement")
+        noise = params["noise_suppression"]
+        result = self.hw.set_audio_enhancement(noise)
+        if result.get("success"):
+            GLib.idle_add(self.AudioEnhancementChanged, noise)
+        return self._json_response(result)
 
     @dbus.service.method(DBUS_IFACE, in_signature="s", out_signature="s",
-                         sender_keyword="sender")
-    def SetModprobeParameter(self, param, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetModprobeParameter(self, param, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetModprobeParameter(param, sender=sender), reply, failure, mutating=True)
+
+    def _do_SetModprobeParameter(self, param, sender=None):
         if not self._authorize("set_modprobe_parameter", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
         if param not in ("nitro_v4", "predator_v4", "enable_all"):
             return self._json_response({"success": False, "error": f"Invalid parameter: {param}"})
-        ok = self.hw.set_modprobe_parameter(param)
-        return self._json_response({"success": ok})
+        return self._json_response(self.hw.set_modprobe_parameter(param))
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def RemoveModprobeParameter(self, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def RemoveModprobeParameter(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_RemoveModprobeParameter(sender=sender), reply, failure, mutating=True)
+
+    def _do_RemoveModprobeParameter(self, sender=None):
         if not self._authorize("remove_modprobe_parameter", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        ok = self.hw.remove_modprobe_parameter()
-        return self._json_response({"success": ok})
+        return self._json_response(self.hw.remove_modprobe_parameter())
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def RestartDaemon(self, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def RestartDaemon(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_RestartDaemon(sender=sender), reply, failure, mutating=True)
+
+    def _do_RestartDaemon(self, sender=None):
         if not self._authorize("restart_daemon", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        threading.Thread(target=self.hw.restart_daemon, daemon=True).start()
-        return self._json_response({"success": True})
+        return self._json_response(self.hw.restart_daemon())
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
-                         sender_keyword="sender")
-    def RestartDriversAndDaemon(self, sender=None):
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def RestartDriversAndDaemon(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_RestartDriversAndDaemon(sender=sender), reply, failure, mutating=True)
+
+    def _do_RestartDriversAndDaemon(self, sender=None):
         if not self._authorize("restart_drivers_and_daemon", sender):
             return self._json_response({"success": False, "error": "Authorization denied"})
-        threading.Thread(target=self.hw.restart_drivers_and_daemon, daemon=True).start()
-        return self._json_response({"success": True})
+        return self._json_response(self.hw.restart_drivers_and_daemon())
 
     # --- D-Bus Signals ---
 

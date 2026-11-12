@@ -57,6 +57,9 @@ SAFETY
 import ctypes
 import fcntl
 import os
+import json
+import struct
+import sys
 import signal
 import threading
 import time
@@ -228,6 +231,22 @@ def available():
         return False
 
 
+def _open_verified():
+    """Verify the opened fd, closing the sysfs discovery/node reuse race."""
+    fd = os.open(_resolve(), os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW)
+    try:
+        info = bytearray(8)
+        request = (_IOC_READ << 30) | (8 << 16) | (ord('H') << 8) | 0x03
+        fcntl.ioctl(fd, request, info, True)  # HIDIOCGRAWINFO
+        bus, vendor, product = struct.unpack('IHH', info)
+        if (bus, vendor, product) != (0x18, 0x0CF2, 0x5130):
+            raise EneError('Opened HID identity differs from the ENE controller')
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
 def _write_report(fd, report_id, payload):
     expected = _REPORT_LEN[report_id]
     if len(payload) != expected:
@@ -240,6 +259,8 @@ def _write_report(fd, report_id, payload):
     # setitimer only works on the main thread; the daemon serves D-Bus from a
     # GLib main loop, so guard it rather than crashing on a worker thread.
     armed = threading.current_thread() is threading.main_thread()
+    if not armed:
+        raise EneError("ENE writes must run in the isolated helper main thread")
     if armed:
         signal.signal(signal.SIGALRM, _alarm)
         signal.setitimer(signal.ITIMER_REAL, IOCTL_TIMEOUT_S)
@@ -300,7 +321,7 @@ def set_per_zone(zone1, zone2, zone3, zone4, brightness):
     colours = [_hex_to_rgb(z) for z in (zone1, zone2, zone3, zone4)]
     _check("brightness", brightness, 0, 100)
     with _lock:
-        fd = os.open(_resolve(), os.O_RDWR)
+        fd = _open_verified()
         try:
             for index, rgb in enumerate(colours):
                 _apply(fd, DEV_KEYBOARD, MODE_STATIC, brightness, rgb,
@@ -322,7 +343,7 @@ def set_effect(effect_index, brightness, red, green, blue,
         raise EneError(f"effect index out of range: {effect_index}")
     mode = EFFECTS[effect_index][1]
     with _lock:
-        fd = os.open(_resolve(), os.O_RDWR)
+        fd = _open_verified()
         try:
             _apply(fd, DEV_KEYBOARD, mode, brightness,
                    (red, green, blue), ZONE_ALL,
@@ -334,7 +355,7 @@ def set_effect(effect_index, brightness, red, green, blue,
 
 def set_off():
     with _lock:
-        fd = os.open(_resolve(), os.O_RDWR)
+        fd = _open_verified()
         try:
             _apply(fd, DEV_KEYBOARD, MODE_OFF, 0, (0, 0, 0), ZONE_ALL)
         finally:
@@ -345,7 +366,7 @@ def set_off():
 def set_logo(colour, brightness=100):
     """Light the lid logo a solid colour. Pass None to switch it off."""
     with _lock:
-        fd = os.open(_resolve(), os.O_RDWR)
+        fd = _open_verified()
         try:
             if colour is None:
                 _apply(fd, DEV_LOGO, LOGO_OFF, 0, (0, 0, 0), 0xFFFF)
@@ -360,7 +381,7 @@ def set_logo(colour, brightness=100):
 def set_button(colour, brightness=100):
     """Light the performance-mode button LED. Pass None to switch it off."""
     with _lock:
-        fd = os.open(_resolve(), os.O_RDWR)
+        fd = _open_verified()
         try:
             if colour is None:
                 _apply(fd, DEV_BUTTON, BUTTON_OFF, 0, (0, 0, 0), 0xFFFF)
@@ -385,3 +406,19 @@ def set_button_for_profile(profile, brightness=100, overrides=None):
     if colour is None:
         return False
     return set_button(colour, brightness)
+
+
+if __name__ == '__main__':
+    operations = {name: globals()[name] for name in
+                  ('set_per_zone', 'set_effect', 'set_off', 'set_logo', 'set_button', 'set_button_for_profile')}
+    try:
+        operation, arguments = sys.argv[1:]
+        if operation not in operations:
+            raise EneError('Unsupported lighting operation')
+        values = json.loads(arguments)
+        if not isinstance(values, list):
+            raise EneError('Expected an argument list')
+        print(json.dumps({'success': bool(operations[operation](*values))}))
+    except (EneError, OSError, ValueError, TypeError) as error:
+        print(json.dumps({'success': False, 'error': str(error)}))
+        raise SystemExit(1)

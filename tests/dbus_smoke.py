@@ -66,9 +66,14 @@ class FakeHardware:
     """Minimal stand-in. Returns plausible scalar telemetry every call."""
     features = ["smoke"]
     settings = FakeSettings()
+    profile = 'balanced'
 
     def get_monitoring_data(self):
-        return {"cpu_temp": 42, "gpu_temp": 38, "battery_info": {"present": False}}
+        return {"cpu_temp": 42, "gpu_temp": 38, "battery_info": {"present": False}, "thermal_profile": self.profile}
+
+    def set_thermal_profile(self, profile):
+        self.profile = profile
+        return True, None
 
     def get_all_settings(self):
         return {"features": list(self.features), "battery_info": {"present": False}}
@@ -122,6 +127,36 @@ def main():
             _fail(f"Asynchronous firmware query failed: {firmware_result}")
         print("OK: firmware query leaves Ping responsive")
 
+        authorizing, release = threading.Event(), threading.Event()
+
+        def slow_auth(*_args):
+            authorizing.set()
+            return release.wait(5)
+        archer_dbus._check_polkit = slow_auth
+        changed, changed_results = threading.Event(), []
+        iface.SetThermalProfile('performance',
+                                reply_handler=lambda result: (changed_results.append(json.loads(str(result))), changed.set()),
+                                error_handler=lambda error: (changed_results.append({'error': str(error)}), changed.set()))
+        if not authorizing.wait(2):
+            _fail('Authorization did not start')
+        started = time.monotonic()
+        iface.Ping(timeout=2)
+        if time.monotonic() - started > .8:
+            _fail('Authorization blocked Ping')
+        busy = json.loads(str(iface.SetThermalProfile('balanced', timeout=2)))
+        if busy.get('success') or 'busy' not in busy.get('error', ''):
+            _fail(f'Concurrent mutation was not bounded: {busy}')
+        if not json.loads(str(iface.GetAllSettings(timeout=2))).get('success'):
+            _fail('Authorization blocked settings')
+        release.set()
+        if not changed.wait(3) or not changed_results[0].get('success'):
+            _fail(f'Authorized mutation failed: {changed_results}')
+        print('OK: slow authorization leaves reads responsive and rejects concurrent writes')
+        archer_dbus._check_polkit = lambda *_: False
+        denied = json.loads(str(iface.SetThermalProfile('balanced', timeout=2)))
+        if denied.get('success') or svc.hw.profile != 'performance':
+            _fail('Denied authorization changed hardware')
+
         introspect = dbus.Interface(proxy, "org.freedesktop.DBus.Introspectable")
         xml = str(introspect.Introspect(timeout=5))
         root = ET.fromstring(xml)
@@ -165,8 +200,17 @@ def main():
             _fail("TelemetryUpdated signal never fired within 5s")
         print("OK: TelemetryUpdated fired")
 
+        external_profile = threading.Event()
+        proxy.connect_to_signal('ProfileChanged', lambda profile: external_profile.set() if str(profile) == 'quiet' else None,
+                                dbus_interface=archer_dbus.DBUS_IFACE)
+        svc.hw.profile = 'quiet'
+        if not external_profile.wait(5):
+            _fail('External WMI-only profile change was not published')
+        print('OK: external profile changes propagate without an ENE controller')
+
         print("PASS: D-Bus smoke complete")
     finally:
+        svc.close()
         main_loop.quit()
         # Restore in case dbus is re-used by other tests in the same process.
         dbus.SystemBus = _orig_system_bus

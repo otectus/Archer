@@ -168,6 +168,45 @@ class GuiTests(unittest.TestCase):
         self.assertTrue(self.window.pages['audio'].noise.values()['enabled'])
         self.assertEqual(self.window.pages['display'].configured.get_subtitle(), 'Hybrid')
 
+    def test_sidebar_toggle_persists_without_changing_page_or_drafts(self):
+        self.window.navigate('keyboard')
+        page = self.window.pages['keyboard']
+        page.zones.fields['zone1'][1]('#123456')
+        self.window.sidebar_hide_button.emit('clicked')
+        self.assertFalse(self.window.split.get_show_sidebar())
+        self.assertTrue(self.window.sidebar_button.get_visible())
+        self.assertFalse(Preferences(self.window.preferences.path).data['sidebar_visible'])
+        self.assertEqual(page.zones.values()['zone1'], '#123456')
+        self.window.activate_action('win.toggle-sidebar', None)
+        self.assertTrue(self.window.split.get_show_sidebar())
+        self.assertTrue(Preferences(self.window.preferences.path).data['sidebar_visible'])
+        self.assertEqual(self.window.navigation['devices'].get_visible_page().get_tag(), 'keyboard')
+        self.assertEqual(self.client.calls, [])
+
+    def test_overlay_navigation_preserves_desktop_sidebar_preference(self):
+        self.window.toggle_sidebar()
+        self.window.split.set_collapsed(True)
+        self.window.toggle_sidebar()
+        self.assertTrue(self.window.split.get_show_sidebar())
+        self.window.navigate('battery')
+        self.assertFalse(self.window.split.get_show_sidebar())
+        self.window.split.set_collapsed(False)
+        self.assertFalse(self.window.split.get_show_sidebar())
+        self.window.toggle_sidebar()
+        self.window.split.set_collapsed(True)
+        self.window.split.set_collapsed(False)
+        self.assertTrue(self.window.split.get_show_sidebar())
+
+    def test_wmi_effect_choices_submit_stable_id(self):
+        self.client.data['keyboard_effects'] = [{'id': 'static', 'label': 'Static'}, {'id': 'wave', 'label': 'Wave'}]
+        self.load()
+        page = self.window.pages['keyboard']
+        page.effects.fields['mode'][1](1)
+        values = {**page.effects.values(), 'color': '#123456'}
+        page._save_effect(values)
+        self.assertEqual(self.client.calls[-1][0], 'set_four_zone_mode')
+        self.assertEqual(self.client.calls[-1][1][0], 'wave')
+
     def test_failed_immediate_change_reverts(self):
         form = self.window.pages['battery'].limit
         self.client.response = {'success': False, 'error': 'Authorization denied'}
@@ -275,6 +314,16 @@ class GuiTests(unittest.TestCase):
         drain(lambda: self.state.status == 'Connected', timeout=2)
         self.assertEqual(form.feedback.get_label(), 'Service connected.')
 
+    def test_recovery_completion_is_checked_after_reconnection(self):
+        self.state.expect_restart(3, 'request-1')
+        self.state._loaded({**SETTINGS, 'recovery': {'request': 'request-1', 'status': 'running'}},
+                           None, '', self.state._generation, True)
+        self.assertEqual(self.state.status, 'Restarting')
+        self.state._loaded({**SETTINGS, 'recovery': {'request': 'request-1', 'status': 'failed', 'error': 'Driver unload failed'}},
+                           None, '', self.state._generation, True)
+        self.assertEqual(self.state.status, 'Connected')
+        self.assertEqual(self.state.settings['recovery']['status'], 'failed')
+
     def test_stale_inflight_read_cannot_overwrite_new_state(self):
         stale = self.client.get_all_settings()
         stale['battery_limiter'] = False
@@ -291,6 +340,10 @@ class GuiTests(unittest.TestCase):
         self.assertFalse(self.window.pages['battery'].calibration.allowed)
         self.assertTrue(self.window.pages['performance'].profile_rows['performance'][0].get_sensitive())
         self.assertEqual(self.client.calls, [])
+        self.window.pages['performance'].monitor(self.state, {**LIVE, 'power_source_ac': None})
+        self.window.pages['battery'].monitor(self.state, {**LIVE, 'power_source_ac': None})
+        self.assertEqual(self.window.pages['performance'].power.get_subtitle(), 'Power source unavailable')
+        self.assertFalse(self.window.pages['battery'].calibration.allowed)
 
     def test_app_dialogs_open_without_hardware_calls(self):
         self.window.present()
@@ -299,6 +352,34 @@ class GuiTests(unittest.TestCase):
             drain(timeout=.02)
             dialog.force_close()
         self.assertEqual(self.client.calls, [])
+
+    def test_login_startup_switch_persists_and_reverts_on_failure(self):
+        from archer.autostart import Autostart
+
+        def descendants(widget):
+            yield widget
+            child = widget.get_first_child()
+            while child:
+                yield from descendants(child)
+                child = child.get_next_sibling()
+
+        with patch.dict(os.environ, XDG_CONFIG_HOME=self.temp.name, XDG_CONFIG_DIRS=self.temp.name):
+            self.window.present()
+            dialog = self.window.show_preferences()
+            startup = next(widget for widget in descendants(dialog)
+                           if isinstance(widget, Adw.SwitchRow) and widget.get_title() == 'Start Archer at login')
+            self.assertFalse(startup.get_active())
+            startup.set_active(True)
+            self.assertTrue(Autostart().is_enabled())
+            startup.set_active(False)
+            self.assertFalse(Autostart().is_enabled())
+            with patch.object(Autostart, 'set_enabled', side_effect=PermissionError('read-only')), \
+                    patch.object(self.window, 'add_toast') as toast:
+                startup.set_active(True)
+                self.assertFalse(startup.get_active())
+                toast.assert_called_once()
+            dialog.force_close()
+            self.assertEqual(self.client.calls, [])
 
     def test_tray_icon_has_a_legible_fallback(self):
         from archer.tray import _load_icon_pixmap
@@ -477,6 +558,8 @@ class GuiTests(unittest.TestCase):
             for width, height in ((360, 600), (768, 700), (1100, 760), (1440, 900)):
                 self.window.set_default_size(width, height)
                 drain(timeout=.3)
+                if not self.window.split.get_collapsed() and not self.window.split.get_show_sidebar():
+                    self.window.toggle_sidebar()
                 # Illustrative simulated history; no real sensors or setters are used.
                 history = self.window.pages['overview'].history
                 history.clear()
@@ -511,6 +594,19 @@ class GuiTests(unittest.TestCase):
                     self.assertLessEqual(self.window.pages[name].get_hadjustment().get_upper(),
                                          self.window.pages[name].get_hadjustment().get_page_size() + 1)
                 if width in (360, 1100):
+                    self.window.navigate('overview')
+                    visible = self.window.split.get_show_sidebar()
+                    self.window.toggle_sidebar()
+                    drain(timeout=.1)
+                    paintable = Gtk.WidgetPaintable.new(self.window)
+                    snapshot = Gtk.Snapshot.new()
+                    actual_width, actual_height = self.window.get_width(), self.window.get_height()
+                    paintable.snapshot(snapshot, actual_width, actual_height)
+                    bounds = Graphene.Rect().init(0, 0, actual_width, actual_height)
+                    texture = self.window.get_native().get_renderer().render_texture(snapshot.to_node(), bounds)
+                    texture.save_to_png(str(output / f'sidebar-toggled-{mode}-{width}{"-contrast" if HIGH_CONTRAST else ""}{"-large" if LARGE_TEXT else ""}.png'))
+                    if self.window.split.get_show_sidebar() != visible:
+                        self.window.toggle_sidebar()
                     for name, show in (('preferences', self.window.show_preferences), ('about', self.window.show_about),
                                        ('shortcuts', self.window.show_shortcuts),
                                        ('graphics-confirmation', self.window.pages['display'].graphics.submit)):

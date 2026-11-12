@@ -18,23 +18,26 @@ module_check_installed() {
 }
 
 module_install() {
-    local fix_count=0
+    local fix_count=0 config
 
     # Strategy 1: AMD pinctrl module ordering
     if [[ "$CPU_VENDOR" = "AuthenticAMD" ]]; then
         log "AMD system detected. Applying pinctrl_amd load order fix..."
-        run_sudo tee "$_TOUCHPAD_AMD_CONF" > /dev/null <<'EOF'
+        config=$(cat <<'EOF'
 # Ensure pinctrl_amd loads before i2c_hid_acpi to fix touchpad detection
 # Installed by Archer Compatibility Suite
 softdep i2c_hid_acpi pre: pinctrl_amd
 EOF
+)
+        module_config "$_TOUCHPAD_AMD_CONF" "$config" || return 1
         INSTALLED_FILES+=" $_TOUCHPAD_AMD_CONF"
         fix_count=$((fix_count + 1))
     fi
 
     # Strategy 2: Module reload service for intermittent failures
     log "Creating touchpad module reload service..."
-    run_sudo tee "$_TOUCHPAD_SERVICE" > /dev/null <<'SERVICE_EOF'
+    config=$(cat <<'SERVICE_EOF'
+# Installed by Archer Compatibility Suite
 [Unit]
 Description=Reload I2C HID for touchpad detection
 After=multi-user.target
@@ -48,14 +51,16 @@ RemainAfterExit=yes
 [Install]
 WantedBy=multi-user.target
 SERVICE_EOF
+)
+    module_config "$_TOUCHPAD_SERVICE" "$config" || return 1
 
-    run_sudo systemctl daemon-reload
-    run_sudo systemctl enable touchpad-fix.service
+    run_sudo systemctl daemon-reload || return 1
+    module_service touchpad-fix.service enable || return 1
     INSTALLED_FILES+=" $_TOUCHPAD_SERVICE"
     fix_count=$((fix_count + 1))
 
     # Strategy 3: GRUB kernel parameters
-    add_grub_params "i8042.reset i8042.nomux"
+    add_grub_params "i8042.reset i8042.nomux" || return 1
     fix_count=$((fix_count + 1))
 
     log "Applied $fix_count touchpad fix(es). A reboot is required."
@@ -66,17 +71,17 @@ module_uninstall() {
     log "Removing touchpad fixes..."
 
     if [[ -f "$_TOUCHPAD_AMD_CONF" ]]; then
-        run_sudo rm -f "$_TOUCHPAD_AMD_CONF"
+        module_remove_config "$_TOUCHPAD_AMD_CONF" || return 1
     fi
 
     if [[ -f "$_TOUCHPAD_SERVICE" ]]; then
-        run_sudo systemctl disable touchpad-fix.service 2>/dev/null || true
-        run_sudo rm -f "$_TOUCHPAD_SERVICE"
-        run_sudo systemctl daemon-reload
+        module_restore_services || return 1
+        module_remove_config "$_TOUCHPAD_SERVICE" || return 1
+        run_sudo systemctl daemon-reload || return 1
     fi
 
     # Revert GRUB params
-    remove_grub_params "i8042.reset i8042.nomux"
+    remove_grub_params "i8042.reset i8042.nomux" || return 1
 }
 
 module_verify() {
