@@ -1,6 +1,28 @@
 --- a/src/linuwu_sense.c
 +++ b/src/linuwu_sense.c
-@@ -967,7 +967,9 @@
+@@ -18,6 +18,9 @@
+  #include <linux/types.h>
+  #include <linux/dmi.h>
+  #include <linux/backlight.h>
++ #ifndef BACKLIGHT_POWER_ON
++ #define BACKLIGHT_POWER_ON FB_BLANK_UNBLANK
++ #endif
+  #include <linux/leds.h>
+  #include <linux/platform_device.h>
+  #include <linux/platform_profile.h>
+@@ -34,7 +37,11 @@
+  #include <acpi/video.h>
+  #include <linux/hwmon.h>
+  #include <linux/units.h>
++ #if __has_include(<linux/unaligned.h>)
+  #include <linux/unaligned.h>
++ #else
++ #include <asm/unaligned.h>
++ #endif
+  #include <linux/bitfield.h>
+  #include <linux/bitmap.h>
+  #include <linux/hid.h>
+@@ -1314,7 +1321,9 @@
       {}
   };
   
@@ -8,27 +30,30 @@
   static struct device *platform_profile_device;
 + #endif
   static bool platform_profile_support;
+ static bool fan_interface_ready = true;
   
-  /*
-@@ -2350,22 +2352,60 @@
+@@ -2926,22 +2935,64 @@
   
   static acpi_status battery_health_set(u8 function, u8 function_status);
   
 + #ifdef ARCHER_LEGACY_PLATFORM_PROFILE
 + static int archer_profile_get(struct platform_profile_handler *handler,
-+                              enum platform_profile_option *profile)
++                               enum platform_profile_option *profile)
 + {
 +     return acer_predator_v4_platform_profile_get(NULL, profile);
 + }
++
 + static int archer_profile_set(struct platform_profile_handler *handler,
-+                              enum platform_profile_option profile)
++                               enum platform_profile_option profile)
 + {
 +     return acer_predator_v4_platform_profile_set(NULL, profile);
 + }
++
 + static struct platform_profile_handler archer_profile = {
 +     .profile_get = archer_profile_get,
 +     .profile_set = archer_profile_set,
 + };
++
 + static void archer_profile_remove(void *unused)
 + {
 +     platform_profile_support = false;
@@ -48,14 +73,15 @@
       const int max_retries = 10;
       int delay_ms = 100;
 + #endif
-      if (native_platform_profile) {
-          pr_info("Preserving native platform-profile provider; gaming profile writes disabled\n");
-          return 0;
-      }
-      if (!quirks->predator_v4 && !quirks->nitro_sense && !quirks->nitro_v4)
+     if (native_platform_profile) {
+         pr_info("Preserving native platform-profile provider; gaming profile writes disabled\n");
+         return 0;
+     }
+     if (quirks->predator_v4 != 1 && quirks->nitro_sense != 1 && !quirks->nitro_v4)
           return 0;
 + #ifdef ARCHER_LEGACY_PLATFORM_PROFILE
 +     int err = acer_predator_v4_platform_profile_probe(NULL, archer_profile.choices);
++
 +     if (err) {
 +         pr_warn("Platform profile probe failed: %d; keeping other controls available\n", err);
 +         return 0;
@@ -71,7 +97,7 @@
       for (int attempt = 1; attempt <= max_retries; attempt++) {
           platform_profile_device = devm_platform_profile_register(
               &pdev->dev, "acer-wmi", NULL, &acer_predator_v4_platform_profile_ops);
-@@ -2382,6 +2422,7 @@
+@@ -2958,6 +3009,7 @@
           }
       }
       pr_warn("Platform profile setup failed. Continuing to load without profile support.\n");
@@ -79,7 +105,20 @@
       platform_profile_support = false; /* Disable platform profile support if unavailable. */
       
       return 0;
-@@ -2464,7 +2505,11 @@
+@@ -3027,8 +3079,12 @@
+                  }
+              }
+ 
++ #ifdef ARCHER_LEGACY_PLATFORM_PROFILE
++             platform_profile_notify();
++ #else
+              if (platform_profile_device)
+                  platform_profile_notify(platform_profile_device);
++ #endif
+ 
+              return 0;
+          }
+@@ -3094,7 +3150,11 @@
           if (tp != acer_predator_v4_max_perf)
               last_non_turbo_profile = tp;
   
@@ -91,3 +130,45 @@
       }
   
       return 0;
+@@ -3422,6 +3482,20 @@
+      }
+  }
+ 
++ #ifdef ARCHER_LEGACY_WMI_NOTIFY
++ static void archer_wmi_notify(u32 value, void *context)
++ {
++     struct acpi_buffer output = { ACPI_ALLOCATE_BUFFER, NULL };
++     acpi_status status = wmi_get_event_data(value, &output);
++
++     if (ACPI_SUCCESS(status))
++         acer_wmi_notify(output.pointer, context);
++     kfree(output.pointer);
++ }
++ #else
++ #define archer_wmi_notify acer_wmi_notify
++ #endif
++
+ static acpi_status __init
+  wmid3_set_function_mode(struct func_input_params *params,
+              struct func_return_value *return_value)
+@@ -3582,7 +3656,7 @@
+          input_set_capability(acer_wmi_input_dev, EV_SW, SW_TABLET_MODE);
+  
+      status = wmi_install_notify_handler(ACERWMID_EVENT_GUID,
+-                         acer_wmi_notify, NULL);
++                         archer_wmi_notify, NULL);
+      if (ACPI_FAILURE(status)) {
+          err = -EIO;
+          goto err_free_dev;
+@@ -5227,7 +5301,11 @@
+          .pm = &acer_pm,
+      },
+      .probe = acer_platform_probe,
++ #ifdef ARCHER_LEGACY_PLATFORM_REMOVE
++     .remove_new = acer_platform_remove,
++ #else
+      .remove = acer_platform_remove,
++ #endif
+      .shutdown = acer_platform_shutdown,
+  };
+ 

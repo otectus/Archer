@@ -12,9 +12,26 @@ _DRIVER_ETC="/etc"
 _DRIVER_PROFILE_CLASS="/sys/class/platform-profile"
 _DRIVER_MKINITCPIO="/usr/bin/mkinitcpio"
 _DRIVER_DRACUT="/usr/bin/dracut"
+_DRIVER_BOOT_ROOT="/"
+_DRIVER_BOOT_HELPER="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/scripts/archer-boot.py"
+
+_driver_native_fans() {
+    local hwmon name owner
+    for hwmon in "${KERNEL_SYS_ROOT:-/sys}"/class/hwmon/hwmon*; do
+        [[ -r "$hwmon/name" ]] || continue
+        read -r name < "$hwmon/name" || continue
+        [[ "$name" == acer || "$name" == acer_wmi ]] || continue
+        owner=$(readlink -f "$hwmon/device/driver/module") || continue
+        [[ "${owner##*/}" == acer_wmi ]] || continue
+        [[ -r "$hwmon/pwm1" && -w "$hwmon/pwm1" && -r "$hwmon/pwm1_enable" && -w "$hwmon/pwm1_enable" ]] && return 0
+    done
+    return 1
+}
 
 module_detect() {
-    case "$MODEL_FAMILY" in nitro|predator|helios|triton) return 0 ;; *) return 1 ;; esac
+    local sysroot=${KERNEL_SYS_ROOT:-/sys}
+    [[ -d "$sysroot/bus/wmi/devices" || -d "$sysroot/devices/platform/acer-wmi" ]] || return 1
+    return 0
 }
 
 module_check_installed() {
@@ -44,10 +61,16 @@ _driver_native_profile() {
 }
 
 _driver_refresh_initramfs() {
-    kernel_refresh_initramfs "$_DRIVER_ETC" "$_DRIVER_MKINITCPIO" "$_DRIVER_DRACUT"
+    run_sudo /usr/bin/python3 "$_DRIVER_BOOT_HELPER" --root "$_DRIVER_BOOT_ROOT" rebuild
 }
 
 module_install() {
+    if _driver_native_fans && [[ "${ARCHER_FORCE_EXTENSION:-0}" != 1 ]]; then
+        log "Native acer-wmi hwmon fan controls are available; retaining the working kernel owner."
+        log "Set ARCHER_FORCE_EXTENSION=1 only for a reviewed feature that native acer-wmi cannot provide."
+        MODULE_SKIPPED=1
+        return 0
+    fi
     EXTERNAL_SRC_ROOT="$_DRIVER_SRC_ROOT" EXTERNAL_PACKAGE="$_DRIVER_PACKAGE"
     KERNEL_MODULES_ROOT="$_DRIVER_MODULES_ROOT"
     external_install_dkms || return 1
@@ -58,7 +81,8 @@ module_install() {
     fi
     # Keep an existing native-provider setting across reinstalls while its provider
     # is temporarily unavailable. Uninstall removes this Archer-owned file.
-    archer_write_config "$_DRIVER_ETC/modprobe.d/blacklist-acer-wmi.conf" 'blacklist acer_wmi' || return 1
+    archer_write_config "$_DRIVER_ETC/modprobe.d/blacklist-acer-wmi.conf" '# Archer extension selected after native capability comparison
+blacklist acer_wmi' || return 1
     archer_write_config "$_DRIVER_ETC/modules-load.d/archer-linuwu-sense.conf" "$DRIVER_MODULE" || return 1
     if ! _driver_refresh_initramfs; then
         warn "Initramfs refresh failed. Repair/retry it before rebooting; the new DKMS source and configuration are retained."

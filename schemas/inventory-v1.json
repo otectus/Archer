@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Archer inventory v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "generation",
+    "devices",
+    "environment",
+    "dmi",
+    "unavailable_groups",
+    "sleep"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "generation": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "devices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "key",
+          "kind",
+          "node",
+          "topology",
+          "driver",
+          "modalias",
+          "attributes",
+          "interfaces",
+          "identity_unique"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "node": {
+            "type": "string"
+          },
+          "topology": {
+            "type": "string"
+          },
+          "driver": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "modalias": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "attributes": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "identity_unique": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "environment": {
+      "type": "object",
+      "required": [
+        "distribution",
+        "architecture",
+        "kernel",
+        "init"
+      ],
+      "properties": {
+        "distribution": {
+          "type": "object"
+        },
+        "architecture": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kernel": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "init": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "dmi": {
+      "type": "object"
+    },
+    "unavailable_groups": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "sleep": {
+      "type": "object"
+    }
+  }
+}

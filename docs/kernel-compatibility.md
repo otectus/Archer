@@ -6,7 +6,11 @@ versions. This is a forward-compatibility policy, **not a promise that an
 unreleased kernel or every Acer firmware works**. Kernel internal APIs can change
 at any release; the build matrix and explicit failures make those changes visible.
 
-## Upstream audit (2026-09-10)
+## 2.1 source and build targets
+
+The application targets Archer 2.1.0. Linuwu-Sense is pinned at `4483b6c38b9bb963ac9ada9ca476578e0c63cc08` as `1.0.archer4`. The battery extension retains version `0.1.0.archer2`. The stable patch preserves Archer's input, firmware reply, fan restoration, probe and state-handling changes. Newly introduced protocols require separate testing. Review the [driver patch record](../driver/linuwu-sense/README.md) and [2.1 validation record](implementation-2.1.md).
+
+## Historical upstream audit (2026-09-10)
 
 Issue [Archer #9](https://github.com/otectus/Archer/issues/9) requests kernel 7.2
 support. The concrete compile failure is independently reported in
@@ -151,7 +155,7 @@ the final 40 lines on a build failure. Preserve logs before removing DKMS entrie
 After repairing headers/toolchains, rerun Archer or rebuild the specific target:
 
 ```sh
-sudo dkms install -m linuwu-sense -v 1.0.archer3 -k YOUR_INSTALLED_KERNEL_RELEASE
+sudo dkms install -m linuwu-sense -v 1.0.archer4 -k YOUR_INSTALLED_KERNEL_RELEASE
 ```
 
 A compiler error is different from Secure Boot. `Key was rejected by service`
@@ -163,7 +167,7 @@ WMI or firmware capabilities rather than an Archer daemon outage.
 
 ## Validation evidence
 
-Local compile checks (no modules installed or loaded by these tests):
+The following table records the previous pin before 2.1. See the new validation record above for the rebased driver.
 
 | Header set | Compiler | Linuwu | acer-wmi-battery | v4l2loopback |
 | --- | --- | --- | --- | --- |
@@ -198,6 +202,5 @@ git diff --check
 For extracted headers set `KERNEL_MODULES_ROOT` to the extracted
 `usr/lib/modules` directory. The compile script accepts `LINUWU_TEST_REPO` and
 `BATTERY_TEST_REPO` for existing offline clones; it prepares each source twice to
-check idempotency before building. Logs were captured locally under
-`/tmp/archer-final-build-RELEASE.log`. The validation intentionally did not modify
+check idempotency before building. The dated 2.1 results and exact kernel variants are in the [implementation record](implementation-2.1.md). The validation intentionally did not modify
 host DKMS registrations, load modules or change Acer hardware state.

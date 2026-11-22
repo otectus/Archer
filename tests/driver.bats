@@ -16,9 +16,19 @@ setup() {
     _DRIVER_PACKAGE="$BATS_TEST_TMPDIR/package"
     _DRIVER_MKINITCPIO="$BATS_TEST_TMPDIR/mkinitcpio"
     _DRIVER_DRACUT="$BATS_TEST_TMPDIR/dracut"
+    _DRIVER_BOOT_ROOT="$BATS_TEST_TMPDIR"
+    _DRIVER_BOOT_HELPER="$REPO_ROOT/scripts/archer-boot.py"
     has_cmd() { return 1; }
     run_sudo_timeout() { shift; run_sudo "$@"; }
-    mkdir -p "$_DRIVER_SRC_ROOT" "$_DRIVER_PACKAGE" "$_DRIVER_MODULES_ROOT/7.0.11-zen/build"
+    mkdir -p "$_DRIVER_SRC_ROOT" "$_DRIVER_PACKAGE" "$_DRIVER_MODULES_ROOT/7.0.11-zen/build" \
+        "$_DRIVER_ETC/mkinitcpio.d" "$BATS_TEST_TMPDIR/usr/bin" "$BATS_TEST_TMPDIR/boot"
+    printf '%s\n' "default_image='/boot/initramfs-linux-zen.img'" > "$_DRIVER_ETC/mkinitcpio.d/linux-zen.preset"
+    cat > "$BATS_TEST_TMPDIR/usr/bin/mkinitcpio" <<MOCK_BOOT
+#!/bin/sh
+echo "\$*" >> "$BATS_TEST_TMPDIR/initramfs.log"
+date +%s%N > "$BATS_TEST_TMPDIR/boot/initramfs-linux-zen.img"
+MOCK_BOOT
+    chmod +x "$BATS_TEST_TMPDIR/usr/bin/mkinitcpio"
     mock_headers 7.0.11-zen
     read_manifest_field() { echo 'linuwu-sense/1.0'; }
     cat > "$_DRIVER_PACKAGE/prepare.sh" <<'PREPARE'
@@ -169,18 +179,16 @@ PREPARE
 }
 
 @test "mkinitcpio rebuilds all presets after boot configuration changes" {
-    mkdir -p "$_DRIVER_ETC/mkinitcpio.d"
-    touch "$_DRIVER_ETC/mkinitcpio.d/linux-zen.preset"
-    printf '#!/bin/sh\necho "$*" >> "%s"\n' "$BATS_TEST_TMPDIR/initramfs.log" > "$_DRIVER_MKINITCPIO"
-    chmod +x "$_DRIVER_MKINITCPIO"
     module_install
     module_uninstall
     [ "$(grep -c -- '-P' "$BATS_TEST_TMPDIR/initramfs.log")" -eq 2 ]
 }
 
 @test "dracut failures are propagated and retain retryable source" {
-    printf '#!/bin/sh\nexit 1\n' > "$_DRIVER_DRACUT"
-    chmod +x "$_DRIVER_DRACUT"
+    rm -f "$_DRIVER_ETC/mkinitcpio.d/linux-zen.preset"
+    touch "$_DRIVER_ETC/dracut.conf"
+    printf '#!/bin/sh\nexit 1\n' > "$BATS_TEST_TMPDIR/usr/bin/dracut"
+    chmod +x "$BATS_TEST_TMPDIR/usr/bin/dracut"
     run module_install
     [ "$status" -ne 0 ]
     [ -f "$_DRIVER_SRC_ROOT/linuwu-sense-$DKMS_VERSION/dkms.conf" ]

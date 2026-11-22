@@ -7,17 +7,17 @@
 MODULE_IDS=("driver" "battery" "gpu" "touchpad" "audio" "wifi" "power" "thermal" "gui" "gamemode" "audio-enhance" "camera-enhance" "firmware")
 MODULE_LABELS=(
     "Linuwu-Sense Kernel Driver"
-    "Battery Charge Limit (80%)"
-    "GPU Switching (EnvyControl)"
-    "Touchpad Fix (I2C HID)"
+    "Battery Charge Policy"
+    "Graphics Driver and Mode Plan"
+    "Targeted Input Repair"
     "Audio Fix (SOF/ALSA)"
-    "WiFi/Bluetooth Troubleshooting"
-    "Power Management (TLP)"
+    "Targeted Connectivity Repair"
+    "Power Policy Integration"
     "Kernel Thermal Profiles"
     "Archer GUI (Control Panel)"
     "Game Mode Support"
     "Audio Enhancement (Noise Suppression)"
-    "Loopback Camera Setup (External Producer Required)"
+    "Virtual Camera Output and Session Effects"
     "Firmware Update Advisor"
 )
 

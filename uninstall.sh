@@ -13,6 +13,54 @@ source "$SCRIPT_DIR/lib/modules.sh"
 source "$SCRIPT_DIR/lib/detect.sh"
 source "$SCRIPT_DIR/lib/manifest.sh"
 
+TRANSACTION_STARTED=0
+TRANSACTION_MUTATING=0
+TRANSACTION_COMPLETE=0
+
+begin_uninstall_transaction() {
+    [[ "$DRY_RUN" -eq 0 ]] || return 0
+    local plan approval="interactive"
+    plan=$(mktemp) || return 1
+    [[ "$NO_CONFIRM" -eq 0 ]] || approval="no-confirm"
+    python3 - "$plan" "$1" "$INSTALLER_VERSION" <<'PY'
+import json, sys
+path, modules, version = sys.argv[1:]
+with open(path, 'w') as stream:
+    json.dump({'schema': 1, 'modules': modules.split(), 'installer_version': version,
+               'operations': ['ownership-aware module cleanup', 'service restoration',
+                              'boot refresh when required', 'manifest removal'],
+               'rollback_limits': ['removed package versions are not automatically restored',
+                                   'administrator-edited files are retained']}, stream, indent=2)
+    stream.write('\n')
+PY
+    run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" begin "$plan" \
+        --approval "$approval" --kind uninstall --resume --supersede || { rm -f "$plan"; return 1; }
+    rm -f "$plan"
+    TRANSACTION_STARTED=1
+    run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" transition preflight-complete \
+        --message "Manifest and module allowlist preflight passed." || return 1
+    run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" transition applying \
+        --message "Beginning ownership-aware removal." || return 1
+    TRANSACTION_MUTATING=1
+}
+
+uninstall_transaction_finish() {
+    local status="$1"
+    [[ "$TRANSACTION_STARTED" -eq 1 ]] || return "$status"
+    if [[ "$status" -eq 0 ]]; then
+        run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" transition verifying --message "Removal stages completed." || return 1
+        run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" transition committed --message "Uninstall completed." || return 1
+        TRANSACTION_COMPLETE=1
+    else
+        run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" transition recovery-required \
+            --message "Uninstall stopped after mutations. Retry cleanup; ownership records and the manifest were retained." || true
+        TRANSACTION_COMPLETE=1
+    fi
+    return "$status"
+}
+
+trap 'status=$?; if [[ "$TRANSACTION_STARTED" -eq 1 && "$TRANSACTION_COMPLETE" -eq 0 ]]; then uninstall_transaction_finish "$status"; fi' EXIT
+
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -50,6 +98,8 @@ if has_manifest; then
     remaining_mods="$INSTALLED_MODS"
     log "Installed modules: $INSTALLED_MODS"
     echo ""
+    confirm "Remove these manifest-owned Archer modules?" || exit 0
+    begin_uninstall_transaction "$INSTALLED_MODS" || exit 1
 
     uninstall_failed=0
     for mod in $INSTALLED_MODS; do
@@ -89,25 +139,44 @@ if has_manifest; then
     done
 
     if [[ "$uninstall_failed" -ne 0 ]]; then
+        uninstall_transaction_finish 1
         exit 1
     fi
     # Remove manifest
     remove_manifest || exit 1
     log "Install manifest removed."
+    uninstall_transaction_finish 0 || exit 1
 
 else
-    warn "No install manifest found. Performing legacy uninstall."
-    warn "This will attempt to remove all known components."
+    warn "No install manifest found. Broad legacy cleanup is disabled because installed packages and services are not proof of Archer ownership."
     echo ""
+
+    legacy_modules=""
+    module_state_root="${ARCHER_MODULE_STATE_ROOT:-/var/lib/archer/module-state}"
+    for state_file in "$module_state_root"/*.json; do
+        [[ -f "$state_file" ]] || continue
+        state_module=${state_file##*/}
+        state_module=${state_module%.json}
+        is_known_module "$state_module" || continue
+        legacy_modules+="${legacy_modules:+ }$state_module"
+    done
+    if [[ -z "$legacy_modules" ]]; then
+        warn "No trusted Archer module-state records were found. Restore the install manifest from backup or review and remove individual resources manually."
+        exit 1
+    fi
+    log "Recoverable owned modules: $legacy_modules"
+    confirm "Remove only these module-state-owned Archer resources?" || exit 0
+    begin_uninstall_transaction "$legacy_modules" || exit 1
 
     # Without a manifest, use each module's ownership-aware cleanup. Do not reset
     # independently installed GPU tools or disable unrelated pre-existing services.
     legacy_failed=0
-    for mod in gui battery driver thermal touchpad audio power gamemode audio-enhance camera-enhance wifi firmware; do
+    for mod in $legacy_modules; do
         source "$SCRIPT_DIR/modules/$mod.sh" || { legacy_failed=1; continue; }
         module_uninstall || legacy_failed=1
     done
     [[ "$legacy_failed" -eq 0 ]] || exit 1
+    uninstall_transaction_finish 0 || exit 1
 
 fi
 

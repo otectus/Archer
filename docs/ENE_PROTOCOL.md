@@ -14,6 +14,10 @@ hardware against a fully dark baseline.
 
 ---
 
+## Archer 2.1 selection
+
+The desktop exposes K5130 effects only through the qualified controller path. The service checks competing users before taking the interface. Standard keyboard LED brightness is separately available through `archer-session lights` and logind. This protocol record applies to the machine and controller described below. The 2.1 update did not add a physically qualified ENE controller. [Compatibility evidence](compatibility-2.1.md)
+
 ## 1. Why this exists
 
 The ACPI-WMI lighting path on this model is **partially implemented in

@@ -28,7 +28,8 @@ bats tests/
 
 # Mock sysfs, fan safety, C harness, and pinned source preparation
 git clone --no-checkout https://github.com/0x7375646F/Linuwu-Sense.git /tmp/linuwu-upstream
-LINUWU_TEST_REPO=/tmp/linuwu-upstream python -m unittest discover -s tests -v
+git clone --no-checkout https://github.com/frederik-h/acer-wmi-battery.git /tmp/battery-upstream
+LINUWU_TEST_REPO=/tmp/linuwu-upstream BATTERY_TEST_REPO=/tmp/battery-upstream python -m unittest discover -s tests -v
 
 # GUI data contracts, interactions, tray D-Bus protocol, and daemon smoke test
 python tests/gui_contract_test.py
@@ -153,3 +154,17 @@ All PRs are checked by GitHub Actions:
 - **Kernel modules**: compile Linuwu-Sense, acer-wmi-battery, and v4l2loopback against rolling Arch/LTS and fixed 6.8/6.12 headers
 
 Ensure all checks pass before submitting a PR. Follow the [deployment guide](docs/deployment.md) for upgrades and release validation; automated tests do not replace desktop and Acer hardware checks.
+
+
+## Release and compatibility evidence
+
+Use `gui/VERSION` for application version changes. Keep capability and export examples consistent with the JSON schemas. Add regression fixtures for the affected provider, including missing permissions, duplicate identities, unexpected readback, and external ownership when relevant. Never infer a writable feature from the marketing name.
+
+```sh
+python tests/media_pipeline.py
+dbus-run-session -- python tests/session_audio.py
+bash tests/gui-wayland.sh  # native Sway/wlroots with a private virtual output
+bash scripts/prepare-package.sh /tmp/archer-package
+```
+
+The release qualification record lists exact kernel targets, running-session checks and outstanding physical cohorts. Keep fixture results distinct from physical observations and record the model, BIOS, kernel, backend, expected behavior and restoration for a new hardware claim. [Implementation record](docs/implementation-2.1.md)

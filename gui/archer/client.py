@@ -44,6 +44,17 @@ DBUS_IFACE = "io.otectus.Archer1"
 _DBUS_METHOD_MAP = {
     "ping": ("Ping", None),
     "get_all_settings": ("GetAllSettings", None),
+    "get_capabilities": ("GetCapabilities", None),
+    "get_cooling_devices": ("GetCoolingDevices", None),
+    "get_battery_devices": ("GetBatteryDevices", None),
+    "get_policy_status": ("GetPolicyStatus", None),
+    "apply_graphics_plan": ("ApplyGraphicsPlan", lambda p: (p["mode"], p["token"])),
+    "get_graphics_plan": ("GetGraphicsPlan", lambda p: (p["mode"],)),
+    "set_battery_threshold": ("SetBatteryThreshold", lambda p: (p["key"], p["start"], p["end"])),
+    "charge_full_once": ("ChargeFullOnce", lambda p: (p["key"], p["duration"])),
+    "restore_firmware_auto": ("RestoreFirmwareAuto", None),
+    "set_fan_mode": ("SetFanMode", lambda p: (p["key"], p["mode"])),
+    "set_fan_device": ("SetFanDevice", lambda p: (p["key"], p["percent"])),
     "get_monitoring_data": ("GetMonitoringData", None),
     "get_supported_features": ("GetSupportedFeatures", None),
     "get_fan_curve": ("GetFanCurve", None),
@@ -54,6 +65,7 @@ _DBUS_METHOD_MAP = {
     "set_thermal_profile": ("SetThermalProfile", lambda p: (p["profile"],)),
     "set_fan_speed": ("SetFanSpeed", lambda p: (p["cpu"], p["gpu"])),
     "set_fan_curve": ("SetFanCurve", lambda p: (json.dumps(p),)),
+    "set_native_fan_curve": ("SetNativeFanCurve", lambda p: (json.dumps(p),)),
     "set_battery_calibration": ("SetBatteryCalibration", lambda p: (p["enabled"],)),
     "set_battery_limiter": ("SetBatteryLimiter", lambda p: (p["enabled"],)),
     "set_usb_charging": ("SetUsbCharging", lambda p: (p["level"],)),
@@ -101,7 +113,11 @@ class ArcherClient:
             bus = dbus.SystemBus()
             proxy = bus.get_object(DBUS_NAME, DBUS_PATH)
             self._dbus_iface = dbus.Interface(proxy, DBUS_IFACE)
-            self._dbus_iface.Ping(timeout=TIMEOUT)
+            handshake = json.loads(str(self._dbus_iface.Ping(timeout=TIMEOUT)))
+            details = handshake.get("data", {})
+            protocol = details.get("interface", 1)
+            if protocol != 1 or not handshake.get("success"):
+                raise ValueError(f"Incompatible Archer service API {protocol}. Upgrade the app and service together.")
             self._connected = True
             self._init_error = None
             logger.info("Connected to Archer daemon via D-Bus")
@@ -262,6 +278,16 @@ class ArcherClient:
 
     def get_firmware_info(self):
         return self._send_command("get_firmware_info")
+
+    def get_cooling_devices(self):
+        return self._send_command("get_cooling_devices")
+
+    def set_native_fan_curve(self, fan_id, sensor_id, points, duration_seconds,
+                             *, enabled=True, resume_after_suspend=True):
+        return self._send_command("set_native_fan_curve", {
+            "fan_id": fan_id, "sensor_id": sensor_id, "points": points,
+            "duration_seconds": duration_seconds, "enabled": enabled,
+            "resume_after_suspend": resume_after_suspend})
 
     def apply_fan_mode(self, cpu, gpu):
         # The curve engine must stop writing before a manual/automatic change.

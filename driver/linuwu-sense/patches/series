@@ -1,11 +1,2 @@
-0001-anv16s-41-dmi.patch
-0002-native-platform-profile.patch
-0003-fan-safety.patch
-0004-anv16s-probe.patch
-0005-build-and-diagnostics.patch
-0006-probe-unwind.patch
-0007-counted-sysfs-input.patch
-0008-legacy-platform-profile.patch
-0009-older-kernel-headers.patch
-0010-retire-file-state-validate-firmware.patch
-0011-validate-scalar-input.patch
+0001-archer-safety-forward-port.patch
+0002-kernel-api-compat.patch

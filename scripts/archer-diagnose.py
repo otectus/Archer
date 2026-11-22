@@ -4,7 +4,14 @@ import argparse
 import json
 import platform
 import subprocess
+import re
+import sys
 from pathlib import Path
+
+if (Path(__file__).resolve().parents[1] / "gui/archer_inventory.py").is_file():
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gui"))
+from archer_health import report as support_report
+from archer_inventory import collect_inventory
 
 SETTINGS_FILE = Path("/etc/archer/settings.json")
 # Only these saved preferences are reported; other user settings never are.
@@ -43,7 +50,7 @@ def saved_preferences(path):
     report = {}
     for key in BINARY_KEYS:
         value = data.get(key, "<absent>")
-        if not (value is None or isinstance(value, (bool, int)) or (isinstance(value, str) and len(value) <= 32)):
+        if value != "<absent>" and not (value is None or type(value) in (bool, int) and value in (0, 1)):
             value = f"<invalid {type(value).__name__}>"
         report[key] = value
     return report
@@ -55,8 +62,24 @@ def daemon_states():
                       "io.otectus.Archer1", "GetAllSettings"])
     try:
         data = json.loads(json.loads(output)["data"][0])["data"]
-        return {key: {"value": data.get(key), "state": data.get(f"{key}_state", "<not reported by this service>")}
-                for key in BINARY_KEYS}
+        states = {}
+        for key in BINARY_KEYS:
+            state = data.get(f"{key}_state")
+            public = {}
+            if isinstance(state, dict):
+                for field in ("effective", "observed", "configured", "requested", "available"):
+                    if field in state and (state[field] is None or type(state[field]) is bool):
+                        public[field] = state[field]
+                for field, choices in {"source": ("hardware", "last_write", "saved_preference", "unknown"),
+                                       "readback_status": ("known", "unrecognized", "invalid", "unreadable", "unavailable")}.items():
+                    if state.get(field) in choices:
+                        public[field] = state[field]
+                raw = state.get("raw_readback")
+                if isinstance(raw, str) and re.fullmatch(r"-?\d{1,4}", raw):
+                    public["raw_readback"] = raw
+            value = data.get(key)
+            states[key] = {"value": value if type(value) is bool else None, "state": public}
+        return states
     except (ValueError, KeyError, IndexError, TypeError, AttributeError):
         return "<unavailable>"
 
@@ -121,4 +144,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--sysfs-root", type=Path, default=Path("/sys"), help="Mock sysfs tree for tests")
     args = parser.parse_args()
-    print(json.dumps(collect(args.sysfs_root, commands=args.sysfs_root == Path("/sys")), indent=2))
+    live = args.sysfs_root.resolve() == Path("/sys")
+    target = Path("/") if live else args.sysfs_root.resolve().parent
+    data = support_report(collect_inventory(target, args.sysfs_root), target)
+    if live:
+        data["binary_controls"] = {"preferences": saved_preferences(SETTINGS_FILE), "daemon": daemon_states()}
+    print(json.dumps(data, indent=2))

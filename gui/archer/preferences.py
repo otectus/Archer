@@ -8,7 +8,8 @@ from pathlib import Path
 
 class Preferences:
     DEFAULTS = {"appearance": "system", "width": 1100, "height": 760,
-                "maximized": False, "close_to_tray": True, "sidebar_visible": True}
+                "maximized": False, "close_to_tray": True, "sidebar_visible": True,
+                "setup_seen": False, "setup_goal": "", "setup_step": 0}
 
     def __init__(self, path=None):
         self.path = Path(path) if path else Path(

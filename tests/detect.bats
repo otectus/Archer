@@ -167,7 +167,7 @@ EOF
     done
 }
 
-@test "build_recommendations includes driver for gaming models" {
+@test "gaming family alone does not select driver, battery writes, or GPU changes" {
     source "$BATS_TEST_DIRNAME/../lib/detect.sh"
     MODEL_FAMILY="nitro"
     HAS_BATTERY=1
@@ -181,9 +181,10 @@ EOF
     SUPPORTS_THERMAL_PROFILES=1
     DISPLAY=":0"
     build_recommendations
-    [[ " ${RECOMMENDED_MODULES[*]} " == *" driver "* ]]
-    [[ " ${RECOMMENDED_MODULES[*]} " == *" battery "* ]]
-    [[ " ${RECOMMENDED_MODULES[*]} " == *" gpu "* ]]
+    [[ " ${RECOMMENDED_MODULES[*]} " = " gui " ]]
+    [[ " ${OPTIONAL_MODULES[*]} " == *" driver "* ]]
+    [[ " ${OPTIONAL_MODULES[*]} " == *" battery "* ]]
+    [[ " ${OPTIONAL_MODULES[*]} " == *" gpu "* ]]
 }
 
 @test "build_recommendations makes driver optional for non-gaming" {

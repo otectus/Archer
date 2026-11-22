@@ -13,7 +13,9 @@ MODEL_FAMILY="unknown"
 # --- GPU ---
 HAS_NVIDIA=0
 HAS_AMD_DGPU=0
+HAS_INTEL_GPU=0
 HAS_INTEL_IGPU=0
+HAS_AMD_GPU=0
 HAS_AMD_IGPU=0
 NVIDIA_MODEL=""
 
@@ -56,66 +58,20 @@ KERNEL_HEADERS="linux-headers"
 RECOMMENDED_MODULES=()
 OPTIONAL_MODULES=()
 
-detect_dmi() {
-    ACER_PRODUCT_NAME=$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || echo "Unknown")
-    ACER_BOARD_NAME=$(cat /sys/devices/virtual/dmi/id/board_name 2>/dev/null || echo "Unknown")
-    ACER_BIOS_VERSION=$(cat /sys/devices/virtual/dmi/id/bios_version 2>/dev/null || echo "Unknown")
-    ACER_SYS_VENDOR=$(cat /sys/devices/virtual/dmi/id/sys_vendor 2>/dev/null || echo "Unknown")
-}
-
 detect_model_family() {
     case "$ACER_PRODUCT_NAME" in
         *Nitro*|ANV[0-9]*|AN[0-9]*)      MODEL_FAMILY="nitro" ;;
         *Predator*)   MODEL_FAMILY="predator" ;;
-        *Helios*)     MODEL_FAMILY="helios" ;;
-        *Triton*)     MODEL_FAMILY="triton" ;;
+        *Helios*|PHN[0-9]*|PH[0-9]*)     MODEL_FAMILY="helios" ;;
+        *Triton*|PT[0-9]*)     MODEL_FAMILY="triton" ;;
         *Swift*)      MODEL_FAMILY="swift" ;;
         *Aspire*)     MODEL_FAMILY="aspire" ;;
         *Spin*)       MODEL_FAMILY="spin" ;;
         *Enduro*)     MODEL_FAMILY="enduro" ;;
+        *Extensa*) MODEL_FAMILY="extensa" ;;
+        *ConceptD*) MODEL_FAMILY="conceptd" ;;
         *TravelMate*) MODEL_FAMILY="travelmate" ;;
         *)            MODEL_FAMILY="unknown" ;;
-    esac
-}
-
-detect_gpu() {
-    local lspci_out
-    lspci_out="${_CACHED_LSPCI:-$(lspci 2>/dev/null || echo "")}"
-
-    if echo "$lspci_out" | grep -qi "nvidia"; then
-        HAS_NVIDIA=1
-        NVIDIA_MODEL=$(echo "$lspci_out" | grep -i "nvidia" | grep -iE "vga|3d" | head -1 | sed 's/.*: //')
-    fi
-    if echo "$lspci_out" | grep -qiE "AMD.*(Navi|RDNA|Radeon RX)"; then
-        HAS_AMD_DGPU=1
-    fi
-    if echo "$lspci_out" | grep -qiE "Intel.*(Graphics|UHD|Iris)"; then
-        HAS_INTEL_IGPU=1
-    fi
-    if echo "$lspci_out" | grep -qiE "AMD.*(Renoir|Cezanne|Barcelo|Phoenix|Raphael|Rembrandt|Lucienne|Mendocino)"; then
-        HAS_AMD_IGPU=1
-    fi
-    # Fallback: detect AMD iGPU by VGA class if not caught above
-    if [[ "$HAS_AMD_IGPU" -eq 0 ]] && echo "$lspci_out" | grep -qiE "AMD.*VGA.*Radeon"; then
-        HAS_AMD_IGPU=1
-    fi
-}
-
-detect_wifi() {
-    local lspci_out="${_CACHED_LSPCI:-$(lspci 2>/dev/null || echo "")}"
-    WIFI_DEVICE=$(echo "$lspci_out" | grep -iE "network|wireless" | head -1 || echo "")
-
-    case "$WIFI_DEVICE" in
-        *MT7921*|*MT7902*|*MT7925*|*MT7922*|*MediaTek*)
-            WIFI_CHIPSET="mediatek" ;;
-        *AX200*|*AX201*|*AX210*|*AX211*|*BE200*|*Intel*Wi-Fi*|*Wireless*8265*)
-            WIFI_CHIPSET="intel" ;;
-        *RTL*|*Realtek*)
-            WIFI_CHIPSET="realtek" ;;
-        *QCA*|*Qualcomm*|*Atheros*)
-            WIFI_CHIPSET="qualcomm" ;;
-        *)
-            WIFI_CHIPSET="unknown" ;;
     esac
 }
 
@@ -131,31 +87,6 @@ detect_audio() {
         SOF_ACTIVE=1
     fi
     CPU_VENDOR=$(grep -m1 "vendor_id" /proc/cpuinfo 2>/dev/null | awk '{print $3}' || echo "")
-}
-
-detect_touchpad() {
-    HAS_I2C_TOUCHPAD=0
-    TOUCHPAD_ERRORS=0
-
-    read_kernel_log
-    local dmesg_out="${_CACHED_DMESG:-}"
-    if echo "$dmesg_out" | grep -qi "i2c_hid_acpi.*ELAN\|i2c_hid_acpi.*SYN\|i2c_hid_acpi.*MSFT\|i2c.*hid.*touchpad"; then
-        HAS_I2C_TOUCHPAD=1
-    fi
-    if echo "$dmesg_out" | grep -qi "i2c_hid_acpi.*failed\|i2c_hid_acpi.*error\|i2c_hid.*timeout\|i2c_hid.*weird size"; then
-        TOUCHPAD_ERRORS=1
-    fi
-}
-
-detect_battery() {
-    HAS_BATTERY=0
-    if [[ -d /sys/class/power_supply/BAT0 ]] || [[ -d /sys/class/power_supply/BAT1 ]]; then
-        HAS_BATTERY=1
-    fi
-    BATTERY_WMI_LOADED=0
-    if lsmod 2>/dev/null | grep -q "acer_wmi_battery"; then
-        BATTERY_WMI_LOADED=1
-    fi
 }
 
 detect_kernel() {
@@ -181,52 +112,40 @@ detect_kernel() {
     fi
 }
 
-detect_distro() {
-    DISTRO_ID=""
-    DISTRO_NAME=""
-    if [[ -f /etc/os-release ]]; then
-        DISTRO_ID=$(grep "^ID=" /etc/os-release | cut -d= -f2 | tr -d '"')
-        DISTRO_NAME=$(grep "^NAME=" /etc/os-release | cut -d= -f2 | tr -d '"')
-    fi
-
-    case "$DISTRO_ID" in
-        arch)        DISTRO_FAMILY="arch" ;;
-        cachyos)     DISTRO_FAMILY="arch" ;;
-        endeavouros) DISTRO_FAMILY="arch" ;;
-        manjaro)     DISTRO_FAMILY="arch" ;;
-        garuda)      DISTRO_FAMILY="arch" ;;
-        artix)       DISTRO_FAMILY="unsupported-init" ;;
-        *)           DISTRO_FAMILY="unknown" ;;
-    esac
-
-    AUR_HELPER=""
-    if command -v paru &>/dev/null; then
-        AUR_HELPER="paru"
-    elif command -v yay &>/dev/null; then
-        AUR_HELPER="yay"
-    fi
-}
-
-# Run all detection functions
+# Read data as fields. Firmware and os-release text must never become shell code.
 detect_all() {
-    # Cache expensive command outputs for reuse across detection functions
-    read_kernel_log
-    _CACHED_LSPCI=$(lspci 2>/dev/null || echo "")
-
-    detect_dmi
+    local values=() inventory
+    inventory="$(dirname "${BASH_SOURCE[0]}")/../gui/archer_inventory.py"
+    mapfile -d '' -t values < <(python3 "$inventory" installer)
+    if (( ${#values[@]} != 15 )); then
+        warn "Could not read hardware inventory. Check Python and the sysfs mount."
+        return 1
+    fi
+    ACER_PRODUCT_NAME=${values[0]}
+    ACER_BOARD_NAME=${values[1]}
+    ACER_BIOS_VERSION=${values[2]}
+    ACER_SYS_VENDOR=${values[3]}
+    HAS_NVIDIA=${values[4]}
+    NVIDIA_MODEL=${values[5]}
+    HAS_INTEL_GPU=${values[6]}
+    HAS_AMD_GPU=${values[7]}
+    WIFI_DEVICE=${values[8]}
+    WIFI_CHIPSET=${values[9]:-unknown}
+    HAS_BATTERY=${values[10]}
+    HAS_I2C_INPUT=${values[11]}
+    DISTRO_ID=${values[12]}
+    DISTRO_NAME=${values[13]}
+    DISTRO_FAMILY=${values[14]}
+    BATTERY_WMI_LOADED=0
+    [[ ! -d /sys/module/acer_wmi_battery ]] || BATTERY_WMI_LOADED=1
     detect_model_family
-    debug "Model family: $MODEL_FAMILY ($ACER_PRODUCT_NAME)"
-    detect_gpu
-    debug "GPU: NVIDIA=$HAS_NVIDIA Intel_iGPU=$HAS_INTEL_IGPU AMD_iGPU=$HAS_AMD_IGPU AMD_dGPU=$HAS_AMD_DGPU"
-    detect_wifi
-    debug "WiFi chipset: $WIFI_CHIPSET"
     detect_audio
-    detect_touchpad
-    detect_battery
-    debug "Battery: present=$HAS_BATTERY"
     detect_kernel
-    detect_distro
-    debug "Distro: $DISTRO_NAME ($DISTRO_FAMILY) AUR=$AUR_HELPER"
+    if command -v paru &>/dev/null; then
+        AUR_HELPER=paru
+    elif command -v yay &>/dev/null; then
+        AUR_HELPER=yay
+    fi
 }
 
 # Print a summary of detected hardware
@@ -235,13 +154,13 @@ print_hw_summary() {
     if [[ "$HAS_NVIDIA" -eq 1 ]]; then
         gpu_info="$NVIDIA_MODEL"
     fi
-    if [[ "$HAS_INTEL_IGPU" -eq 1 ]]; then
+    if [[ "$HAS_INTEL_GPU" -eq 1 ]]; then
         [[ -n "$gpu_info" ]] && gpu_info="$gpu_info + "
-        gpu_info="${gpu_info}Intel iGPU"
+        gpu_info="${gpu_info}Intel GPU"
     fi
-    if [[ "$HAS_AMD_IGPU" -eq 1 ]]; then
+    if [[ "$HAS_AMD_GPU" -eq 1 ]]; then
         [[ -n "$gpu_info" ]] && gpu_info="$gpu_info + "
-        gpu_info="${gpu_info}AMD iGPU"
+        gpu_info="${gpu_info}AMD GPU"
     fi
     if [[ "$HAS_AMD_DGPU" -eq 1 ]]; then
         [[ -n "$gpu_info" ]] && gpu_info="$gpu_info + "
@@ -267,86 +186,13 @@ print_hw_summary() {
 # Build recommended and optional module lists based on hardware
 build_recommendations() {
     RECOMMENDED_MODULES=()
-    OPTIONAL_MODULES=()
-
-    # Driver (Linuwu-Sense): recommended for gaming models
-    case "$MODEL_FAMILY" in
-        nitro|predator|helios|triton)
-            RECOMMENDED_MODULES+=("driver")
-            ;;
-        *)
-            OPTIONAL_MODULES+=("driver")
-            ;;
-    esac
-
-    # Battery: recommended if battery present
-    if [[ "$HAS_BATTERY" -eq 1 ]]; then
-        RECOMMENDED_MODULES+=("battery")
-    fi
-
-    # GPU: recommended if hybrid graphics (NVIDIA + integrated)
-    if [[ "$HAS_NVIDIA" -eq 1 ]] && { [[ "$HAS_INTEL_IGPU" -eq 1 ]] || [[ "$HAS_AMD_IGPU" -eq 1 ]]; }; then
-        RECOMMENDED_MODULES+=("gpu")
-    elif [[ "$HAS_NVIDIA" -eq 1 ]]; then
-        OPTIONAL_MODULES+=("gpu")
-    fi
-
-    # Touchpad: recommended if errors detected, optional if I2C present
-    if [[ "$TOUCHPAD_ERRORS" -eq 1 ]]; then
-        RECOMMENDED_MODULES+=("touchpad")
-    elif [[ "$HAS_I2C_TOUCHPAD" -eq 1 ]]; then
-        OPTIONAL_MODULES+=("touchpad")
+    OPTIONAL_MODULES=(driver touchpad audio wifi power gamemode audio-enhance camera-enhance firmware)
+    if (( HAS_BATTERY )); then OPTIONAL_MODULES+=(battery); fi
+    if (( HAS_NVIDIA )); then OPTIONAL_MODULES+=(gpu); fi
+    if (( SUPPORTS_THERMAL_PROFILES )); then OPTIONAL_MODULES+=(thermal); fi
+    if [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+        RECOMMENDED_MODULES+=(gui)
     else
-        OPTIONAL_MODULES+=("touchpad")
+        OPTIONAL_MODULES+=(gui)
     fi
-
-    # Audio: always optional (user knows if they have issues)
-    OPTIONAL_MODULES+=("audio")
-
-    # WiFi: recommended for MediaTek, optional otherwise
-    if [[ "$WIFI_CHIPSET" = "mediatek" ]]; then
-        RECOMMENDED_MODULES+=("wifi")
-    else
-        OPTIONAL_MODULES+=("wifi")
-    fi
-
-    # Power: always optional
-    OPTIONAL_MODULES+=("power")
-
-    # Thermal: exposed platform-profile capability on gaming models
-    if [[ "$SUPPORTS_THERMAL_PROFILES" -eq 1 ]]; then
-        case "$MODEL_FAMILY" in
-            nitro|predator|helios|triton)
-                OPTIONAL_MODULES+=("thermal")
-                ;;
-        esac
-    fi
-
-    # GUI: recommended on gaming models with display server, optional otherwise
-    if [[ -n "${DISPLAY:-}" ]] || [[ -n "${WAYLAND_DISPLAY:-}" ]]; then
-        case "$MODEL_FAMILY" in
-            nitro|predator|helios|triton)
-                RECOMMENDED_MODULES+=("gui")
-                ;;
-            *)
-                OPTIONAL_MODULES+=("gui")
-                ;;
-        esac
-    fi
-
-    # Game Mode: optional for gaming models
-    case "$MODEL_FAMILY" in
-        nitro|predator|helios|triton)
-            OPTIONAL_MODULES+=("gamemode")
-            ;;
-    esac
-
-    # Audio Enhancement: always optional
-    OPTIONAL_MODULES+=("audio-enhance")
-
-    # Camera Enhancement: always optional
-    OPTIONAL_MODULES+=("camera-enhance")
-
-    # Firmware Advisor: always optional
-    OPTIONAL_MODULES+=("firmware")
 }

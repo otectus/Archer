@@ -4,7 +4,7 @@
 
 MODULE_NAME="Power Management"
 MODULE_ID="power"
-MODULE_DESCRIPTION="TLP power management with Acer-optimized configuration"
+MODULE_DESCRIPTION="Power policy integration that preserves the active provider"
 
 _TLP_CONF="/etc/tlp.d/01-acer-optimize.conf"
 
@@ -17,26 +17,25 @@ module_check_installed() {
 }
 
 module_install() {
-    # Check for conflicting service
-    if pacman -Qi power-profiles-daemon &>/dev/null; then
-        warn "power-profiles-daemon is installed and conflicts with TLP."
-        if confirm "Switch from power-profiles-daemon to TLP?"; then
-            module_service power-profiles-daemon.service mask --now || return 1
-        else
-            log "Skipping TLP installation to avoid conflicts."
-            MODULE_SKIPPED=1
-            return 0
+    local provider service
+    for provider in power-profiles-daemon tuned tuned-ppd; do
+        service="$provider.service"
+        if systemctl is-active --quiet "$service" 2>/dev/null; then
+            warn "$provider currently owns power policy."
+            if confirm "Migrate explicitly from $provider to TLP?"; then
+                module_service "$service" disable --now || return 1
+            else
+                log "Preserving the active $provider policy."
+                MODULE_SKIPPED=1
+                return 0
+            fi
         fi
-    fi
+    done
 
     log "Installing TLP..."
     run_sudo pacman -S --needed --noconfirm tlp tlp-rdw || return 1
 
     INSTALLED_PACKAGES+=" tlp tlp-rdw"
-
-    # Mask conflicting services
-    module_service systemd-rfkill.service mask || return 1
-    module_service systemd-rfkill.socket mask || return 1
 
     # Write Acer-optimized config
     log "Applying Acer-optimized power settings..."
@@ -76,6 +75,14 @@ TLP_EOF
     module_config "$_TLP_CONF" "$config" || return 1
     module_service tlp.service enable --now || return 1
     run_sudo tlp start || return 1
+
+    # tlp-pd is the supported desktop profile bridge when supplied by the
+    # configured repositories. It avoids a second writer competing with TLP.
+    if pacman -Si tlp-pd >/dev/null 2>&1; then
+        run_sudo pacman -S --needed --noconfirm tlp-pd || return 1
+        INSTALLED_PACKAGES+=" tlp-pd"
+        module_service tlp-pd.service enable --now || return 1
+    fi
 
     log "TLP installed and configured."
     log "View status: sudo tlp-stat -s"

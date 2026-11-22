@@ -2,14 +2,16 @@
 # Prefer equivalent charge-limit interfaces before adding a WMI fallback.
 MODULE_NAME="Battery Charge Limit"
 MODULE_ID="battery"
-MODULE_DESCRIPTION="Persistent 80% battery charge limit"
-_BATTERY_PACKAGE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../driver/acer-wmi-battery" && pwd)"
+MODULE_DESCRIPTION="Persistent per-battery charge thresholds or fixed health mode"
+_BATTERY_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+_BATTERY_PACKAGE="$_BATTERY_REPO_ROOT/driver/acer-wmi-battery"
 source "$_BATTERY_PACKAGE/source.conf"
 source "$_BATTERY_PACKAGE/../../lib/dkms.sh"
 _BATTERY_HEALTH_PATH="/sys/bus/wmi/drivers/acer-wmi-battery/health_mode"
 _BATTERY_UDEV_RULE="/etc/udev/rules.d/99-acer-battery-health.rules"
 _BATTERY_SERVICE="/etc/systemd/system/archer-battery-limit.service"
 _BATTERY_LOAD_CONF="/etc/modules-load.d/archer-battery.conf"
+_BATTERY_POLICY="/etc/archer/battery.json"
 
 module_detect() { [[ "$HAS_BATTERY" -eq 1 ]]; }
 
@@ -18,14 +20,21 @@ _battery_interface() {
 }
 
 _battery_enable() {
+    local path=$1 node
     _battery_persist_fallback || return 1
+    if [[ "$path" == */charge_control_end_threshold ]]; then
+        node=${path%/charge_control_end_threshold}
+        node=${node##*/}
+        run_sudo /usr/bin/python3 "$_BATTERY_REPO_ROOT/gui/archer_battery.py" initialize "$node" "$_BATTERY_POLICY" || return 1
+    fi
     run_sudo systemctl start archer-battery-limit.service || return 1
 }
 
 _battery_persist_fallback() {
     run_sudo install -d -o root -g root -m 0755 /usr/lib/archer /etc/archer || return 1
-    run_sudo install -o root -g root -m 0644 "$SCRIPT_DIR/gui/archer_battery.py" /usr/lib/archer/archer_battery.py || return 1
-    INSTALLED_FILES+=" /usr/lib/archer/archer_battery.py"
+    module_config /usr/lib/archer/archer_battery.py "$(cat "$_BATTERY_REPO_ROOT/gui/archer_battery.py")" || return 1
+    module_config /usr/lib/archer/archer_inventory.py "$(cat "$_BATTERY_REPO_ROOT/gui/archer_inventory.py")" || return 1
+    INSTALLED_FILES+=" /usr/lib/archer/archer_battery.py /usr/lib/archer/archer_inventory.py"
     archer_write_config "$_BATTERY_SERVICE" '[Unit]
 Description=Apply Archer saved battery charge policy
 After=systemd-modules-load.service
@@ -46,6 +55,11 @@ module_check_installed() { _battery_interface >/dev/null; }
 
 module_install() {
     local path
+    if systemctl is-enabled --quiet tlp.service 2>/dev/null || systemctl is-enabled --quiet tlp-pd.service 2>/dev/null; then
+        warn "TLP owns battery charge thresholds; Archer will not install a competing boot writer."
+        MODULE_SKIPPED=1
+        return 0
+    fi
     if path=$(_battery_interface); then
         log "Using existing battery charge-limit interface: $path"
         _battery_enable "$path" || return 1
@@ -80,7 +94,7 @@ module_uninstall() {
         run_sudo rm -f "$_BATTERY_SERVICE" || return 1
         run_sudo systemctl daemon-reload || return 1
     fi
-    run_sudo rm -f /usr/lib/archer/archer_battery.py || return 1
+    module_remove_config /usr/lib/archer/archer_battery.py /usr/lib/archer/archer_inventory.py || return 1
     # Retain current charge state and external package-managed drivers.
     archer_remove_config "$_BATTERY_UDEV_RULE" "$_BATTERY_LOAD_CONF" || return 1
     run_sudo udevadm control --reload-rules || return 1
@@ -93,5 +107,9 @@ module_verify() {
     local path value
     path=$(_battery_interface) || return 1
     value=$(cat "$path") || return 1
-    if [[ "$path" == */charge_control_end_threshold ]]; then [[ "$value" =~ ^(80|100)$ ]]; else [[ "$value" =~ ^[01]$ ]]; fi
+    if [[ "$path" == */charge_control_end_threshold ]]; then
+        [[ "$value" =~ ^[0-9]{1,3}$ ]] && (( value >= 1 && value <= 100 ))
+    else
+        [[ "$value" =~ ^[01]$ ]]
+    fi
 }

@@ -64,7 +64,8 @@ write_manifest() {
 
     run_sudo python3 "$(detect_script_dir)/scripts/archer-manifest.py" "$MANIFEST_FILE" write \
         "$modules_str" "$files_str" "$dkms_str" "$packages_str" \
-        "$INSTALLER_VERSION" "${ACER_PRODUCT_NAME:-Unknown}" "${MODEL_FAMILY:-unknown}" "${KERNEL_VERSION:-unknown}" || return 1
+        "$INSTALLER_VERSION" "${ACER_PRODUCT_NAME:-Unknown}" "${MODEL_FAMILY:-unknown}" "${KERNEL_VERSION:-unknown}" \
+        "${INVENTORY_GENERATION:-unknown}" "${TRANSACTION_ID:-unknown}" || return 1
     log "Install manifest written to $MANIFEST_FILE"
 }
 

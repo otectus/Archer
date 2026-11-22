@@ -3,7 +3,6 @@
 CI downloads the repository explicitly. Local offline runs may use an existing
 clone. All mutation, builds and simulated WMI calls stay in a TemporaryDirectory.
 """
-import difflib
 import os
 import re
 import shutil
@@ -52,6 +51,40 @@ class BuildHelperTests(unittest.TestCase):
             result = run('bash', str(helper), '../unexpected', cwd=root, env=env)
             self.assertNotEqual(result.returncode, 0)
 
+    def test_header_shape_selects_legacy_68_compatibility(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            build = root / 'modules/6.8.9-arch1-2/build'
+            include = build / 'include/linux'
+            (build / 'include/config').mkdir(parents=True)
+            include.mkdir(parents=True)
+            (build / 'Makefile').touch()
+            (build / '.config').write_text('CONFIG_CC_IS_GCC=y\n')
+            (build / 'include/config/kernel.release').write_text('6.8.9-arch1-2')
+            (include / 'platform_profile.h').write_text('struct platform_profile_handler {};\n')
+            (include / 'acpi.h').write_text('typedef void (*wmi_notify_handler) (u32 value, void *context);\n')
+            (include / 'platform_device.h').write_text('void (*remove_new)(struct platform_device *);\n')
+            helper = root / 'build.sh'
+            helper.write_text((REPO / 'driver/build.sh').read_text())
+            shutil.copy(REPO / 'lib/kernel.sh', root / 'archer-kernel.sh')
+            source = root / 'src/linuwu_sense.c'
+            source.parent.mkdir()
+            source.touch()
+            binary = root / 'bin'
+            binary.mkdir()
+            make = binary / 'make'
+            make.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$MOCK_MAKE_LOG"\n')
+            make.chmod(0o755)
+            log = root / 'make.log'
+            env = {**os.environ, 'PATH': str(binary) + os.pathsep + os.environ['PATH'],
+                   'MOCK_MAKE_LOG': str(log), 'KERNEL_MODULES_ROOT': str(root / 'modules')}
+            result = run('bash', str(helper), '6.8.9-arch1-2', cwd=root, env=env)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            flags = log.read_text()
+            for expected in ('ARCHER_LEGACY_PLATFORM_PROFILE', 'ARCHER_LEGACY_WMI_NOTIFY',
+                             'ARCHER_LEGACY_PLATFORM_REMOVE'):
+                self.assertIn(expected, flags)
+
 
 @unittest.skipUnless(UPSTREAM, 'Set LINUWU_TEST_REPO to validate the real pinned driver source')
 class DriverSourceTests(unittest.TestCase):
@@ -83,24 +116,45 @@ class DriverSourceTests(unittest.TestCase):
         self.assertIn('archer-build.sh $kernelver', config)
         self.assertIn('AUTOINSTALL="yes"', config)
 
-    def test_exact_dmi_addition_keeps_existing_entries(self):
+    def test_rebase_preserves_upstream_model_table(self):
         def table(source):
             return source.split('static const struct dmi_system_id acer_quirks[]')[1].split('static const struct dmi_system_id')[0]
-        diff = list(difflib.ndiff(table(self.original).splitlines(), table(self.source).splitlines()))
-        self.assertFalse(any(line.startswith('- ') for line in diff))
-        additions = '\n'.join(line[2:] for line in diff if line.startswith('+ '))
-        self.assertIn('DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "Nitro ANV16S-41")', additions)
-        self.assertIn('DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Acer")', additions)
-        self.assertIn('&quirk_acer_nitro_anv16_41', additions)
-        for model in ('Nitro ANV15-51', 'Nitro ANV15-41', 'Nitro ANV16-41', 'Predator PHN16-71'):
+        self.assertEqual(table(self.original), table(self.source))
+        for model in ('Nitro ANV15-51', 'Nitro ANV15-41', 'Nitro ANV16-41',
+                      'Nitro ANV16S-41', 'Predator PHN16-71'):
             self.assertIn(model, table(self.source))
+
+    def test_unqualified_profiles_and_transports_default_off(self):
+        self.assertIn('module_param(experimental_profiles, bool, 0444)', self.source)
+        self.assertIn('!experimental_profiles && !archer_stable_product(product)', self.source)
+        self.assertIn('quirks = &quirk_unknown', self.source)
+        self.assertIn('!strcmp(product, "Nitro ANV16S-41")', self.source)
+        for field in ('nitro_hid_kb', 'an515_58_rgb_fix', 'ec_mmio_profile', 'kb_zone_arm'):
+            uses = [line for line in self.source.splitlines()
+                    if f'quirks->{field}' in line and not line.lstrip().startswith('.')]
+            self.assertTrue(uses, field)
+            self.assertTrue(all('experimental_profiles' in line for line in uses), (field, uses))
+        self.assertNotIn('experimental_profiles=1', (REPO / 'modules/driver.sh').read_text())
+
+    def test_legacy_kernel_shims_preserve_profile_gating(self):
+        for expected in ('#if __has_include(<linux/unaligned.h>)', '#include <asm/unaligned.h>',
+                         '#ifndef BACKLIGHT_POWER_ON', '#ifdef ARCHER_LEGACY_PLATFORM_PROFILE',
+                         'struct platform_profile_handler archer_profile',
+                         '#ifdef ARCHER_LEGACY_WMI_NOTIFY', 'wmi_get_event_data(value, &output)',
+                         '.remove_new = acer_platform_remove'):
+            self.assertIn(expected, self.source)
+        setup = self.source.split('static int acer_platform_profile_setup', 1)[1].split(
+            'static int acer_thermal_profile_change', 1)[0]
+        self.assertLess(setup.index('if (native_platform_profile)'),
+                        setup.index('platform_profile_register(&archer_profile)'))
+        self.assertIn('platform_profile_support = false', self.source)
 
     def test_source_mismatch_fails_before_dkms_config(self):
         package = self.root / 'bad-patch-package'
         shutil.copytree(self.package, package)
         shutil.copy(REPO / 'driver/prepare.sh', package.parent / 'prepare.sh')
-        patch = package / 'patches/0001-anv16s-41-dmi.patch'
-        patch.write_text(patch.read_text().replace('"Nitro ANV16-41"', '"THIS SOURCE DOES NOT MATCH"'))
+        patch = package / 'patches/0001-archer-safety-forward-port.patch'
+        patch.write_text(patch.read_text().replace('#include <linux/fs.h>', '#include <linux/not-a-real-header.h>'))
         destination = self.root / 'failed-patch'
         result = run('bash', str(package / 'prepare.sh'), str(destination), UPSTREAM)
         self.assertNotEqual(result.returncode, 0)
@@ -120,7 +174,8 @@ class DriverSourceTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_all_removed_string_calls_and_rgb_bounds(self):
-        self.assertEqual(len(re.findall(r'\bstrncpy\s*\(', self.original)), 3)
+        # The rebased upstream already removed its historical strncpy calls.
+        self.assertNotRegex(self.original, r'\bstrncpy\s*\(')
         self.assertNotRegex(self.source, r'\bstrncpy\s*\(')
 
         def function(name):

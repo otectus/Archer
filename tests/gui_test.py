@@ -21,7 +21,6 @@ if '--headless' in sys.argv:
     sys.argv.remove('--headless')
     os.environ['GDK_BACKEND'] = 'x11'
     os.environ['GSK_RENDERER'] = 'cairo'
-    os.environ['DISPLAY'] = ':177'
     if '--xvfb' in sys.argv:
         index = sys.argv.index('--xvfb')
         binary = sys.argv[index + 1]
@@ -30,7 +29,23 @@ if '--headless' in sys.argv:
         binary = shutil.which('Xvfb')
     if not binary:
         sys.exit('Install Xvfb or pass --xvfb /path/to/Xvfb')
-    server = subprocess.Popen([binary, ':177', '-screen', '0', '1920x1200x24', '-nolisten', 'tcp'], stdout=subprocess.DEVNULL)
+    import select
+    with tempfile.TemporaryFile() as server_log:
+        read_fd, write_fd = os.pipe()
+        try:
+            server = subprocess.Popen([binary, '-displayfd', str(write_fd), '-screen', '0', '1920x1200x24',
+                                       '-nolisten', 'tcp'], pass_fds=(write_fd,), stderr=server_log)
+        finally:
+            os.close(write_fd)
+        with os.fdopen(read_fd) as display:
+            if not select.select([display], [], [], 10)[0]:
+                server.terminate()
+                server.wait()
+                sys.exit('Xvfb did not become ready')
+            number = display.readline().strip()
+            if not number.isdecimal():
+                sys.exit('Xvfb failed to allocate a display')
+        os.environ['DISPLAY'] = ':' + number
 
     def stop_server():
         server.terminate()
@@ -209,6 +224,41 @@ class GuiTests(unittest.TestCase):
         drain(timeout=.01)
         self.temp.cleanup()
 
+    def test_guided_setup_persists_review_progress_without_applying_controls(self):
+        page = self.window.pages["checks"]
+        page.groups = {"Battery": {"status": "observed"}}
+        page.goal.set_selected(page.goal_keys.index("conferencing"))
+        page.show_plan()
+        page.plan_rows[-2].emit("activated")
+        self.assertEqual(self.window.navigation["audio"].get_visible_page().get_tag(), "microphone")
+        page.plan_rows[-1].emit("activated")
+        self.assertEqual(Preferences(self.window.preferences.path).data["setup_step"], 1)
+        self.assertEqual(self.client.calls, [])
+
+    def test_health_refresh_replaces_unsupported_rows(self):
+        page = self.window.pages["checks"]
+        records = [{"id": "fan.curve", "backend": "hwmon", "availability": "unavailable",
+                    "reason_code": "no_interface"},
+                   {"id": "battery.limit", "backend": "power_supply", "availability": "available",
+                    "writable": True}]
+        page.render({}, {}, capabilities={"capabilities": records})
+        self.assertTrue(page.unsupported.get_visible())
+        self.assertEqual([row.get_subtitle() for row in page.unsupported_rows], ["hwmon · no interface"])
+        page.render({}, {}, capabilities=[])
+        self.assertFalse(page.unsupported.get_visible())
+        self.assertFalse(page.unsupported_rows)
+
+    def test_sleep_observation_compares_matching_units_after_wake(self):
+        page = self.window.pages["sleep"]
+        from gi.repository import GLib
+        samples = [{"sampled_at": stamp, "batteries": {"BAT0": {"value": energy, "unit": "µWh"}}, "wake_irq": "7"}
+                   for stamp, energy in (("2026-01-01T01:00:00+00:00", 20), ("2026-01-01T02:00:00+00:00", 17))]
+        with patch("archer.pages.health.sleep_sample", side_effect=samples):
+            for sleeping in (True, False):
+                page.sleep_event(None, None, None, None, None, GLib.Variant("(b)", (sleeping,)))
+        self.assertIn("3600", page.output.get_label())
+        self.assertIn("-3 µWh", page.output.get_label())
+
     def test_loading_never_writes(self):
         for _ in range(3):
             self.load()
@@ -325,6 +375,28 @@ class GuiTests(unittest.TestCase):
         page._render({'status': 'error', 'updates': []})
         self.assertEqual(len(page.update_rows), 0)
         self.assertIn('failed', page.status.get_subtitle())
+
+    def test_native_fan_curve_requires_explicit_sensor_and_expiry(self):
+        page = self.window.pages['performance']
+        fan_id = 'inventory-hwmon:fan9'
+        sensor_id = 'inventory-hwmon:temp12'
+        page.monitor(self.state, {
+            'power_source_ac': True,
+            'fans': [{'id': fan_id, 'label': 'Auxiliary fan', 'rpm': 900,
+                      'mode': 'auto', 'percent': None,
+                      'minimum_percent': 1, 'maximum_percent': 100}],
+            'temperatures': [{'id': sensor_id, 'label': 'VRM', 'celsius': 48}],
+            'fan_curves': {},
+        })
+        form = page.native_controls[fan_id]
+        self.assertEqual(set(form.fields), {'mode', 'duty', 'sensor', 'curve', 'duration'})
+        self.client.set_native_fan_curve = Mock(return_value={'success': True})
+        result = page._set_native_fan(fan_id, {
+            'mode': 3, 'duty': 1, 'sensor': 0, 'curve': 1, 'duration': 30})
+        self.assertTrue(result['success'])
+        self.client.set_native_fan_curve.assert_called_once_with(
+            fan_id, sensor_id, [[30, 35], [50, 50], [70, 75], [85, 100]], 1800,
+            enabled=True, resume_after_suspend=True)
 
     def test_theme_and_navigation_keep_state(self):
         form = self.window.pages['keyboard'].zones
@@ -880,7 +952,7 @@ class GuiTests(unittest.TestCase):
         import gi
         gi.require_version('Graphene', '1.0')
         from gi.repository import Graphene
-        output = Path('/tmp/archer-ui-review')
+        output = Path(os.environ.get('ARCHER_CAPTURE_DIR', '/tmp/archer-ui-review'))
         output.mkdir(exist_ok=True)
         Gtk.Settings.get_default().set_property('gtk-enable-animations', False)
         self.window.present()

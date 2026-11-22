@@ -10,8 +10,9 @@ from datetime import datetime
 from gi.repository import Adw, Gdk, GLib, Gtk, PangoCairo
 
 from archer.binary import TEXTS, describe, describe_operation, normalize_binary_state, relevant, response_state
-from archer.widgets.forms import Page, label
+from archer.widgets.forms import Page, confirm, label
 from archer_settings import EFFECT_IDS, EFFECT_LABELS
+from archer_firmware import vendor_route
 
 
 PROFILES = [
@@ -23,6 +24,11 @@ PROFILES = [
 ]
 
 KEYBOARD_EFFECTS = EFFECT_LABELS
+NATIVE_CURVE_PRESETS = [
+    ("Quiet ramp", [[35, 30], [55, 40], [75, 65], [90, 100]]),
+    ("Balanced ramp", [[30, 35], [50, 50], [70, 75], [85, 100]]),
+    ("Strong cooling", [[30, 45], [50, 65], [65, 85], [80, 100]]),
+]
 
 
 def supported(form, features, feature):
@@ -141,6 +147,11 @@ class PerformancePage(Page):
         self.gpu = self.fans.spin("gpu", "GPU fan (%)", 0, 100)
         self.fan_mode.connect("notify::selected", lambda *_: self._manual())
         self.curve = self.fans.info("Current control")
+        self.native_controls = {}
+        self.native_control_meta = {}
+        self.auto = self.form("Firmware fan control", action="Restore firmware Auto",
+                              save=lambda _: client._send_command("restore_firmware_auto"))
+        self.auto.set_visible(False)
         self.game = self.form("Game Mode", "Temporarily requests the performance thermal profile, CPU energy preference, and NVIDIA persistence when available. Uses more power and may increase fan noise.",
                               save=lambda v: client.set_game_mode(v["enabled"]), immediate=True)
         self.game.switch("enabled", "Game Mode", "Use AC power for best results.")
@@ -164,16 +175,107 @@ class PerformancePage(Page):
         cpu, gpu = (0, 0) if mode == 0 else (100, 100) if mode == 1 else (values["cpu"], values["gpu"])
         return self.state.client.apply_fan_mode(cpu, gpu)
 
+    def _set_native_fan(self, key, values):
+        if values["mode"] == 1:
+            return self.state.client._send_command("set_fan_device", {"key": key, "percent": values["duty"]})
+        if values["mode"] == 3:
+            sensors = self.native_control_meta[key]["sensor_ids"]
+            sensor_index = values["sensor"]
+            if sensor_index >= len(sensors):
+                return {"success": False, "error": "Selected temperature sensor is unavailable"}
+            return self.state.client.set_native_fan_curve(
+                key, sensors[sensor_index], NATIVE_CURVE_PRESETS[values["curve"]][1],
+                values["duration"] * 60, enabled=True, resume_after_suspend=True)
+        mode = "auto" if values["mode"] == 0 else "turbo"
+        return self.state.client._send_command("set_fan_mode", {"key": key, "mode": mode})
+
+    @staticmethod
+    def _native_sensor_rows(fan, temperatures):
+        controller = fan["id"].rsplit(":fan", 1)[0]
+        return [sensor for sensor in temperatures
+                if sensor.get("id", "").rsplit(":temp", 1)[0] == controller]
+
+    def _native_visibility(self, key):
+        meta = self.native_control_meta[key]
+        selected = meta["mode"].get_selected()
+        meta["duty"].set_visible(selected == 1)
+        for row in meta["curve_rows"]:
+            row.set_visible(selected == 3)
+
     def monitor(self, _state, data):
         ac = data.get("power_source_ac")
+        if "fans" in data:
+            fans = data["fans"]
+            temperatures = data.get("temperatures") or []
+            curves = data.get("fan_curves") or {}
+            for key in list(self.native_controls):
+                fan = next((item for item in fans if item["id"] == key), None)
+                sensors = self._native_sensor_rows(fan, temperatures) if fan else []
+                signature = tuple(sensor.get("id") for sensor in sensors)
+                if not fan or signature != self.native_control_meta[key]["sensor_ids"]:
+                    form = self.native_controls.pop(key)
+                    self.native_control_meta.pop(key)
+                    self.content.remove(form)
+                    self.forms.remove(form)
+            for fan in fans:
+                key = fan["id"]
+                if key not in self.native_controls:
+                    sensors = self._native_sensor_rows(fan, temperatures)
+                    form = self.form(fan["label"], action="Apply fan setting",
+                                     save=lambda v, k=key: self._set_native_fan(k, v))
+                    choices = ["Firmware Auto", "Manual", "Turbo"]
+                    if sensors:
+                        choices.append("Temperature curve")
+                    mode = form.combo("mode", "Fan mode", choices)
+                    duty_row = form.spin("duty", "Manual duty (%)", fan["minimum_percent"], fan["maximum_percent"])
+                    curve_rows = []
+                    if sensors:
+                        curve_rows.append(form.combo("sensor", "Temperature sensor",
+                                                     [sensor["label"] for sensor in sensors],
+                                                     "The selected stable sensor controls only this fan."))
+                        curve_rows.append(form.combo("curve", "Curve", [item[0] for item in NATIVE_CURVE_PRESETS]))
+                        curve_rows.append(form.spin("duration", "Return to Auto after (minutes)", 1, 240))
+                    duty_row.set_visible(False)
+                    self.native_controls[key] = form
+                    self.native_control_meta[key] = {
+                        "mode": mode, "duty": duty_row, "curve_rows": curve_rows,
+                        "sensor_ids": tuple(sensor["id"] for sensor in sensors)}
+                    mode.connect("notify::selected", lambda *_args, k=key: self._native_visibility(k))
+                    self._native_visibility(key)
+                active_curve = curves.get(key, {})
+                description = f'{fan["rpm"]} RPM' if fan.get("rpm") is not None else "Speed reading unavailable"
+                if self.native_control_meta[key]["sensor_ids"]:
+                    description += " · Curves return to Auto at expiry; resume after sleep requires the same fan and sensor"
+                if active_curve.get("active"):
+                    remaining = max(0, round((active_curve.get("expires_at", time.time()) - time.time()) / 60))
+                    description += f" · Archer curve owns this fan for up to {remaining} more minute(s)"
+                self.native_controls[key].group.set_description(description)
+                duty = fan.get("percent")
+                current = 3 if active_curve.get("active") else {
+                    "auto": 0, "manual": 1, "turbo": 2}.get(fan.get("mode"), 0)
+                values = {"mode": current, "duty": max(1, duty or 1)}
+                meta = self.native_control_meta[key]
+                if meta["sensor_ids"]:
+                    sensor_id = active_curve.get("sensor_id")
+                    values.update({
+                        "sensor": (meta["sensor_ids"].index(sensor_id)
+                                   if sensor_id in meta["sensor_ids"] else 0),
+                        "curve": 1,
+                        "duration": max(1, min(240, round(
+                            (active_curve.get("expires_at", time.time() + 3600) - time.time()) / 60)))})
+                self.native_controls[key].load(values)
+                self._native_visibility(key)
         self.power.set_subtitle("Connected to AC power" if ac is True else "Running on battery" if ac is False else "Power source unavailable")
 
     def load(self, _state, data):
         features = data.get("features", [])
-        self.availability(any(f in features for f in ("fan_control", "thermal_profiles", "game_mode")))
+        self.availability(any(f in features for f in
+                              ("fan_control", "native_fan_control", "thermal_profiles", "game_mode")))
         self.monitor(_state, data)
         supported(self.profiles, features, "thermal_profiles")
-        supported(self.fans, features, "fan_control")
+        self.fans.set_visible("fan_control" in features and "native_fan_control" not in features)
+        self.auto.set_visible(bool(data.get("capability_schema_version"))
+                              and ("fan_control" in features or "native_fan_control" in features))
         supported(self.game, features, "game_mode")
         choices = data.get("thermal_choices", [])
         for key, title, description in PROFILES:
@@ -198,6 +300,7 @@ class BatteryPage(Page):
     def __init__(self, state):
         super().__init__("Battery", "Protect battery health and stay informed about your charge.", state)
         self.status = self.form("Battery status")
+        self.device_forms = {}
         self.charge = self.status.info("Charge")
         self.source = self.status.info("Status")
         self.remaining = self.status.info("Time remaining")
@@ -219,6 +322,8 @@ class BatteryPage(Page):
         state.connect("telemetry", self.monitor)
 
     def monitor(self, _state, data):
+        if "batteries" in data:
+            self.update_devices(data["batteries"])
         battery = data.get("battery_info") or {}
         if battery:
             self.charge.set_subtitle(f"{battery['percentage']:.0f}%" if battery.get("percentage") is not None else "Unavailable")
@@ -231,6 +336,41 @@ class BatteryPage(Page):
             "Calibration running" if self.calibrating
             else "Calibration status unknown. You can send an explicit stop request." if self.calibration_unknown
             else "Ready" if ac is True else "Power source unknown; connect AC to start" if ac is None else "Connect AC power to start")
+
+    def update_devices(self, devices):
+        # A changed control range/owner must replace the old editable form.
+        signatures = {(d["device_key"], json.dumps(d["charge_control"].get("constraints", {}), sort_keys=True),
+                       d["charge_control"].get("writable"), d["charge_control"].get("start") is not None)
+                      for d in devices}
+        for signature in list(self.device_forms):
+            if signature not in signatures:
+                for form in self.device_forms.pop(signature):
+                    self.content.remove(form)
+                    self.forms.remove(form)
+        for item in devices:
+            key, control = item["device_key"], item["charge_control"]
+            signature = next(sig for sig in signatures if sig[0] == key)
+            limits = control.get("constraints", {})
+            editable = control.get("writable") and all(k in limits for k in ("minimum", "maximum", "step"))
+            if signature not in self.device_forms:
+                def save(v, k=key):
+                    return self.state.client._send_command("set_battery_threshold", {"key": k, "start": v.get("start", -1), "end": v["end"]})
+                form = self.form(item["name"], save=save if editable else None, action="Apply thresholds")
+                forms = self.device_forms[signature] = [form]
+                if editable:
+                    for field in ("start", "end"):
+                        if control.get(field) is not None:
+                            form.spin(field, f"Charge {field} (%)", limits["minimum"], limits["maximum"], limits["step"])
+                    if limits["maximum"] == 100:
+                        forms.append(self.form(f'Full charge · {item["name"]}', action="Charge fully for 4 hours",
+                                               save=lambda _, k=key: self.state.client._send_command("charge_full_once", {"key": k, "duration": 14400})))
+            form = self.device_forms[signature][0]
+            summary = [item["status"]]
+            for name, reading in item["measurements"].items():
+                if reading.get("valid") and name in ("capacity", "energy_full", "cycle_count"):
+                    summary.append(f'{name.replace("_", " ")} {reading["value"]} {reading["unit"]}')
+            form.group.set_description(" · ".join(summary))
+            form.load({k: v for k, v in control.items() if k in ("start", "end") and v is not None})
 
     def load(self, _state, data):
         features = data.get("features", [])
@@ -259,8 +399,9 @@ class DisplayPage(Page):
         self.restart = Adw.Banner(title="Restart required to use the configured graphics mode.")
         self.content.append(self.restart)
         self.graphics = self.form("Graphics mode", "Integrated saves power. Hybrid uses integrated graphics with NVIDIA on demand. NVIDIA favors discrete graphics performance.",
-                                  save=lambda v: state.client.set_display_mode(self.MODES[v["mode"]]), action="Apply graphics mode",
+                                  save=self.apply_graphics, action="Apply graphics mode",
                                   confirmation="This changes the graphics configuration. Save your work and restart your computer afterward for the change to take effect.")
+        self.graphics.review = self.review_graphics
         self.configured = self.graphics.info("Configured mode")
         self.mode_rows = self.graphics.radio("mode", [
             ("Integrated", "Use integrated graphics for longer battery life."),
@@ -270,6 +411,53 @@ class DisplayPage(Page):
         self.lcd = self.form("Panel response", save=lambda v: state.client.set_lcd_override(v["enabled"]), immediate=True)
         self.lcd_view = BinaryControlView(self.lcd, "lcd_override")
         state.connect("settings-changed", self.load)
+
+    def apply_graphics(self, values):
+        mode = self.MODES[values["mode"]]
+        token = getattr(self, "reviewed_token", None)
+        self.reviewed_token = None
+        if token:
+            return self.state.client._send_command("apply_graphics_plan", {"mode": mode, "token": token})
+        return self.state.client.set_display_mode(mode)
+
+    def review_graphics(self):
+        self.reviewed_token = None
+        form = self.graphics
+        values = form.values()
+        mode = self.MODES[values["mode"]]
+        if not self.state.settings.get("capability_schema_version"):
+            return confirm(self.get_root(), "Apply graphics mode", form.confirmation, "Apply",
+                           lambda: form.request(values))
+        form.pending = True
+        form._sensitivity()
+        form.feedback.set_label("Checking drivers, displays and boot requirements…")
+        form.feedback.set_visible(True)
+
+        def check():
+            response = self.state.client._send_command("get_graphics_plan", {"mode": mode})
+            GLib.idle_add(show, response)
+
+        def show(response):
+            if self.state.closed:
+                return False
+            form.pending = False
+            form._sensitivity()
+            plan = response.get("data") or {}
+            if not plan.get("available"):
+                form.feedback.set_label(str(plan.get("reason_code") or response.get("error") or "Mode unavailable").replace("_", " "))
+                return False
+            checks = plan.get("preflight") or {}
+            lines = [f"Requested mode: {mode}", f'Configuration owner: {plan["owner"]}',
+                     "Driver packages: " + ", ".join(plan.get("packages") or []),
+                     "Connected displays: " + (", ".join(checks.get("active_outputs", [])) or "None reported"),
+                     "After reboot, verify rendering and each connected display."]
+            if mode == "integrated":
+                lines.append("Outputs wired to the discrete GPU may disappear.")
+            form.feedback.set_label("Review the configuration before applying.")
+            self.reviewed_token = plan.get("review_token")
+            confirm(self.get_root(), "Review graphics change", "\n".join(lines), "Apply", lambda: form.request(values))
+            return False
+        threading.Thread(target=check, daemon=True).start()
 
     def load(self, _state, data):
         features = data.get("features", [])
@@ -450,9 +638,15 @@ class FirmwarePage(Page):
         self.details = self.form("Device firmware")
         self.bios = self.details.info("BIOS version", copyable=True)
         self.vendor = self.details.info("Vendor")
+        self.vendor_help = Adw.PreferencesGroup(title="Manufacturer support", description=(
+            "Confirm your exact model, board, installed BIOS and region. Read Acer’s prerequisites and recovery instructions before choosing a download."))
+        self.vendor_link = Gtk.LinkButton(label="Open this model on Acer Support")
+        self.vendor_help.add(self.vendor_link)
+        self.vendor_help.set_visible(False)
+        self.content.append(self.vendor_help)
         self.check = self.form("Updates", save=self._check, action="Check for updates")
         self.status = self.check.info("Last check", "Not checked")
-        self.updates = Adw.PreferencesGroup(title="Available updates")
+        self.updates = Adw.PreferencesGroup(title="Device results")
         self.content.append(self.updates)
         self.update_rows = []
         state.connect("settings-changed", self.load)
@@ -470,7 +664,12 @@ class FirmwarePage(Page):
         self.vendor.set_subtitle(info.get("vendor") or "Unknown")
         status = info.get("status", "not_checked")
         message = {"not_checked": "Not checked", "unavailable": "Install fwupd to check for updates.",
-                   "current": "No updates available", "updates": "Updates available", "error": "Check failed"}.get(status, "Not checked")
+                   "current": "No updates returned for supported devices", "updates": "Updates available",
+                   "checking": "Check in progress", "unsupported": "No supported update service for these devices",
+                   "blocked": "An update prerequisite is missing", "metadata_stale": "Cached metadata is stale",
+                   "metadata_unknown": "Metadata freshness is unknown", "no_devices": "No devices reported by fwupd",
+                   "offline": info.get("error") or "Firmware metadata is unavailable while offline",
+                   "error": info.get("error") or "Check failed"}.get(status, "Not checked")
         if info.get("checked_at"):
             message += " · " + datetime.fromtimestamp(info["checked_at"]).strftime("%b %d, %H:%M")
         self.status.set_subtitle(message)
@@ -479,22 +678,69 @@ class FirmwarePage(Page):
         for row in self.update_rows:
             self.updates.remove(row)
         self.update_rows.clear()
-        for device in info.get("updates") or []:
-            releases = device.get("Releases") or [{}]
-            release = releases[0]
-            name = device.get("Name", device.get("name", "Device"))
-            version = release.get("Version", device.get("version", ""))
-            summary = release.get("Summary", device.get("summary", ""))
-            row = Adw.ActionRow(title=f"{name} {version}".strip(), subtitle=summary)
+        for device in info.get("devices") or []:
+            detail = device.get("reason") or device.get("status", "unknown").replace("_", " ")
+            if device.get("vendor"):
+                detail = device["vendor"] + " · " + detail
+            if device.get("version"):
+                detail += " · installed " + device["version"]
+            if device.get("ac_required"):
+                detail += " · AC power required"
+            if device.get("reboot"):
+                detail += " · Restart required"
+            row = Adw.ExpanderRow(title=device.get("name", "Device"), subtitle=detail, use_markup=False)
+            for release in device.get("releases") or []:
+                release_detail = " · ".join(part for part in (
+                    release.get("urgency"),
+                    (f"about {release['install_duration']} seconds" if release.get("install_duration") else None),
+                    ("AC power required" if release.get("ac_required") else None),
+                    ("Restart required" if release.get("reboot") else None)) if part)
+                title = "Available " + (release.get("version") or "firmware release")
+                row.add_row(Adw.ActionRow(title=title,
+                                          subtitle=release.get("summary") or release_detail or "Release details unavailable",
+                                          use_markup=False))
+                if release.get("description"):
+                    row.add_row(Adw.ActionRow(title="Release notes", subtitle=release["description"], use_markup=False))
+                rollback = release.get("rollback", device.get("rollback", "Rollback is not guaranteed."))
+                row.add_row(Adw.ActionRow(title="Power, restart, and recovery",
+                                          subtitle=f"{release_detail}{' · ' if release_detail else ''}{rollback}",
+                                          use_markup=False))
+            if device.get("status") == "unsupported":
+                row.add_row(Adw.ActionRow(
+                    title="Vendor-only update checklist",
+                    subtitle="Use the exact official model support route; verify model, current version, signature, power, and recovery instructions. Archer will not run a vendor flasher.",
+                    use_markup=False))
+            if device.get("releases"):
+                row.add_row(Adw.ActionRow(
+                    title="Install a reviewed release in a terminal",
+                    subtitle=("Run archer-session firmware-install " + device["device_key"]
+                              + " VERSION with an offered version. Review the prerequisites and confirm there."
+                              if device.get("device_key") else "Review the device and its release using fwupd."),
+                    use_markup=False))
             self.updates.add(row)
             self.update_rows.append(row)
+        if not info.get("devices"):
+            # Archer 2.0 services exposed only the fwupd-shaped update list.
+            for device in info.get("updates") or []:
+                release = (device.get("Releases") or [{}])[0]
+                name = device.get("Name", device.get("name", "Device"))
+                version = release.get("Version", device.get("version", ""))
+                summary = release.get("Summary", device.get("summary", ""))
+                row = Adw.ActionRow(title=f"{name} {version}".strip(), subtitle=summary, use_markup=False)
+                self.updates.add(row)
+                self.update_rows.append(row)
         self.updates.set_visible(bool(self.update_rows))
         return False
 
     def load(self, _state, data):
         self.availability(True)
+        info = data.get("firmware_info") or {}
+        url = vendor_route(info.get("vendor"), (data.get("system_info") or {}).get("product_name"))
+        self.vendor_help.set_visible(bool(url))
+        if url:
+            self.vendor_link.set_uri(url)
         if not self.check.pending:
-            self._render(data.get("firmware_info") or {})
+            self._render(info)
 
 
 class AdvancedPage(Page):
@@ -505,7 +751,8 @@ class AdvancedPage(Page):
                                   save=self._override, action="Apply override", destructive=True,
                                   confirmation="This changes the persistent driver configuration. An incorrect model override can disable hardware controls. Reload the driver or restart afterward.")
         self.current = self.override.info("Saved configuration")
-        self.override.combo("mode", "Model override", ["Disabled", "Nitro (nitro_v4)", "Predator (predator_v4)", "Enable all features (enable_all)"])
+        self.model_choices = [""]
+        self.model_row = self.override.combo("mode", "Model override", ["Use detected hardware"])
         self.restart = self.form("Restart Archer service", "Hardware controls will reconnect automatically.",
                                  save=lambda _: state.client.restart_daemon(), action="Restart service")
         self.reload = self.form("Reload drivers and service", "Temporarily interrupts hardware control. You may need to restart your computer if the driver cannot reload.",
@@ -529,12 +776,18 @@ class AdvancedPage(Page):
 
     def _override(self, values):
         mode = values["mode"]
-        return self.state.client.remove_modprobe_parameter() if mode == 0 else self.state.client.set_modprobe_parameter(["", "nitro_v4", "predator_v4", "enable_all"][mode])
+        return self.state.client.remove_modprobe_parameter() if mode == 0 else self.state.client.set_modprobe_parameter(self.model_choices[mode])
 
     def load(self, _state, data):
         value = data.get("driver_override", "Unknown (older service)")
         self.current.set_subtitle(value)
-        mode = next((index for index, key in enumerate(("", "nitro_v4", "predator_v4", "enable_all")) if key and key in value), 0)
+        choices = [""] + [k for k in data.get("qualified_driver_overrides", []) if k in ("nitro_v4", "predator_v4")]
+        if self.model_choices != choices:
+            self.model_choices = choices
+            self.model_row.set_model(Gtk.StringList.new(["Use detected hardware"] + choices[1:]))
+        self.override.set_visible(bool(choices[1:]) or value not in ("Disabled", "Unknown (older service)"))
+        self.override.baseline_unknown = len(choices) == 1 and value != "Disabled"
+        mode = next((index for index, key in enumerate(self.model_choices) if key and key in value), 0)
         self.override.load({"mode": mode})
 
     def _logs(self, _button):

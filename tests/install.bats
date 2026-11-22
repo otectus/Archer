@@ -160,7 +160,7 @@ DRIVER
     dkms() { echo 'linuwu-sense/1.0.archer2: installed'; }
     output="$(module_install)"
     [[ "$output" == *'systemctl restart archer-daemon.service'* ]]
-    [[ "$output" == *'/gui/archer /opt/archer/'* ]]
+    [[ "$output" == *'/scripts/archer-gui-files.py install'* ]]
 }
 
 @test "GUI install records login startup and uninstall removes it" {
@@ -171,10 +171,9 @@ DRIVER
     module_install > "$BATS_TEST_TMPDIR/install-output"
     [[ "$INSTALLED_FILES" == *" $_GUI_AUTOSTART "* ]]
     output="$(cat "$BATS_TEST_TMPDIR/install-output")"
-    [[ "$output" == *"cp $SCRIPT_DIR/gui/io.github.archer.desktop $_GUI_AUTOSTART"* ]]
-    [[ "$output" == *"cp $SCRIPT_DIR/gui/io.github.archer.desktop /opt/archer/"* ]]
+    [[ "$output" == *"/scripts/archer-gui-files.py install"* ]]
     output="$(module_uninstall)"
-    [[ "$output" == *"rm -f $_GUI_AUTOSTART"* ]]
+    [[ "$output" == *"/scripts/archer-gui-files.py remove"* ]]
 }
 
 @test "GUI verification detects a missing login startup entry" {
@@ -195,6 +194,10 @@ DRIVER
 @test "real package modules propagate failure under the installer conditional" {
     for module in audio wifi power gamemode firmware audio-enhance; do
         source "$BATS_TEST_DIRNAME/../modules/$module.sh"
+        if [[ "$module" == wifi ]]; then
+            KERNEL_LOG_AVAILABLE=1
+            _CACHED_DMESG='iwlwifi firmware failed'
+        fi
         run_sudo() { return 37; }
         pacman() { return 1; }
         INSTALLED_FILES='' INSTALLED_PACKAGES=''
@@ -209,7 +212,7 @@ DRIVER
 @test "GUI deployment does not continue after an essential copy failure" {
     source "$BATS_TEST_DIRNAME/../modules/gui.sh"
     run_sudo() {
-        [[ "$1" != cp ]] || return 1
+        [[ "$*" != *"archer-gui-files.py install"* ]] || return 1
         [[ "$*" != *'systemctl restart'* ]] || touch "$BATS_TEST_TMPDIR/restarted"
     }
     if module_install; then return 1; fi
@@ -240,6 +243,7 @@ DRIVER
     source "$BATS_TEST_DIRNAME/../modules/power.sh"
     pacman() { return 0; }
     confirm() { return 1; }
+    systemctl() { [[ "$*" == *'is-active --quiet power-profiles-daemon.service'* ]]; }
     run_sudo() { return 99; }
     INSTALLED_FILES='' INSTALLED_PACKAGES='' MODULE_SKIPPED=0
     module_install

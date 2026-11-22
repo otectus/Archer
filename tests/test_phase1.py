@@ -104,8 +104,12 @@ class InstallerStateTests(unittest.TestCase):
             install_state.main(['power', 'service', '--', 'fwupd.service', 'start'])
             commands.clear()
             install_state.main(['power', 'restore-services'])
-        self.assertEqual(commands, [('unmask', 'fwupd.service'), ('start', 'fwupd.service'),
-                                    ('unmask', 'power-profiles-daemon.service'), ('enable', 'power-profiles-daemon.service'),
+        self.assertEqual(commands, [('is-enabled', 'fwupd.service'), ('is-active', 'fwupd.service'),
+                                    ('unmask', 'fwupd.service'), ('start', 'fwupd.service'),
+                                    ('is-enabled', 'power-profiles-daemon.service'),
+                                    ('is-active', 'power-profiles-daemon.service'),
+                                    ('unmask', 'power-profiles-daemon.service'),
+                                    ('enable', 'power-profiles-daemon.service'),
                                     ('start', 'power-profiles-daemon.service')])
 
     def test_disappearing_diagnostic_attribute_does_not_abort_report(self):
@@ -262,7 +266,9 @@ class RuntimeTests(unittest.TestCase):
             self.record.assert_called_with('', 'failed', 'unload failed')
 
     def test_graphics_helper_requires_success_and_actual_readback(self):
-        with patch.object(archer_system, 'checked', return_value='hybrid'), patch.object(archer_system, 'rebuild'):
+        with patch.object(archer_system, 'checked', return_value='hybrid'), patch.object(archer_system, 'rebuild'), \
+                patch.object(archer_system, 'build_plan', return_value={'available': True, 'backend': 'envycontrol'}), \
+                patch.object(archer_system, 'collect_inventory'), patch.object(archer_system, 'verify_kernel_modules'):
             with self.assertRaisesRegex(OSError, 'readback'):
                 archer_system.operate('display', 'nvidia')
         with self.assertRaises(ValueError):
@@ -382,7 +388,7 @@ class HardwareRegressionTests(unittest.TestCase):
         def check(*args, **kwargs):
             entered.set()
             release.wait(2)
-            return CommandResult(2, '{}')
+            return CommandResult(0, '{"Devices":[]}')
         with patch.object(daemon.shutil, 'which', return_value='/usr/bin/fwupdmgr'), \
                 patch.object(daemon, 'run_command', side_effect=check) as command:
             thread = threading.Thread(target=self.hw.get_firmware_info)
@@ -391,7 +397,7 @@ class HardwareRegressionTests(unittest.TestCase):
             self.assertEqual(self.hw.get_firmware_info()['status'], 'checking')
             release.set()
             thread.join(2)
-            self.assertEqual(self.hw.get_firmware_info()['status'], 'current')
+            self.assertEqual(self.hw.get_firmware_info()['status'], 'no_devices')
             self.assertEqual(command.call_count, 1)
 
     def test_game_mode_restores_every_policy_after_same_boot_crash(self):

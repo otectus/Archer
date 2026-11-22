@@ -1,0 +1,23 @@
+[Trigger]
+Operation = Upgrade
+Operation = Install
+Operation = Remove
+Type = Package
+Target = linux
+Target = linux-lts
+Target = linux-cachyos*
+Target = linux-zen
+Target = linux-hardened
+Target = linux-firmware*
+Target = nvidia*
+Target = pipewire*
+Target = fwupd
+Target = tlp
+Target = power-profiles-daemon
+Target = archer-*
+
+[Action]
+Description = Recording local Archer hardware observation
+When = PostTransaction
+Depends = archer-core
+Exec = /usr/bin/python3 /usr/lib/archer/app/archer_update_history.py after

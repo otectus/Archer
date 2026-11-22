@@ -8,6 +8,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 
 from archer_settings import object_request
+from archer_version import VERSION
 
 import dbus
 import dbus.service
@@ -28,8 +29,14 @@ POLKIT_ACTIONS = {
     "set_thermal_profile": "io.otectus.archer1.set-profile",
     "set_fan_speed": "io.otectus.archer1.set-fan",
     "set_fan_curve": "io.otectus.archer1.set-fan",
+    "set_native_fan_curve": "io.otectus.archer1.set-fan",
+    "set_fan_device": "io.otectus.archer1.set-fan",
+    "set_fan_mode": "io.otectus.archer1.set-fan",
+    "restore_firmware_auto": "io.otectus.archer1.set-fan",
     "set_battery_calibration": "io.otectus.archer1.set-hardware",
     "set_battery_limiter": "io.otectus.archer1.set-hardware",
+    "set_battery_threshold": "io.otectus.archer1.set-hardware",
+    "charge_full_once": "io.otectus.archer1.set-hardware",
     "set_usb_charging": "io.otectus.archer1.set-hardware",
     "set_backlight_timeout": "io.otectus.archer1.set-hardware",
     "set_lcd_override": "io.otectus.archer1.set-hardware",
@@ -159,7 +166,12 @@ class ArcherDBusService(dbus.service.Object):
 
             def maintain():
                 try:
+                    if hasattr(self.hw, "poll_inventory"):
+                        generation = self.hw.poll_inventory()
+                        if isinstance(generation, str):
+                            GLib.idle_add(self.InventoryChanged, generation)
                     self.hw.poll_profile_led()
+                    self.hw._expire_battery_overrides()
                 except Exception as error:
                     logger.warning("Lighting maintenance failed: %s", error)
                 finally:
@@ -184,7 +196,8 @@ class ArcherDBusService(dbus.service.Object):
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
                          sender_keyword="sender")
     def Ping(self, sender=None):
-        return self._json_response({"success": True, "data": {"version": self.hw.settings.get("daemon_version", "2.0.1")}})
+        return self._json_response({"success": True, "data": {"version": VERSION,
+                                    "interface": 1, "capability_schema": 1}})
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
@@ -212,11 +225,47 @@ class ArcherDBusService(dbus.service.Object):
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetCapabilities(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._json_response({"success": True, "data": self.hw.get_capabilities()}),
+                              reply, failure, mutating=False)
+
+    @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetBatteryDevices(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._json_response({"success": True, "data": {
+            "schema_version": 1, "batteries": self.hw.get_battery_devices()}}), reply, failure, mutating=False)
+
+    @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetPolicyStatus(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._json_response({"success": True, "data": self.hw.get_policy_status()}),
+                              reply, failure, mutating=False)
+
+    @dbus.service.method(DBUS_IFACE, in_signature="s", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetGraphicsPlan(self, mode, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_GetGraphicsPlan(mode), reply, failure, mutating=False)
+
+    def _do_GetGraphicsPlan(self, mode):
+        try:
+            return self._json_response({"success": True, "data": self.hw.get_graphics_plan(str(mode))})
+        except ValueError as error:
+            return self._json_response({"success": False, "error": str(error)})
+
+    @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
     def GetFanCurve(self, reply=None, failure=None, sender=None):
         return self._dispatch(lambda: self._do_GetFanCurve(sender=sender), reply, failure, mutating=False)
 
     def _do_GetFanCurve(self, sender=None):
         return self._json_response({"success": True, "data": self.hw.get_fan_curve_state()})
+
+    @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def GetCoolingDevices(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._json_response({
+            "success": True, "data": self.hw.get_cooling_devices()}),
+            reply, failure, mutating=False)
 
     @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
@@ -306,6 +355,67 @@ class ArcherDBusService(dbus.service.Object):
         except (ValueError, TypeError) as error:
             return self._json_response({"success": False, "error": str(error)})
 
+    @dbus.service.method(DBUS_IFACE, in_signature="s", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetNativeFanCurve(self, params_json, reply=None, failure=None, sender=None):
+        return self._dispatch(
+            lambda: self._do_SetNativeFanCurve(params_json, sender=sender),
+            reply, failure, mutating=True)
+
+    def _do_SetNativeFanCurve(self, params_json, sender=None):
+        if not self._authorize("set_native_fan_curve", sender):
+            return self._json_response({"success": False, "error": "Authorization denied"})
+        try:
+            params = json.loads(params_json)
+            if not isinstance(params, dict) or type(params.get("enabled", True)) is not bool:
+                raise ValueError("Expected a native curve object")
+            fan_id = params.get("fan_id")
+            if params.get("enabled", True) is False:
+                return self._json_response(self.hw.stop_native_fan_curve(fan_id))
+            result = self.hw.start_native_fan_curve(
+                fan_id, params.get("sensor_id"), params.get("points"),
+                params.get("duration_seconds"), owner=f"dbus:{sender}",
+                resume_after_suspend=params.get("resume_after_suspend", True))
+            return self._json_response(result)
+        except (ValueError, TypeError) as error:
+            return self._json_response({"success": False, "error": str(error)})
+
+    @dbus.service.method(DBUS_IFACE, in_signature="si", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetFanDevice(self, fan_id, percent, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetFanDevice(str(fan_id), percent, sender),
+                              reply, failure, mutating=True)
+
+    def _do_SetFanDevice(self, fan_id, percent, sender):
+        if not self._authorize("set_fan_device", sender):
+            return self._json_response({"success": False, "error": "Authorization denied"})
+        return self._json_response(self.hw.set_fan_device(
+            fan_id, int(percent), owner=f"dbus:{sender}"))
+
+    @dbus.service.method(DBUS_IFACE, in_signature="ss", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetFanMode(self, fan_id, mode, reply=None, failure=None, sender=None):
+        return self._dispatch(
+            lambda: self._do_SetFanMode(str(fan_id), str(mode), sender),
+            reply, failure, mutating=True)
+
+    def _do_SetFanMode(self, fan_id, mode, sender):
+        if not self._authorize("set_fan_mode", sender):
+            return self._json_response({"success": False,
+                                        "error": "Authorization denied"})
+        return self._json_response(self.hw.set_fan_mode(
+            fan_id, mode, owner=f"dbus:{sender}"))
+
+    @dbus.service.method(DBUS_IFACE, in_signature="", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def RestoreFirmwareAuto(self, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_RestoreFirmwareAuto(sender), reply, failure, mutating=True)
+
+    def _do_RestoreFirmwareAuto(self, sender):
+        if not self._authorize("restore_firmware_auto", sender):
+            return self._json_response({"success": False, "error": "Authorization denied"})
+        return self._json_response(self.hw.restore_firmware_auto())
+
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
     def SetBatteryCalibration(self, enabled, reply=None, failure=None, sender=None):
@@ -331,6 +441,29 @@ class ArcherDBusService(dbus.service.Object):
         if ok:
             self.hw.settings.set("battery_limiter", enabled)
         return self._json_response({"success": ok})
+
+    @dbus.service.method(DBUS_IFACE, in_signature="sii", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def SetBatteryThreshold(self, device_key, start, end, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_SetBatteryThreshold(str(device_key), start, end, sender),
+                              reply, failure, mutating=True)
+
+    def _do_SetBatteryThreshold(self, device_key, start, end, sender):
+        if not self._authorize("set_battery_threshold", sender):
+            return self._json_response({"success": False, "error": "Authorization denied"})
+        start, end = int(start), int(end)
+        return self._json_response(self.hw.set_battery_threshold(device_key, None if start < 0 else start, end))
+
+    @dbus.service.method(DBUS_IFACE, in_signature="si", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def ChargeFullOnce(self, device_key, duration, reply=None, failure=None, sender=None):
+        return self._dispatch(lambda: self._do_ChargeFullOnce(str(device_key), duration, sender),
+                              reply, failure, mutating=True)
+
+    def _do_ChargeFullOnce(self, device_key, duration, sender):
+        if not self._authorize("charge_full_once", sender):
+            return self._json_response({"success": False, "error": "Authorization denied"})
+        return self._json_response(self.hw.charge_full_once(device_key, int(duration)))
 
     @dbus.service.method(DBUS_IFACE, in_signature="i", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
@@ -429,6 +562,15 @@ class ArcherDBusService(dbus.service.Object):
         result = self.hw.set_display_mode(mode)
         return self._json_response(result)
 
+    @dbus.service.method(DBUS_IFACE, in_signature="ss", out_signature="s",
+                         sender_keyword="sender", async_callbacks=("reply", "failure"))
+    def ApplyGraphicsPlan(self, mode, token, reply=None, failure=None, sender=None):
+        def apply():
+            if not self._authorize("set_display_mode", sender):
+                return self._json_response({"success": False, "error": "Authorization denied"})
+            return self._json_response(self.hw.set_display_mode(str(mode), str(token)))
+        return self._dispatch(apply, reply, failure, mutating=True)
+
     @dbus.service.method(DBUS_IFACE, in_signature="b", out_signature="s",
                          sender_keyword="sender", async_callbacks=("reply", "failure"))
     def SetGameMode(self, enabled, reply=None, failure=None, sender=None):
@@ -509,6 +651,10 @@ class ArcherDBusService(dbus.service.Object):
         return self._json_response(self.hw.restart_drivers_and_daemon())
 
     # --- D-Bus Signals ---
+
+    @dbus.service.signal(DBUS_IFACE, signature="s")
+    def InventoryChanged(self, generation):
+        """Advertise a new generation after hotplug or a driver binding change."""
 
     @dbus.service.signal(DBUS_IFACE, signature="s")
     def TelemetryUpdated(self, data_json):

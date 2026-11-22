@@ -89,6 +89,7 @@ class Form(Gtk.Box):
         self.state = state
         self.save = save
         self.immediate = immediate
+        self.review = None
         self.confirmation = confirmation
         self.destructive = destructive
         self.fields = {}
@@ -253,6 +254,8 @@ class Form(Gtk.Box):
     def submit(self):
         if self.pending or not self.state.writable or not self.allowed:
             return
+        if self.review:
+            return self.review()
         if self.confirmation:
             return confirm(self.get_root(), self.group.get_title(), self.confirmation,
                            self.apply_button.get_label(), self._run, self.destructive)

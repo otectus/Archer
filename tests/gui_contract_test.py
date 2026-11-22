@@ -205,7 +205,7 @@ class ContractTests(unittest.TestCase):
         hw = HardwareManager.__new__(HardwareManager)
         with patch('archer_daemon.shutil.which', return_value='/usr/bin/fwupdmgr'), patch('archer_daemon.run_command') as run:
             run.return_value = CommandResult(2, '{}')
-            self.assertEqual(hw.get_firmware_info()['status'], 'current')
+            self.assertEqual(hw.get_firmware_info()['status'], 'no_devices')
             hw._firmware_checked = -float('inf')
             run.return_value = CommandResult(0, 'invalid')
             self.assertEqual(hw.get_firmware_info()['status'], 'error')

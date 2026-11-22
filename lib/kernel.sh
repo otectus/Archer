@@ -97,19 +97,9 @@ kernel_dkms_diagnostics() {
 }
 
 kernel_refresh_initramfs() {
-    local etc="${1:-/etc}" mkinitcpio="${2:-/usr/bin/mkinitcpio}" dracut="${3:-/usr/bin/dracut}"
-    # Early boot images can contain both the old module and modprobe config.
-    # Rebuild all installed presets; bypass interactive /usr/local wrappers.
-    if [[ -x "$mkinitcpio" ]] && compgen -G "$etc/mkinitcpio.d/*.preset" >/dev/null; then
-        run_sudo_timeout 300 "$mkinitcpio" -P || return 1
-        if has_cmd limine-mkinitcpio; then
-            run_sudo_timeout 120 limine-mkinitcpio || return 1
-        fi
-    elif [[ -x "$dracut" ]]; then
-        run_sudo_timeout 300 "$dracut" --regenerate-all --force || return 1
-    else
-        log "No mkinitcpio presets or dracut found. Rebuild custom early-boot images if they include Acer modules."
-    fi
+    local project_root boot_root="${ARCHER_BOOT_ROOT:-/}"
+    project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+    run_sudo_timeout 300 python3 "$project_root/scripts/archer-boot.py" --root "$boot_root" rebuild
 }
 
 archer_config_owned() {

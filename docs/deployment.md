@@ -1,6 +1,6 @@
 # Deployment and release checks
 
-Archer is installed from a complete repository checkout with `install.sh`. GUI dependencies come from system packages; `gui/requirements-gui.txt` documents them and is not a pip requirements list. Supported deployment targets are Arch-family systems with systemd. The GUI requires Python 3.10+, GTK 4.12+, libadwaita 1.6+, PyGObject, pycairo, dbus-python, and an X11 or Wayland session. A panel with StatusNotifierItem/D-Bus menu support is needed for the tray.
+Archer can be installed as native Arch packages or from a reviewed checkout with `install.sh`. GUI dependencies come from system packages; `gui/requirements-gui.txt` documents them and is not a pip requirements list. The daemon and GUI require systemd integration. Selected script modules also implement OpenRC service lifecycle. The GUI requires Python 3.10+, GTK 4.12+, libadwaita 1.6+, PyGObject, pycairo, dbus-python, and an X11 or Wayland session. A panel with StatusNotifierItem/D-Bus menu support is needed for the tray.
 
 ## Install or upgrade the GUI
 
@@ -14,7 +14,7 @@ archer-gui
 
 Before upgrading, use the tray's **Exit** or the GUI's **Quit** action and resolve any unapplied edits. Closing the window can leave the old GUI process in the tray. Launch Archer again after installation to load the new GUI code.
 
-The GUI module validates its required sources before installation, installs the complete `gui/archer` package and assets under `/opt/archer`, and installs the launcher, desktop entry, SVG icon, system D-Bus policy, polkit actions, and systemd unit. It reloads D-Bus policy and systemd, enables the daemon, and restarts it so upgrades load the new daemon code. Restarting restores automatic fan control through the existing shutdown hooks; reapply manual fan settings afterwards if needed.
+The GUI module validates its required sources before installation, installs the complete `gui/archer` package and assets under `/opt/archer`, and installs the launcher, desktop entry, SVG icon, system D-Bus policy, polkit actions, and systemd unit. It reloads D-Bus policy and systemd, enables the daemon, and restarts it so upgrades load the new daemon code. Restarting releases Archer-owned native fan controls to Auto. Review manual fan requests after the restart.
 
 User preferences remain in `$XDG_CONFIG_HOME/archer/gui.json`, and hardware settings remain in `/etc/archer/settings.json`. A GUI upgrade retains these settings. Exit terminates the GUI and tray; the separately managed system daemon continues running.
 
@@ -60,8 +60,55 @@ For desktop accessibility and hardware checks, use the [GUI validation matrix](g
 - Run all checks in [CONTRIBUTING](../CONTRIBUTING.md#running-tests) and the CI workflow, including the external kernel module matrix for driver changes. Inspect visual artifacts when GUI layouts change.
 - Validate `gui/io.github.archer.desktop` with `desktop-file-validate`. Validate the service with `systemd-analyze verify gui/archer-daemon.service` on a machine with `/usr/bin/python3` installed.
 - Review the final changes with `git diff --check` and `git status --short`. Include new files under `gui/`, `driver/`, `lib/`, `scripts/`, `tests/`, and `docs/` in the release commit. Exclude caches, generated modules, logs, and local test environments.
-- Keep unreleased work under `[Unreleased]` in the changelog until a release version and date are chosen. Update the installer version in `lib/utils.sh`, daemon `VERSION` in `gui/archer_daemon.py`, and GUI `__version__` in `gui/archer/__init__.py` as appropriate. The GUI currently has its own version series; DKMS package versions are independent and must match their source/patch manifests.
+- Set the application version in `gui/VERSION`. DKMS versions remain independent and must match their source/patch manifests. Record working-tree evidence and outstanding gates before publishing a version.
 - For issue #10, ask a tester with the affected PT516-52S to run the LCD checks in the [GUI validation matrix](gui.md#development-and-verification). Record the Archer and Linuwu versions, kernel, BIOS, resolved LCD path and raw readback, and keep the tester's preferred final setting.
 - Test both a fresh install and an upgrade from the previous release on a disposable supported system. Check service startup after reboot, preserved settings, application-menu launch, tray behavior, and manifest-aware uninstall.
 
 Local mock tests cannot establish physical hardware compatibility or the behavior of every desktop tray host. Record the systems and kernels actually checked in the release notes.
+
+## Building 2.1 packages
+
+The three application packages share `gui/VERSION`. Drivers have separate DKMS versions. Each preparation command emits a standalone, checksum-pinned PKGBUILD, source archive, source epoch and `.SRCINFO`. Prepare as a login user from a reviewed checkout. Use empty directories.
+
+```sh
+bash scripts/prepare-package.sh /tmp/archer-app
+bash scripts/prepare-dkms-package.sh linuwu-sense /tmp/archer-linuwu
+bash scripts/prepare-dkms-package.sh acer-wmi-battery /tmp/archer-battery
+(cd /tmp/archer-app && SOURCE_DATE_EPOCH="$(cat SOURCE_DATE_EPOCH)" makepkg)
+```
+
+Run the same makepkg command in either driver directory if you need that driver. You may supply an existing upstream Git clone as the third argument to the driver preparation script. The source pin and patches are verified before the recipe is emitted. Build the prepared archives offline in a clean Arch build root with the dependencies installed. Keep the PKGBUILD, `.SRCINFO`, source archive and package together. Pinned drivers include the upstream license and Archer's license. Build inputs identify the license and upstream origin.
+
+## Transferring an existing GUI installation to pacman
+
+Use the complete 2.1 checkout. Quit the GUI and complete or recover any interrupted script install first. The transfer checks the legacy manifest and release hashes or the 2.1 file journal. Locally changed payloads require review. Unrelated files and modules keep their previous owners.
+
+```sh
+python3 scripts/archer-package-migration.py plan
+sudo python3 scripts/archer-package-migration.py prepare
+sudo pacman -U /tmp/archer-app/archer-{core,daemon,gui}-*.pkg.tar.zst
+sudo python3 scripts/archer-package-migration.py finish
+```
+
+Preparation stops the service, backs up its files and records the settings and service state in `/var/lib/archer/package-migration`. Finish checks package installation, retires the GUI manifest entry, then restores the previous enabled and active states. Re-running an interrupted stage resumes from the journal. If a transfer must be reversed, remove the new application packages then run `sudo python3 scripts/archer-package-migration.py restore`. Inspect edited or conflicting paths before retrying. The settings file remains in `/etc/archer`.
+
+For a fresh package installation enable the daemon with `sudo systemctl enable --now archer-daemon`. For removal, quit the GUI, disable the service, and remove `archer-gui archer-daemon archer-core` with pacman. Remove optional driver packages separately only after reviewing the active driver and boot implications. Use the checkout's `uninstall.sh` for modules still recorded in the script manifest. Keep configuration and migration backups until the restored or upgraded system has been verified after reboot. [Transactions and boot recovery](platform-adapters.md)
+
+### Recover a graphics mode change
+
+When Archer applies an EnvyControl mode, the privileged helper saves its original configuration and the resulting state in `/var/lib/archer/envycontrol-ownership.json`. The script uninstaller checks that record when removing the module that owns graphics configuration. Pacman checks it before removing the daemon or core package. If it finds an administrator edit, it stops the transaction while the recovery helper is still installed. To restore the prior mode while keeping the package, run `sudo python3 /usr/lib/archer/app/archer_system.py display-restore`. Restart after the helper confirms the boot images were rebuilt.
+
+If the helper reports an administrator edit, an interrupted application, or a missing journal from an older installation, retain the current configuration and review the affected paths. A failed rebuild leaves the recovery record available for a retry.
+
+## Offline delivery
+
+An offline target needs a consistent, reviewed transaction resolved against its installed package database, distribution, architecture and repository snapshot. In a matching staging system, include the signed Archer packages in a configured local repo and save the package manager's full upgrade plan. Download those exact packages and their detached signatures into one cache. The keyring must contain only authorized distribution and Archer signers.
+
+```bash
+pacman -Sup archer-core archer-daemon archer-gui --print-format $'%n\t%v\t%l' > transaction.tsv
+python3 scripts/prepare-offline-bundle.py transaction.tsv verified-cache trusted-signers.gpg archer-offline.tar --sources dist/2.1.0
+```
+
+The bundle builder verifies every package signature and checks its package name and version against the plan. It includes the versioned docs, schemas and diagnostics inside archer-core. The bundle includes the matching source archives, recipes and build metadata for each Archer package. It checks each recipe against the hash in the signed package and each source archive against that recipe. Verify that the real target still matches the staged package database before applying its transaction. Local development builds require publisher signing before this workflow can accept them.
+
+The local 2.1.0 artifact directory contains application and optional DKMS packages, corresponding PKGBUILDs, source archives, `.SRCINFO` files and `SHA256SUMS`. From that directory, run `sha256sum -c SHA256SUMS`. Locally built artifacts are unsigned until a publisher signs them with the distribution key.

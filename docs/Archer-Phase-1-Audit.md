@@ -1,5 +1,7 @@
 # Archer — Phase 1 audit
 
+Historical record for the Phase 1 baseline. Current behavior and validation are recorded in the [2.1 implementation report](implementation-2.1.md).
+
 Audited on 14 September 2026. **This revision has release-blocking privilege and kernel-driver safety defects.** Four P0 findings need attention before further hardware testing or feature expansion. This report contains 48 findings: 4 P0, 7 P1, 25 P2, 4 P3 and 8 P4. Severity follows the categories in the request; P4 identifies packaging/distribution defects, rather than implying that their effects are always minor.
 
 ## Baseline and scope

@@ -9,7 +9,12 @@ _GREEN="\033[0;32m"
 _BOLD="\033[1m"
 _RESET="\033[0m"
 
-INSTALLER_VERSION="2.0.1"
+_ARCHER_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [[ -r "$_ARCHER_ROOT/gui/VERSION" ]]; then
+    read -r INSTALLER_VERSION < "$_ARCHER_ROOT/gui/VERSION"
+else
+    INSTALLER_VERSION="2.1.0"
+fi
 DRY_RUN="${DRY_RUN:-0}"
 NO_CONFIRM="${NO_CONFIRM:-0}"
 VERBOSE="${VERBOSE:-0}"
@@ -69,8 +74,11 @@ run_sudo_timeout() {
 
 # Rebuild all installed kernel images, propagating failures.
 rebuild_initramfs() {
-    source "$(dirname "${BASH_SOURCE[0]}")/kernel.sh"
-    kernel_refresh_initramfs /etc /usr/bin/mkinitcpio /usr/bin/dracut
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        python3 "$(detect_script_dir)/scripts/archer-boot.py" rebuild --dry-run
+    else
+        run_sudo_timeout 300 python3 "$(detect_script_dir)/scripts/archer-boot.py" rebuild
+    fi
 }
 
 # Prompt for confirmation (respects --no-confirm)
@@ -106,18 +114,42 @@ has_cmd() {
     command -v "$1" &>/dev/null
 }
 
+detect_init_adapter() {
+    if [[ -n "${ARCHER_INIT_ADAPTER:-}" ]]; then
+        printf '%s\n' "$ARCHER_INIT_ADAPTER"
+    elif [[ -d /run/systemd/system ]] && systemctl show --property=Version --value >/dev/null 2>&1; then
+        printf 'systemd\n'
+    elif [[ -d /run/openrc ]] && has_cmd rc-service && has_cmd rc-update; then
+        printf 'openrc\n'
+    else
+        printf 'unsupported\n'
+    fi
+}
+
+init_module_supported() {
+    local adapter="$1" module="$2"
+    [[ "$adapter" == systemd ]] && return 0
+    [[ "$adapter" == openrc ]] || return 1
+    # These modules install package/configuration changes only, or operate on
+    # an existing distribution OpenRC service through archer-install-state.py.
+    case "$module" in audio|wifi|touchpad|thermal|firmware) return 0 ;; *) return 1 ;; esac
+}
+
 # The privileged helper parses literal values, records added tokens and performs
 # the complete root-owned atomic replacement. Exit 3 means no rebuild is needed.
 _update_grub_params() {
     local action="$1" params="$2" status=0
-    if [[ -f /etc/default/grub ]]; then
-        run_sudo python3 "$(detect_script_dir)/scripts/archer-grub.py" "$action" "$params" || status=$?
+    local helper
+    helper="$(detect_script_dir)/scripts/archer-boot.py"
+    if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
+        python3 "$helper" kernel-args "$action" "$params" --dry-run || status=$?
+    else
+        run_sudo_timeout 360 python3 "$helper" kernel-args "$action" "$params" || status=$?
         [[ "$status" -eq 3 ]] && return 0
         [[ "$status" -eq 0 ]] || return 1
-        run_sudo grub-mkconfig -o /boot/grub/grub.cfg || return 1
-    elif [[ "$action" == add && -d /boot/loader/entries ]]; then
-        log "systemd-boot: add these parameters to the options line in /boot/loader/entries/: $params"
+        INSTALLED_FILES="${INSTALLED_FILES:-} /var/lib/archer/boot-arguments.json"
     fi
+    [[ "$status" -eq 0 || "$status" -eq 3 ]]
 }
 
 add_grub_params() { _update_grub_params add "$1"; }

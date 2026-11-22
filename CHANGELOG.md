@@ -5,7 +5,22 @@ All notable changes to Archer Compatibility Suite are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## 2.1.0 — November 2026 development update
+
+- Share typed hardware inventory across installer, daemon, GUI and offline diagnostics. Expose per-device battery and native Acer fan operations and explicit policy ownership.
+- Review graphics, firmware, package and boot changes against the detected environment. Replace broad input and network workarounds with scoped, evidence-based choices.
+- Introduce native application and optional DKMS package recipes, file ownership transfer, and durable script transaction records.
+- Add local health reports and snapshot comparisons, session power presets, peripheral checks, microphone routing, camera preview and optional effects.
+- Rebase Linuwu to `1.0.archer4`, preserve existing safety fixes and gate unqualified upstream paths. Align the installer, GUI and daemon on the same version.
+
+- Graphics mode changes record their prior configuration. Script and pacman removal restore owned state and stop when an administrator has since edited a managed file.
+- Native fan curves pair a selected channel and sensor, expire automatically, and journal ownership for crash recovery. Passive scans detect device changes without taking over fans.
+- Guided checks resume across app restarts. Session tools cover microphone reconnection, camera effects, pointer/pen input, speaker output and observed sleep/wake cycles.
+- The Arch VM verified migration from the archived 2.0.1 GUI installer to the 2.1.0 packages, reboot and configuration-safe removal. An Artix OpenRC VM verified the audio-module lifecycle. Eight kernel variants compiled the three external modules.
+
+See the [2.1 implementation and validation record](docs/implementation-2.1.md) for actual tests and physical qualification still required.
+
+### Changes carried forward from the pre-2.1 development cycle
 
 ### LCD override state and recovery (issue #10)
 

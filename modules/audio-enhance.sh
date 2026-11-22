@@ -18,16 +18,12 @@ module_check_installed() {
 
 module_install() {
     log "Installing audio enhancement dependencies..."
-    run_sudo pacman -S --needed --noconfirm pipewire wireplumber || return 1
+    run_sudo pacman -S --needed --noconfirm pipewire pipewire-audio || return 1
 
-    INSTALLED_PACKAGES+=" pipewire wireplumber"
+    INSTALLED_PACKAGES+=" pipewire pipewire-audio"
     if ! pacman -Q noise-suppression-for-voice >/dev/null 2>&1; then
         if pacman -Si noise-suppression-for-voice >/dev/null 2>&1; then
             run_sudo pacman -S --needed --noconfirm noise-suppression-for-voice || return 1
-        elif has_cmd paru; then
-            run paru -S --needed --noconfirm noise-suppression-for-voice || return 1
-        elif has_cmd yay; then
-            run yay -S --needed --noconfirm noise-suppression-for-voice || return 1
         else
             warn "Install the noise-suppression-for-voice system package, then retry."
             return 1
@@ -38,7 +34,9 @@ module_install() {
         warn "rnnoise LADSPA plugin is missing; audio enhancement was not configured."
         return 1
     fi
-    local old=/etc/pipewire/filter-chain.conf.d/archer-noise-suppress.conf disabled="" config
+    local old=/etc/pipewire/filter-chain.conf.d/archer-noise-suppress.conf disabled=".disabled" config
+    # Keep an existing global chain active. New installs choose a source in the session.
+    [[ ! -f "$old" && ! -f "$_FILTER_CONF" ]] || disabled=""
     [[ -f "$old.disabled" || -f "$_FILTER_CONF.disabled" ]] && disabled=.disabled
     log "Creating PipeWire noise suppression filter..."
     run_sudo mkdir -p "$(dirname "$_FILTER_CONF")" || return 1
@@ -90,7 +88,7 @@ FILTER_EOF
     log "Restart PipeWire to activate: systemctl --user restart pipewire.service"
 
     INSTALLED_FILES+=" $_FILTER_CONF"
-    INSTALLED_PACKAGES+=" pipewire wireplumber"
+    INSTALLED_PACKAGES+=" pipewire pipewire-audio"
 }
 
 module_uninstall() {
@@ -104,14 +102,18 @@ module_uninstall() {
 }
 
 module_verify() {
-    [[ -f "$_FILTER_CONF" || -f "$_FILTER_CONF.disabled" ]] && [[ -f /usr/lib/ladspa/librnnoise_ladspa.so ]] && return 0
+    [[ -f "$_FILTER_CONF" || -f "$_FILTER_CONF.disabled" ]] && [[ -f /usr/lib/ladspa/librnnoise_ladspa.so ]] && [[ -f /usr/lib/pipewire-0.3/libpipewire-module-filter-chain.so ]] && return 0
     warn "Noise suppression config not found at $_FILTER_CONF"
     return 1
 }
 
 module_preflight() {
-    if ! pacman -Q noise-suppression-for-voice >/dev/null 2>&1 && ! pacman -Si noise-suppression-for-voice >/dev/null 2>&1 && ! has_cmd paru && ! has_cmd yay; then
-        warn "Audio enhancement requires the system noise-suppression-for-voice package or an AUR helper."
+    if pacman -Q pulseaudio >/dev/null 2>&1 || ! pacman -Q pipewire >/dev/null 2>&1; then
+        warn "Noise suppression requires an existing PipeWire session. The current sound server will be preserved."
+        return 1
+    fi
+    if ! pacman -Q noise-suppression-for-voice >/dev/null 2>&1 && ! pacman -Si noise-suppression-for-voice >/dev/null 2>&1; then
+        warn "Audio enhancement requires the system noise-suppression-for-voice package in the configured repositories."
         return 1
     fi
 }

@@ -14,6 +14,10 @@ external_versions() {
 
 external_owned_version() {
     local prefix="${DKMS_VERSION_BASE}.archer"
+    local source="${EXTERNAL_SRC_ROOT:-/usr/src}/$DKMS_NAME-$1/dkms.conf"
+    if [[ -e "$source" ]] && pacman -Qqo -- "$source" &>/dev/null; then
+        return 1
+    fi
     [[ "$1" == "$prefix"* && "${1#"$prefix"}" =~ ^[0-9]+$ ]] && return 0
     [[ "$1" == "$DKMS_VERSION_BASE" ]] || return 1
     # Plain upstream versions are not evidence of ownership.
@@ -38,6 +42,10 @@ external_install_dkms() {
     local src_dir="$EXTERNAL_SRC_ROOT/${DKMS_NAME}-${DKMS_VERSION}"
     local temp_dir kernel path version old_status="" old_versions=() kernels=()
     local versions status
+    if pacman -Q "archer-$DKMS_NAME-dkms" &>/dev/null; then
+        warn "The package manager owns $DKMS_NAME. Use pacman to maintain its DKMS source."
+        return 1
+    fi
     log "$DKMS_NAME revision $DRIVER_REVISION, Archer DKMS $DKMS_VERSION"
     if [[ "${DRY_RUN:-0}" -eq 1 ]]; then
         log "Would validate pinned source and patches, build for installed kernels, migrate DKMS, and configure boot loading."

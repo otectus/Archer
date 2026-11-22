@@ -15,6 +15,9 @@ struct per_zone_color { u64 zone1, zone2, zone3, zone4; int brightness; };
 #define pr_err(...) ((void)0)
 static int calls;
 static struct { int per_zone; } current_kb_state;
+static struct { int an515_58_rgb_fix; } rgb_quirk;
+static typeof(rgb_quirk) *quirks = &rgb_quirk;
+static int experimental_profiles;
 static int kstrtoint(const char *str, int base, int *out) {
     char *end;
     if (!str || !*str) return -EINVAL;

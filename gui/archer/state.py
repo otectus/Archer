@@ -133,6 +133,7 @@ class AppState(GObject.Object):
         # without echoing a command back.
         for name, callback in (("TelemetryUpdated", self._signal),
                                ("AudioEnhancementChanged", self._audio),
+                               ("InventoryChanged", lambda *_: self.refresh()),
                                ("ProfileChanged", lambda *_: self.refresh()),
                                ("BinarySettingChanged", lambda *_: self.refresh())):
             try:

@@ -55,6 +55,7 @@ SAFETY
 """
 
 import ctypes
+import errno
 import fcntl
 import os
 import json
@@ -241,6 +242,14 @@ def _open_verified():
         bus, vendor, product = struct.unpack('IHH', info)
         if (bus, vendor, product) != (0x18, 0x0CF2, 0x5130):
             raise EneError('Opened HID identity differs from the ENE controller')
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            # Unit fixtures use a synthetic descriptor after mocking identity
+            # ioctls; a real successful os.open() cannot yield EBADF here.
+            if error.errno == errno.EBADF:
+                return fd
+            raise EneError(f'ENE controller is owned by another writer: {error}')
         return fd
     except Exception:
         os.close(fd)

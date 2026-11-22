@@ -1,0 +1,70 @@
+pkgbase=archer
+pkgname=(archer-core archer-daemon archer-gui)
+pkgver=@VERSION@
+pkgrel=1
+arch=(any)
+url='https://github.com/otectus/Archer'
+license=(MIT)
+source=("archer-${pkgver}.tar.gz")
+sha256sums=('@SHA256@')
+options=(!debug)
+
+package_archer-core() {
+    pkgdesc='Read-only Acer laptop inventory, diagnostics and session tools'
+    depends=(python)
+    optdepends=('ffmpeg: camera preview, effects and microphone meter' 'pipewire-audio: session noise suppression'
+                'noise-suppression-for-voice: rnnoise filter' 'switcheroo-control: per-application GPU selection'
+                'python-gobject: session bus tools' 'fwupd: device firmware checks' 'fprintd: fingerprint enrollment')
+    cd "archer-$pkgver"
+    local dest="$pkgdir/usr/lib/archer/app" file
+    install -d "$dest" "$pkgdir/usr/bin" "$pkgdir/usr/share/doc/archer"
+    for file in gui/archer_*.py; do
+        case "${file##*/}" in archer_gui.py|archer_daemon.py|archer_dbus.py) continue ;; esac
+        install -m644 "$file" "$dest/"
+    done
+    cp -r gui/data "$dest/"
+    install -m644 gui/VERSION "$dest/"
+    install -d "$pkgdir/usr/share/libalpm/hooks"
+    install -m644 packaging/hooks/*.hook "$pkgdir/usr/share/libalpm/hooks/"
+    install -m644 scripts/archer-boot.py "$dest/"
+    install -m755 scripts/archer-diagnose.py "$dest/"
+    chmod 755 "$dest/archer_cli.py" "$dest/archer_session.py"
+    ln -s /usr/lib/archer/app/archer_cli.py "$pkgdir/usr/bin/archer"
+    ln -s /usr/lib/archer/app/archer_session.py "$pkgdir/usr/bin/archer-session"
+    ln -s /usr/lib/archer/app/archer-diagnose.py "$pkgdir/usr/bin/archer-diagnose"
+    install -d "$pkgdir/usr/share/doc/archer/.github"
+    cp -r .github/ISSUE_TEMPLATE "$pkgdir/usr/share/doc/archer/.github/"
+    cp -r docs schemas README.md CHANGELOG.md CONTRIBUTING.md "$pkgdir/usr/share/doc/archer/"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_archer-daemon() {
+    pkgdesc='Acer hardware control service and polkit integration'
+    depends=("archer-core=$pkgver" python-dbus python-gobject polkit systemd)
+    cd "archer-$pkgver"
+    local dest="$pkgdir/usr/lib/archer/app"
+    install -d "$dest" "$pkgdir/etc/archer"
+    install -m644 gui/archer_daemon.py gui/archer_dbus.py "$dest/"
+    sed -i 's|/opt/archer/|/usr/lib/archer/app/|g' "$dest/archer_daemon.py"
+    install -Dm644 gui/io.otectus.Archer1.conf "$pkgdir/usr/share/dbus-1/system.d/io.otectus.Archer1.conf"
+    install -Dm644 gui/io.otectus.Archer1.policy "$pkgdir/usr/share/polkit-1/actions/io.otectus.Archer1.policy"
+    install -Dm644 gui/archer-daemon.service "$pkgdir/usr/lib/systemd/system/archer-daemon.service"
+    sed -i 's|/opt/archer/|/usr/lib/archer/app/|g' "$pkgdir/usr/lib/systemd/system/archer-daemon.service"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
+
+package_archer-gui() {
+    pkgdesc='Archer GTK hardware control center'
+    depends=("archer-daemon=$pkgver" 'gtk4>=4.12' 'libadwaita>=1.6' python-cairo)
+    cd "archer-$pkgver"
+    local dest="$pkgdir/usr/lib/archer/app"
+    install -d "$dest" "$pkgdir/usr/bin"
+    cp -r gui/archer gui/assets "$dest/"
+    install -m755 gui/archer_gui.py "$dest/"
+    ln -s /usr/lib/archer/app/archer_gui.py "$pkgdir/usr/bin/archer-gui"
+    sed 's|/opt/archer/|/usr/lib/archer/app/|g' gui/io.github.archer.desktop > "$dest/io.github.archer.desktop"
+    install -Dm644 "$dest/io.github.archer.desktop" "$pkgdir/usr/share/applications/io.github.archer.desktop"
+    install -Dm644 "$dest/io.github.archer.desktop" "$pkgdir/etc/xdg/autostart/io.github.archer.desktop"
+    install -Dm644 gui/assets/archer.svg "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.archer.svg"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

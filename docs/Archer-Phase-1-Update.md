@@ -1,5 +1,7 @@
 # Phase 1 update implementation record
 
+Historical record for the Phase 1 baseline. Current behavior and validation are recorded in the [2.1 implementation report](implementation-2.1.md).
+
 This unreleased update implements all 48 findings in [the Phase 1 audit](Archer-Phase-1-Audit.md), plus the requested collapsible left sidebar. The original audit remains the reference; this document records the changes and the limits of their validation.
 
 ## Sidebar

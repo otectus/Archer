@@ -13,13 +13,7 @@ _THERMAL_DRIVER_BLACKLIST="/etc/modprobe.d/blacklist-acer-wmi.conf"
 _THERMAL_CONF="/etc/modprobe.d/acer-thermal-profiles.conf"
 
 module_detect() {
-    # Only relevant when a gaming model exposes platform profiles
-    if [[ "$SUPPORTS_THERMAL_PROFILES" -eq 1 ]]; then
-        case "$MODEL_FAMILY" in
-            nitro|predator|helios|triton) return 0 ;;
-        esac
-    fi
-    return 1
+    [[ "$SUPPORTS_THERMAL_PROFILES" -eq 1 ]] || kernel_profile_path "$KERNEL_SYS_ROOT" >/dev/null
 }
 
 module_check_installed() {

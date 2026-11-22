@@ -151,6 +151,10 @@ response({length}); assert({invocation} == AE_OK);
 static int battery_health_set(int a, int b) { calls++; return AE_OK; }
 static int WMI_apgeaction_execute_u64(int a, u64 b, u64 *out) { calls++; *out=0; return AE_OK; }
 static int WMI_gaming_execute_u64(int a, u64 b, u64 *out) { calls++; *out=0; return AE_OK; }
+struct { int predator_legacy; } quirk = {0};
+static typeof(quirk) *quirks = &quirk;
+static int ph315_52_battery_limiter_state;
+static int ph315_52_backlight_timeout_state;
 '''
         cases = ''
         for name in names:

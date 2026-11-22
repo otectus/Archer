@@ -22,6 +22,8 @@ def load(path):
         values = data.get(key, [])
         if not isinstance(values, list) or any(not isinstance(item, str) or any(c.isspace() for c in item) for item in values):
             raise ValueError(f'Invalid manifest field {key}')
+    if data.get('schema_version', 1) not in (1, 2):
+        raise ValueError('Unsupported manifest schema')
     return data
 
 
@@ -42,6 +44,11 @@ def main():
     else:
         data = dict(zip(ARRAYS, [list(dict.fromkeys(value.split())) for value in args.values[:4]]))
         data.update(dict(zip(('installer_version', 'acer_model', 'model_family', 'kernel_version'), args.values[4:])))
+        data['schema_version'] = 2
+        if len(args.values) > 8:
+            data['inventory_generation'] = args.values[8]
+        if len(args.values) > 9:
+            data['transaction_id'] = args.values[9]
         data['install_date'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     if args.path.is_symlink():
         raise ValueError('Refusing manifest symlink')

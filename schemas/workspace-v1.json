@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Archer workspace v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "preset",
+    "duration_minutes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "preset": {
+      "enum": [
+        "desk",
+        "travel",
+        "conferencing",
+        "quiet",
+        "gaming"
+      ]
+    },
+    "duration_minutes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 240
+    }
+  },
+  "additionalProperties": false
+}

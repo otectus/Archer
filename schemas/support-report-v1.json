@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Archer support report v1",
+  "type": "object",
+  "required": [
+    "report_version",
+    "archer_version",
+    "environment",
+    "model",
+    "packages",
+    "devices",
+    "sleep",
+    "health",
+    "readiness"
+  ],
+  "properties": {
+    "report_version": {
+      "const": 1
+    },
+    "archer_version": {
+      "type": "string"
+    },
+    "environment": {
+      "type": "object"
+    },
+    "model": {
+      "type": "object"
+    },
+    "packages": {
+      "type": "object"
+    },
+    "devices": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "device",
+          "kind",
+          "ids",
+          "driver",
+          "interfaces"
+        ],
+        "properties": {
+          "device": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "ids": {
+            "type": "object"
+          },
+          "driver": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "sleep": {
+      "type": "object"
+    },
+    "health": {
+      "type": "object"
+    },
+    "readiness": {
+      "type": "object"
+    }
+  }
+}

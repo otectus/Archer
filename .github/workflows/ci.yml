@@ -1,6 +1,9 @@
 name: CI
 
 on:
+  schedule:
+    - cron: '27 4 * * *'
+  workflow_dispatch:
   push:
     branches: [master, main]
   pull_request:
@@ -49,6 +52,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install mandatory Python and D-Bus test bindings
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-dbus python3-gi
       - name: Fetch upstream Git objects (preparation validates the pinned commit)
         run: |
           git clone --no-checkout https://github.com/0x7375646F/Linuwu-Sense.git /tmp/linuwu-upstream
@@ -57,7 +64,10 @@ jobs:
         env:
           LINUWU_TEST_REPO: /tmp/linuwu-upstream
           BATTERY_TEST_REPO: /tmp/battery-upstream
-        run: python3 -m unittest discover -s tests -v
+        run: |
+          set -o pipefail
+          /usr/bin/python3 -m unittest discover -s tests -v 2>&1 | tee /tmp/unit.log
+          ! grep -q "skipped=" /tmp/unit.log
 
   python-lint:
     name: Python Lint (GUI)
@@ -111,23 +121,46 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install GTK test runtime
-        run: pacman -Syu --noconfirm python python-gobject python-cairo python-dbus gtk4 libadwaita xorg-server-xvfb xorg-xauth dbus pipewire pipewire-audio noise-suppression-for-voice
+        run: pacman -Syu --noconfirm python python-gobject python-cairo python-dbus gtk4 libadwaita xorg-server-xvfb xorg-xauth dbus pipewire pipewire-audio wireplumber ffmpeg noise-suppression-for-voice
       - name: Verify the real audio filter in an isolated PipeWire server
-        run: python tests/audio_smoke.py
+        run: |
+          useradd -m media-tester
+          runuser -u media-tester -- python tests/audio_smoke.py
+          runuser -u media-tester -- dbus-run-session -- python tests/session_audio.py
+          runuser -u media-tester -- env SDL_AUDIODRIVER=dummy SDL_VIDEODRIVER=dummy python gui/archer_session.py speaker-test
+          runuser -u media-tester -- python tests/media_pipeline.py
       - name: Check pure data contracts
         run: python tests/gui_contract_test.py
       - name: Check interactions and layouts
         run: xvfb-run -a dbus-run-session -- python tests/gui_test.py --capture
       - name: Check high contrast
-        run: xvfb-run -a dbus-run-session -- python tests/gui_test.py --capture --high-contrast
+        run: ARCHER_CAPTURE_DIR=/tmp/archer-ui-review/high-contrast xvfb-run -a dbus-run-session -- python tests/gui_test.py --capture --high-contrast
       - name: Check large text
-        run: xvfb-run -a dbus-run-session -- python tests/gui_test.py --capture --large-text
+        run: ARCHER_CAPTURE_DIR=/tmp/archer-ui-review/large-text xvfb-run -a dbus-run-session -- python tests/gui_test.py --capture --large-text
       - name: Upload visual review captures
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: archer-ui-review
           path: /tmp/archer-ui-review
+
+  native-wayland:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    name: GTK on native headless Wayland
+    runs-on: ubuntu-latest
+    container: archlinux:base
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run GTK under Sway
+        run: |
+          pacman -Syu --needed --noconfirm sway mesa dbus python python-gobject python-cairo python-dbus gtk4 libadwaita
+          useradd -m gtk-tester
+          runuser -u gtk-tester -- bash tests/gui-wayland.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: archer-native-wayland
+          path: /tmp/archer-wayland-captures
 
   dbus-introspect-smoke:
     name: D-Bus Introspect Smoke
@@ -156,22 +189,33 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        kernel: [linux, linux-lts, baseline-6.12, baseline-6.8]
+        kernel: [linux, linux-lts, baseline-6.12, baseline-6.12.75, baseline-6.8]
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools and maintained v4l2loopback source
         run: pacman -Syu --noconfirm base-devel git clang llvm dkms v4l2loopback-dkms curl pahole
       - name: Install target headers
+        shell: bash
         env:
           TARGET: ${{ matrix.kernel }}
         run: |
-          if [ "$TARGET" = baseline-6.12 ]; then
-            curl -fL https://archive.archlinux.org/packages/l/linux-lts-headers/linux-lts-headers-6.12.75-1-x86_64.pkg.tar.zst -o /tmp/headers.pkg.tar.zst
-            mkdir -p /tmp/baseline
-            tar -xf /tmp/headers.pkg.tar.zst -C /tmp/baseline
-            echo KERNEL_MODULES_ROOT=/tmp/baseline/usr/lib/modules >> "$GITHUB_ENV"
-          elif [ "$TARGET" = baseline-6.8 ]; then
-            curl -fL https://archive.archlinux.org/packages/l/linux-headers/linux-headers-6.8.9.arch1-2-x86_64.pkg.tar.zst -o /tmp/headers.pkg.tar.zst
+          if [[ "$TARGET" == baseline-* ]]; then
+            case "$TARGET" in
+              baseline-6.12) package=linux-lts-headers; version=6.12.73-1 ;;
+              baseline-6.12.75) package=linux-lts-headers; version=6.12.75-1 ;;
+              baseline-6.8) package=linux-headers; version=6.8.9.arch1-2 ;;
+            esac
+            filename="$package-$version-x86_64.pkg.tar.zst"
+            fetched=0
+            for archive in "https://archive.archlinux.org/packages/l/$package" "https://archive.org/download/archlinux_pkg_$package"; do
+              if curl --max-time 90 -fL "$archive/$filename" -o /tmp/headers.pkg.tar.zst &&
+                 curl --max-time 30 -fL "$archive/$filename.sig" -o /tmp/headers.sig &&
+                 pacman-key --verify /tmp/headers.sig /tmp/headers.pkg.tar.zst; then
+                fetched=1
+                break
+              fi
+            done
+            if [[ $fetched != 1 ]]; then echo "No verified archive source for $filename" >&2; exit 1; fi
             mkdir -p /tmp/baseline
             tar -xf /tmp/headers.pkg.tar.zst -C /tmp/baseline
             echo KERNEL_MODULES_ROOT=/tmp/baseline/usr/lib/modules >> "$GITHUB_ENV"
@@ -191,3 +235,148 @@ jobs:
         with:
           name: kernel-build-${{ matrix.kernel }}
           path: /tmp/kernel-build.log
+
+  package-lifecycle:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build packages from reviewed source as an unprivileged user
+        run: |
+          pacman -Syu --needed --noconfirm git python python-gobject python-dbus gtk4 libadwaita polkit python-cairo
+          useradd -m builder
+          cp -r "$GITHUB_WORKSPACE" /home/builder/Archer
+          chown -R builder:builder /home/builder/Archer
+          runuser -u builder -- bash /home/builder/Archer/scripts/prepare-package.sh /tmp/package
+          cd /tmp/package
+          runuser -u builder -- env SOURCE_DATE_EPOCH="$(cat SOURCE_DATE_EPOCH)" makepkg
+      - name: Install, verify, reinstall and remove the application
+        run: |
+          sed -i '/^NoExtract .*usr\/share\/doc\//d' /etc/pacman.conf
+          pacman -U --noconfirm /tmp/package/*.pkg.tar.zst
+          archer --version
+          archer status
+          archer report >/tmp/report.json
+          pacman -Qkk archer-core archer-daemon archer-gui
+          echo '{"schema_version":2,"lcd_override":false}' >/etc/archer/settings.json
+          pacman -U --noconfirm /tmp/package/*.pkg.tar.zst
+          pacman -R --noconfirm archer-gui archer-daemon archer-core
+          test -f /etc/archer/settings.json
+          test ! -e /usr/bin/archer
+          pacman -Q >/tmp/package/installed-packages.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archer-packages
+          include-hidden-files: true
+          path: |
+            /tmp/package/.SRCINFO
+            /tmp/package/SOURCE_DATE_EPOCH
+            /tmp/package/*.pkg.tar.zst
+            /tmp/package/*.tar.gz
+            /tmp/package/PKGBUILD
+            /tmp/package/installed-packages.txt
+
+  dkms-packages:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    strategy:
+      matrix:
+        module: [linuwu-sense, acer-wmi-battery]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the pinned DKMS package
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          set -eu
+          pacman -Syu --needed --noconfirm git dkms
+          useradd -m builder
+          cp -r "$GITHUB_WORKSPACE" /home/builder/Archer
+          chown -R builder:builder /home/builder/Archer
+          runuser -u builder -- bash /home/builder/Archer/scripts/prepare-dkms-package.sh "$MODULE" /tmp/package
+          cd /tmp/package
+          runuser -u builder -- env SOURCE_DATE_EPOCH="$(cat SOURCE_DATE_EPOCH)" makepkg
+          pacman -Qlp ./*.pkg.tar.zst
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.module }}-package
+          include-hidden-files: true
+          path: |
+            /tmp/package/*.pkg.tar.zst
+            /tmp/package/*.tar.gz
+            /tmp/package/.SRCINFO
+            /tmp/package/PKGBUILD
+            /tmp/package/SOURCE_DATE_EPOCH
+
+  rolling-variants:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: 'archlinux:base-devel', kernel: linux-zen }
+          - { image: 'archlinux:base-devel', kernel: linux-hardened }
+          - { image: 'cachyos/cachyos:latest', kernel: linux-cachyos }
+          - { image: 'cachyos/cachyos:latest', kernel: linux-cachyos-lts }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build external modules using the distribution repositories
+        shell: bash
+        env:
+          KERNEL_PACKAGE: ${{ matrix.kernel }}
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm base-devel git dkms llvm clang pahole v4l2loopback-dkms "${KERNEL_PACKAGE}-headers"
+          source_config=$(pacman -Qlq v4l2loopback-dkms | grep '/dkms.conf$')
+          for marker in /usr/lib/modules/*/build/include/config/kernel.release; do
+            bash scripts/check-kernel-modules.sh "$(cat "$marker")" "$(dirname "$source_config")"
+          done
+          pacman -Q >/tmp/versions.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: versions-${{ matrix.kernel }}
+          path: /tmp/versions.txt
+
+
+  package-guest:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: package-lifecycle
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          name: archer-packages
+          path: packages
+      - name: Build disposable Arch guest
+        run: |
+          set -eu
+          mkdir -p "$RUNNER_TEMP/archer-vm/files"
+          cp packages/*.pkg.tar.zst packages/*.tar.gz "$RUNNER_TEMP/archer-vm/files/"
+          git archive --format=tar.gz --prefix=legacy/ 62e96c4d397e438c65dc5f3704e0f47ee152c649 gui lib modules scripts >"$RUNNER_TEMP/archer-vm/files/legacy-source.tar.gz"
+          docker run --rm -v "$PWD:/repo:ro" -v "$RUNNER_TEMP/archer-vm:/archer-vm" archlinux:base-devel bash /repo/tests/build-package-guest.sh /archer-vm
+      - name: Verify installation, reboot, camera transport and removal
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86
+          cd "$RUNNER_TEMP/archer-vm"
+          sudo timeout 600 qemu-system-x86_64 -accel tcg -smp 2 -m 1800 -nic none -display none -monitor none -serial stdio \
+            -kernel vmlinuz -initrd initrd -append 'root=/dev/vda rw console=ttyS0 archer.package-test=1 systemd.mask=serial-getty@ttyS0.service systemd.firstboot=no systemd.mask=systemd-firstboot.service' \
+            -drive file=root.ext4,format=raw,if=virtio -drive file=packages.ext4,format=raw,if=virtio,readonly=on > guest.log
+          grep ARCHER_VM_LEGACY_PASS guest.log
+          grep ARCHER_VM_MIGRATION_PASS guest.log
+          grep ARCHER_VM_INSTALL_PASS guest.log
+          grep ARCHER_VM_CAMERA_PASS guest.log
+          grep ARCHER_VM_GRAPHICS_RESTORE_PASS guest.log
+          grep ARCHER_VM_REBOOT_REMOVE_PASS guest.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: arch-guest-lifecycle
+          path: ${{ runner.temp }}/archer-vm/guest.log

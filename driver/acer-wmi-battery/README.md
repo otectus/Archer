@@ -16,3 +16,6 @@ DKMS namespace or manifest-owned legacy sources. See the
 [kernel audit and validation](../../docs/kernel-compatibility.md).
 
 The battery-only service and GUI share `/etc/archer/battery.json`. The default is an 80% limit, but an existing valid GUI choice is migrated. Boot and power-supply events apply that saved choice. Calibration is detected independently of Linuwu-Sense and can start only with verified external power.
+
+
+In 2.1 the daemon enumerates packs independently. Native variable-threshold controls require known bounds and a supported ownership policy. The Acer extension provides the fixed charge mode exposed by its controller. Expiring full-charge overrides require a writable supported threshold. Run `archer inventory` and inspect **Battery** before choosing the extension. [Backend reference](../../docs/backend-api.md)

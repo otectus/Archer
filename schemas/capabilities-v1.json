@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Archer capabilities v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "inventory_generation",
+    "capabilities"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "inventory_generation": {
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "integer",
+          "minimum": 0
+        }
+      ]
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "id",
+          "device_key",
+          "backend",
+          "availability",
+          "readable",
+          "writable",
+          "value_kind",
+          "constraints",
+          "control_owner",
+          "validation",
+          "reason_code",
+          "inventory_generation"
+        ],
+        "properties": {
+          "schema_version": {
+            "const": 1
+          },
+          "id": {
+            "type": "string"
+          },
+          "device_key": {
+            "type": "string"
+          },
+          "backend": {
+            "type": "string"
+          },
+          "availability": {
+            "enum": [
+              "absent",
+              "available",
+              "blocked",
+              "unavailable",
+              "unknown"
+            ]
+          },
+          "readable": {
+            "type": "boolean"
+          },
+          "writable": {
+            "type": "boolean"
+          },
+          "value_kind": {
+            "type": "string"
+          },
+          "constraints": {
+            "type": "object"
+          },
+          "control_owner": {
+            "type": "string"
+          },
+          "validation": {
+            "enum": [
+              "discovered",
+              "upstream-reported",
+              "automated-tested",
+              "hardware-verified",
+              "regression-observed"
+            ]
+          },
+          "reason_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "inventory_generation": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer",
+                "minimum": 0
+              }
+            ]
+          }
+        }
+      }
+    }
+  }
+}

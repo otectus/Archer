@@ -6,12 +6,38 @@ Archer uses a native GTK4/libadwaita interface with six main destinations. Colla
 | --- | --- |
 | Overview | Read live CPU/GPU, cooling and battery summaries; follow links to controls; inspect two minutes of temperature history. |
 | Performance | Select a thermal profile, apply automatic/maximum/manual fan settings, and enable Game Mode. |
-| Battery | Check charge and remaining time, protect charging at 80%, calibrate, and configure off-state USB charging. |
+| Battery | Check charge and remaining time, inspect per-pack health, review available threshold or fixed charge modes, calibrate, and configure off-state USB charging. |
 | Display & Keyboard | Configure graphics mode and panel response, preview zone colors, apply effects, and set backlight timeout. |
-| Audio | Enable microphone noise suppression and find the virtual input in your applications. |
-| System | Copy device information, change startup sound, check firmware, and access Advanced recovery tools. |
+| Audio | Select a physical microphone, measure its level, and start or stop a verified rnnoise chain. |
+| System | Copy device information, change startup sound, inspect firmware, preview a support report, check peripherals, review a workspace preset, adjust supported touchpad preferences, preview a camera, and access recovery tools. |
 
 Zone colours and effects use the ENE K5130 controller when available, with sysfs/WMI as the fallback. Each backend has its own supported effect list; saved effects use stable names. Older integer effects that cannot be identified safely require selecting and applying the intended effect once. See [the protocol notes](ENE_PROTOCOL.md).
+
+## Session workflows
+
+Choose **System → Session tools** to review a quiet, travel, gaming, conferencing or desk preset. Archer asks the active power-profile provider for a bounded hold when it supports the requested change. Release the hold early from the same page. If a provider cannot hold the requested mode, its plan explains why. The CLI can export and reimport the same versioned preference.
+
+```sh
+archer-session workspace travel --minutes 30 --export > travel.json
+archer-session workspace --import-file travel.json
+archer-session workspace --import-file travel.json --apply
+archer-session gpus
+archer-session lights
+```
+
+**System → Camera** offers a physical source selector, preview and a virtual output when a supported loopback node exists. Framing, monochrome and chroma-key backdrop blur run locally in FFmpeg. Choose the output camera inside the calling app. **Audio → Microphone** offers a source meter and a user-session noise filter. Selecting a source and starting the task is required for capture. Choose a noise preset for the selected microphone and use **Save preset** to retain it. For echo cancellation, select the physical microphone and call output, start the filter and select **Archer Echo Microphone** and **Archer Call Output** in the calling app. Press Stop or exit Archer to release it.
+
+**System → Hardware checks** scans devices and presents an editable report. **Battery** exposes independently readable measurements for each pack. A writable threshold has its own constraints. Fixed Acer charge protection, calibration and variable thresholds are different operations. **Performance** offers each qualified native fan its supported settings. A missing sensor reading appears as unavailable. [Diagnostics guide](diagnostics.md) · [Support matrix](compatibility-2.1.md)
+
+The first launch performs a passive scan. Expand **Show unsupported features** to see unavailable or read-only controls and the reason supplied by the backend. Choose a goal in **Hardware checks**, open each relevant control, and return to mark the step reviewed. Archer saves your place in the local GUI preferences and rescans when you finish. Each affected control presents its own review and authorization.
+
+**System → Sleep and wake** listens for the next sleep cycle you initiate and displays the elapsed time, wake IRQ and per-pack changes where units match. **System → Input** accepts pointer, touch and stylus input inside its test area. **Session tools** reports link, authentication, addressing and DNS evidence from the active provider. It can also play a one-second tone on your current audio output. **Performance** lets you select a native fan, temperature source, curve and expiry, with an explicit return to firmware Auto.
+
+## Firmware updates
+
+Review the releases shown for the specific device. Archer separates stale, unknown, unsupported and blocked results. To choose a release explicitly, run `archer-session firmware` followed by `archer-session firmware-install DEVICE_KEY VERSION` in your terminal. The second command requires fresh metadata, checks the exact device and offered release again after confirmation, and delegates installation to fwupd with its own authorization and progress. Check the vendor's recovery instructions first. [fwupdmgr deployment reference](https://fwupd.github.io/libfwupdplugin/fwupdmgr.html)
+
+The firmware page links to Acer when the DMI vendor and model match a reviewed support route. Check the board, region, installed BIOS, prerequisites and recovery procedure there. A matching support page identifies the model and leaves the choice of firmware with its owner. [Acer ANV16S-41](https://www.acer.com/us-en/support/product-support/ANV16S-41/downloads) · [Acer PHN16-71](https://www.acer.com/us-en/support/product-support/Predator%20PHN16-71/downloads) · [Acer PT516-52s](https://www.acer.com/us-en/support/product-support/Predator_PT516-52s/downloads)
 
 ## Preview
 

@@ -13,6 +13,7 @@ _GUI_AUTOSTART="/etc/xdg/autostart/io.github.archer.desktop"
 _GUI_ICON="/usr/share/icons/hicolor/scalable/apps/io.github.archer.svg"
 _GUI_LAUNCHER="/usr/local/bin/archer-gui"
 _GUI_SETTINGS_DIR="/etc/archer"
+_GUI_INSTALLED_SYSTEM_HELPER="$_GUI_INSTALL_DIR/archer_system.py"
 
 module_detect() {
     # Relevant if a display server is running (not headless/SSH)
@@ -23,10 +24,21 @@ module_check_installed() {
     [[ -f "$_GUI_INSTALL_DIR/archer_daemon.py" ]] && [[ -f "$_GUI_SERVICE" ]]
 }
 
+_gui_check_ownership() {
+    if pacman -Q archer-core &>/dev/null || pacman -Q archer-gui &>/dev/null || pacman -Q archer-daemon &>/dev/null; then
+        warn "Pacman owns the Archer service or GUI. Use the package manager for this operation."
+        return 1
+    fi
+}
+
 module_preflight() {
+    _gui_check_ownership || return 1
     # Verify all source files exist before any sudo write so a partial install
     # doesn't leave the system in a broken state.
     local _required=(
+        "$SCRIPT_DIR/gui/VERSION"
+        "$SCRIPT_DIR/gui/archer_version.py"
+        "$SCRIPT_DIR/gui/archer_inventory.py"
         "$SCRIPT_DIR/gui/archer_daemon.py"
         "$SCRIPT_DIR/gui/archer_dbus.py"
         "$SCRIPT_DIR/gui/archer_ene.py"
@@ -63,6 +75,9 @@ module_preflight() {
     done
     [[ -d "$SCRIPT_DIR/gui/archer" ]] || { warn "Required GUI package directory missing: $SCRIPT_DIR/gui/archer"; return 1; }
     [[ -d "$SCRIPT_DIR/gui/assets" ]] || { warn "Required GUI assets directory missing: $SCRIPT_DIR/gui/assets"; return 1; }
+    if [[ "${DRY_RUN:-0}" -eq 0 ]]; then
+        python3 "$SCRIPT_DIR/scripts/archer-gui-files.py" check || return 1
+    fi
 
 }
 
@@ -87,20 +102,8 @@ module_install() {
     run_sudo mkdir -p "$_GUI_SETTINGS_DIR" || return 1
     INSTALLED_FILES+=" $_GUI_SETTINGS_DIR"
 
-    # Copy application files
-    log "Installing Archer GUI to $_GUI_INSTALL_DIR..."
-    # Includes the daemon, D-Bus service, validators, ENE and system helpers.
-    run_sudo cp "$SCRIPT_DIR"/gui/archer_*.py "$_GUI_INSTALL_DIR/" || return 1
-    run_sudo cp "$SCRIPT_DIR/gui/io.github.archer.desktop" "$_GUI_INSTALL_DIR/" || return 1
-    run_sudo cp -r "$SCRIPT_DIR/gui/archer" "$_GUI_INSTALL_DIR/" || return 1
-    run_sudo cp -r "$SCRIPT_DIR/gui/assets" "$_GUI_INSTALL_DIR/" || return 1
-
-    # Install D-Bus service configuration
-    log "Installing D-Bus and polkit configuration..."
-    run_sudo cp "$SCRIPT_DIR/gui/io.otectus.Archer1.conf" /etc/dbus-1/system.d/ || return 1
-    INSTALLED_FILES+=" /etc/dbus-1/system.d/io.otectus.Archer1.conf"
-    run_sudo cp "$SCRIPT_DIR/gui/io.otectus.Archer1.policy" /usr/share/polkit-1/actions/ || return 1
-    INSTALLED_FILES+=" /usr/share/polkit-1/actions/io.otectus.Archer1.policy"
+    log "Installing verified Archer files..."
+    run_sudo python3 "$SCRIPT_DIR/scripts/archer-gui-files.py" install || return 1
 
     # Reload dbus-daemon so the new policy file takes effect immediately.
     # Without this, the daemon can't claim io.otectus.Archer1 until reboot
@@ -117,48 +120,9 @@ module_install() {
         fi
     fi
 
-    # Set permissions
-    run_sudo chmod 755 "$_GUI_INSTALL_DIR/archer_daemon.py" || return 1
-    run_sudo chmod 755 "$_GUI_INSTALL_DIR/archer_gui.py" || return 1
-
-    # Install systemd service
-    log "Installing daemon service..."
-    run_sudo cp "$SCRIPT_DIR/gui/archer-daemon.service" "$_GUI_SERVICE" || return 1
-    INSTALLED_FILES+=" $_GUI_SERVICE"
     run_sudo systemctl daemon-reload || return 1
     run_sudo systemctl enable archer-daemon.service || return 1
-
-    # Install desktop entry
-    log "Installing desktop entry..."
-    run_sudo cp "$SCRIPT_DIR/gui/io.github.archer.desktop" "$_GUI_DESKTOP" || return 1
-    INSTALLED_FILES+=" $_GUI_DESKTOP"
-
-    # Install icon
-    run_sudo mkdir -p "$(dirname "$_GUI_ICON")" || return 1
-    run_sudo cp "$SCRIPT_DIR/gui/assets/archer.svg" "$_GUI_ICON" || return 1
-    INSTALLED_FILES+=" $_GUI_ICON"
     run_sudo gtk-update-icon-cache /usr/share/icons/hicolor/ 2>/dev/null || true
-
-    # Create launcher script
-    log "Creating launcher script..."
-    run_sudo tee "$_GUI_LAUNCHER" > /dev/null <<'LAUNCHER_EOF' || return 1
-#!/bin/bash
-exec python3 /opt/archer/archer_gui.py "$@"
-LAUNCHER_EOF
-    INSTALLED_FILES+=" $_GUI_LAUNCHER"
-    run_sudo chmod 755 "$_GUI_LAUNCHER" || return 1
-
-    # A user Hidden=true override takes precedence and survives upgrades.
-    log "Enabling GUI and system tray startup at desktop login..."
-    run_sudo mkdir -p "$(dirname "$_GUI_AUTOSTART")" || return 1
-    run_sudo cp "$SCRIPT_DIR/gui/io.github.archer.desktop" "$_GUI_AUTOSTART" || return 1
-    INSTALLED_FILES+=" $_GUI_AUTOSTART"
-
-    # Check for Linuwu-Sense driver
-    if ! dkms status 2>/dev/null | grep -q "linuwu-sense"; then
-        warn "Linuwu-Sense driver not detected. The daemon will have limited functionality."
-        warn "Install the 'driver' module for full hardware control."
-    fi
 
     if ! run_sudo systemctl restart archer-daemon.service; then
         warn "Archer daemon failed to start. Inspect journalctl -u archer-daemon; limited operation does not require Linuwu."
@@ -177,24 +141,35 @@ LAUNCHER_EOF
 }
 
 module_uninstall() {
-    log "Stopping Archer daemon..."
+    _gui_check_ownership || return 1
+    run_sudo python3 "$SCRIPT_DIR/scripts/archer-gui-files.py" check || return 1
+    local manifest_status helper modules
+    manifest_status=1
+    if declare -F has_manifest >/dev/null && has_manifest; then
+        modules=$(read_manifest_modules) || return 1
+        case " $modules " in
+            *" gpu "*) manifest_status=0 ;;
+        esac
+    fi
+    if [[ "$manifest_status" -eq 0 ]]; then
+        log "Retaining Archer GPU mode ownership because the GPU module remains installed."
+    else
+        # The reviewed uninstaller checkout defines the current journal schema.
+        # An older installed helper may predate conditional graphics recovery.
+        helper="$SCRIPT_DIR/gui/archer_system.py"
+        [[ -f "$helper" ]] || helper="$_GUI_INSTALLED_SYSTEM_HELPER"
+        if [[ ! -f "$helper" ]]; then
+            warn "Cannot check Archer GPU mode ownership before removing the system helper."
+            return 1
+        fi
+        run_sudo /usr/bin/python3 "$helper" display-restore-if-owned || return 1
+    fi
     if [[ -f "$_GUI_SERVICE" ]]; then
         run_sudo systemctl disable --now archer-daemon.service || return 1
     fi
-    run_sudo rm -f "$_GUI_SERVICE" || return 1
+    run_sudo python3 "$SCRIPT_DIR/scripts/archer-gui-files.py" remove || return 1
     run_sudo systemctl daemon-reload || return 1
-
-    log "Removing Archer GUI files..."
-    run_sudo rm -rf "$_GUI_INSTALL_DIR" || return 1
-    run_sudo rm -f "$_GUI_DESKTOP" || return 1
-    run_sudo rm -f "$_GUI_AUTOSTART" || return 1
-    run_sudo rm -f "$_GUI_ICON" || return 1
-    run_sudo rm -f "$_GUI_LAUNCHER" || return 1
     log "Saved hardware preferences retained in $_GUI_SETTINGS_DIR."
-
-    log "Removing D-Bus and polkit configuration..."
-    run_sudo rm -f /etc/dbus-1/system.d/io.otectus.Archer1.conf || return 1
-    run_sudo rm -f /usr/share/polkit-1/actions/io.otectus.Archer1.policy || return 1
 
     # Reload dbus-daemon so the removed policy stops being active immediately.
     if ! run_sudo systemctl reload dbus.service 2>/dev/null; then

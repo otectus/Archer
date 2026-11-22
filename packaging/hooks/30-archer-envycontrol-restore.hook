@@ -1,0 +1,12 @@
+[Trigger]
+Operation = Remove
+Type = Package
+Target = archer-daemon
+Target = archer-core
+
+[Action]
+Description = Restoring Archer-owned graphics configuration
+When = PreTransaction
+Depends = archer-core
+AbortOnFail
+Exec = /usr/bin/python3 /usr/lib/archer/app/archer_system.py display-restore-if-owned

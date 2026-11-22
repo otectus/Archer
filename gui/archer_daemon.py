@@ -6,6 +6,7 @@ Exposes io.otectus.Archer1 on the system D-Bus.
 """
 
 import json
+import copy
 import logging
 import os
 import math
@@ -24,8 +25,15 @@ from pathlib import Path
 import archer_battery
 import uuid
 from archer_binary import BinaryControl, parse_binary_readback
+from archer_capabilities import capability, metric, qualified_driver_overrides
+import archer_fans
+import archer_graphics
+from archer_inventory import collect_inventory
+import archer_policy
+from archer_firmware import firmware_status
 from archer_runtime import run_command
 from archer_settings import SettingsStore, validate, EFFECT_IDS, WMI_EFFECT_IDS, EFFECT_LABELS
+from archer_version import VERSION
 
 # Direct ENE K5130 backlight backend. On PHN16S-71 the WMI path applies
 # brightness but silently discards colour and effect mode, so keyboard
@@ -42,7 +50,6 @@ except Exception:  # pragma: no cover - absence is a supported configuration
 PID_FILE = "/run/archer/daemon.pid"
 LOG_FILE = "/var/log/archer-daemon.log"
 SETTINGS_FILE = "/etc/archer/settings.json"
-VERSION = "2.0.1"
 
 # Linuwu-Sense sysfs base paths (tried in order)
 DRIVER_BASE_PATHS = [
@@ -193,53 +200,72 @@ _HWMON_GPU_TEMP_NAMES = ("nvidia", "amdgpu", "nouveau")
 
 # --- Fan Curve Engine ---
 class FanCurveEngine:
-    """Runs a 2Hz control loop to drive fan speed along a temperature curve."""
+    """Runs bounded 2Hz curves and restores firmware control on lost evidence."""
 
-    def __init__(self, get_temp_fn, set_fan_fn, restore_auto_fn, on_failure_fn=None):
+    def __init__(self, get_temp_fn, set_fan_fn, restore_auto_fn, on_failure_fn=None,
+                 *, paired=True, max_failures=3, clock=time.time):
         self._get_temp = get_temp_fn
         self._set_fan = set_fan_fn
         self._restore_auto = restore_auto_fn
         self._on_failure = on_failure_fn
-        self._curves = {}  # "cpu" and/or "gpu" -> [(temp_c, fan_pct), ...]
-        self._active = {}  # "cpu" -> bool, "gpu" -> bool
-        self._fail_counts = {"cpu": 0, "gpu": 0}
+        self._paired = paired
+        self._max_failures = max(1, int(max_failures))
+        self._clock = clock
+        self._curves = {}
+        self._active = {}
+        self._bindings = {}
+        self._fail_counts = {}
+        self._last_error = {}
         self._lock = threading.RLock()
         self._curve_thread = None
         self._running = False
 
-    def start(self, target, points):
-        """Start a fan curve for target ('cpu' or 'gpu')."""
+    def start(self, target, points, *, sensor_id=None, expires_at=None,
+              owner="archer", resume_after_suspend=False):
         sorted_pts = sorted(points, key=lambda p: p[0])
         with self._lock:
             self._curves[target] = sorted_pts
             self._active[target] = True
             self._fail_counts[target] = 0
+            self._last_error.pop(target, None)
+            self._bindings[target] = {
+                "fan_id": target, "sensor_id": sensor_id,
+                "owner": owner, "expires_at": expires_at,
+                "resume_after_suspend": bool(resume_after_suspend),
+            }
         self._ensure_thread()
 
     def stop(self, target=None):
-        """The paired fan ABI returns both fans to firmware control on stop."""
+        """Stop one independent fan, or every fan for paired/global requests."""
         with self._lock:
-            self._active = {"cpu": False, "gpu": False}
-            self._fail_counts = {"cpu": 0, "gpu": 0}
-            self._running = False
-            restored = self._restore_auto()
+            targets = ([key for key, active in self._active.items() if active]
+                       if target is None else [target])
+            for key in targets:
+                self._active[key] = False
+                self._fail_counts[key] = 0
+            if self._paired:
+                restored = self._restore_auto()
+            else:
+                restored = True
+                for key in targets:
+                    restored = self._restore_auto(key) and restored
+            self._running = any(self._active.values())
             thread = self._curve_thread
-        if thread and thread is not threading.current_thread():
+        if not self._running and thread and thread is not threading.current_thread():
             thread.join(timeout=2.0)
         return restored
 
     def get_state(self):
         with self._lock:
-            return {
-                "cpu": {
-                    "active": self._active.get("cpu", False),
-                    "points": self._curves.get("cpu", []),
-                },
-                "gpu": {
-                    "active": self._active.get("gpu", False),
-                    "points": self._curves.get("gpu", []),
-                },
-            }
+            targets = set(self._curves) | set(self._active)
+            if self._paired:
+                targets.update(("cpu", "gpu"))
+            return {target: {
+                "active": self._active.get(target, False),
+                "points": self._curves.get(target, []),
+                **self._bindings.get(target, {}),
+                "last_error": self._last_error.get(target),
+            } for target in sorted(targets)}
 
     def _ensure_thread(self):
         if self._running:
@@ -251,29 +277,59 @@ class FanCurveEngine:
     def _tick(self):
         # Serialize stop/restore with a complete tick; no stale write after Auto.
         with self._lock:
-            for target in ("cpu", "gpu"):
+            for target in list(self._active):
                 if not self._active.get(target):
                     continue
+                binding = self._bindings.get(target, {})
+                expires_at = binding.get("expires_at")
+                if expires_at is not None and self._clock() >= expires_at:
+                    self._last_error[target] = "expired"
+                    self._active[target] = False
+                    if self._paired:
+                        self._restore_auto()
+                    else:
+                        self._restore_auto(target)
+                    continue
                 try:
-                    temp = self._get_temp(target)
+                    sensor_id = binding.get("sensor_id")
+                    sample = self._get_temp(target) if sensor_id is None else self._get_temp(target, sensor_id)
+                    sampled_at = self._clock()
+                    if isinstance(sample, dict):
+                        temp = sample.get("celsius")
+                        sampled_at = sample.get("sampled_at")
+                    else:
+                        temp = sample
                     if temp is None or not math.isfinite(temp) or not 0 < temp <= 125:
                         raise ValueError(f"Unavailable/invalid {target} temperature: {temp}")
+                    if not isinstance(sampled_at, (int, float)):
+                        raise ValueError(f"Invalid {target} temperature sample time")
+                    if self._clock() - sampled_at > 3 or sampled_at - self._clock() > 1:
+                        raise ValueError(f"Stale {target} temperature sample")
                     pct = max(30, min(100, self._interpolate(self._curves[target], temp)))
                     if self._set_fan(target, pct) is False:
                         raise OSError("Fan write failed")
                     self._fail_counts[target] = 0
+                    self._last_error.pop(target, None)
                 except Exception as error:
                     logger.error("Fan curve tick failed for %s: %s", target, error)
-                    self._fail_counts[target] += 1
-                    self._restore_auto()
-                    if self._fail_counts[target] >= 3:
-                        logger.error("Fan curve watchdog: stopping both curves and restoring EC auto")
-                        self._active = {"cpu": False, "gpu": False}
+                    self._fail_counts[target] = self._fail_counts.get(target, 0) + 1
+                    if self._paired:
+                        self._restore_auto()
+                    else:
+                        for key, active in self._active.items():
+                            if active:
+                                self._restore_auto(key)
+                    self._last_error[target] = str(error)
+                    if self._fail_counts[target] >= self._max_failures:
+                        logger.error("Fan curve watchdog: stopping curves and restoring firmware Auto")
+                        self._active = {key: False for key in self._active}
                         self._running = False
                         if self._on_failure:
                             self._on_failure()
                     # No second target may overwrite the failsafe in this tick.
                     break
+            if not any(self._active.values()):
+                self._running = False
 
     def _loop(self):
         while self._running and self._curve_thread is threading.current_thread():
@@ -317,11 +373,26 @@ class HardwareManager:
         self.settings = settings_store or SettingsStore()
         self._game_mode_active = False
         self._game_mode_saved = {}
+        self._inventory = self._collect_inventory()
+        self._native_fans = archer_fans.NativeAcerHwmon.probe(Path(HWMON_DIR))
+        hwmon_keys = {item.get("node"): item.get("key") for item in self._inventory.get("devices", [])
+                      if item.get("kind") == "hwmon"}
+        ambiguous = {item.get("node") for item in self._inventory.get("devices", [])
+                     if item.get("kind") == "hwmon" and not item.get("identity_unique", True)}
+        self._native_fans = [backend for backend in self._native_fans if backend.path.name not in ambiguous]
+        for backend in self._native_fans:
+            backend.device_key = hwmon_keys.get(backend.path.name, backend.device_key)
         self._fan_curve_engine = FanCurveEngine(
             get_temp_fn=self._fan_curve_get_temp,
             set_fan_fn=self._fan_curve_set_fan,
             restore_auto_fn=self._fan_curve_restore_auto,
             on_failure_fn=self._disable_saved_curves,
+        )
+        self._native_curve_engine = FanCurveEngine(
+            get_temp_fn=self._native_curve_get_temp,
+            set_fan_fn=self._native_curve_set_fan,
+            restore_auto_fn=self._native_curve_restore_auto,
+            paired=False, max_failures=1,
         )
         self._detect_driver()
         self._detect_laptop_type()
@@ -331,16 +402,29 @@ class HardwareManager:
         logger.info(f"Sense base: {self.sense_base}")
         logger.info(f"Available features: {self.features}")
         self._diagnose_driver()
-        # A previous process might have crashed while the EC was in manual mode.
-        if "fan_control" in self.features and not self._fan_curve_restore_auto():
+        # Linuwu's paired ABI has no ownership readback, so retain its historical
+        # crash recovery. Native fans are touched only when Archer journaled them.
+        if self.sense_base and "fan_control" in self.features and not self._fan_curve_restore_auto():
             self.features.remove("fan_control")
             self.driver_status = "auto_restore_failed"
+        if self._native_fans and not self._restore_owned_native_fans():
+            self.features = [feature for feature in self.features
+                             if feature not in ("native_fan_control", "fan_control")]
+            self.driver_status = "native_auto_restore_failed"
         if restore_settings:
             try:
                 self._restore_saved_settings()
             except (OSError, ValueError, KeyError, TypeError) as error:
                 logger.error("Optional settings restoration failed: %s", error)
                 self.shutdown_fan_curves()
+
+    @staticmethod
+    def _collect_inventory():
+        try:
+            return collect_inventory()
+        except (OSError, RuntimeError, ValueError) as error:
+            logger.warning("Inventory collection failed: %s", error)
+            return {"schema_version": 1, "generation": "unavailable", "devices": []}
 
     def _detect_driver(self):
         self.driver_base = None
@@ -439,6 +523,13 @@ class HardwareManager:
                     ):
                         continue
                     self.features.append(feature_name)
+        if self._native_fans:
+            self.features.append("native_fan_control")
+            # Compatibility for the existing paired control only when two fans
+            # can be represented without silently discarding one side.
+            if "fan_control" not in self.features and len(self._native_fans) == 1 and \
+                    len(self._native_fans[0].fans()) >= 2:
+                self.features.append("fan_control")
         # Battery detection
         bat_paths = battery_supply_paths()
         if bat_paths:
@@ -545,6 +636,7 @@ class HardwareManager:
 
         # Reconcile interrupted transactions before accepting new Game Mode work.
         self._recover_game_mode()
+        self._expire_battery_overrides()
 
         if restored:
             logger.info(f"Restored saved settings: {restored}")
@@ -601,13 +693,37 @@ class HardwareManager:
                 return values
         if val:
             logger.warning("Incompatible fan_speed ABI at %s: %r", path, val)
+        if self._native_fans:
+            fans = self._native_fans[0].fans()
+            if len(fans) >= 2:
+                values = []
+                for fan in fans[:2]:
+                    raw = read_sysfs(self._native_fans[0].path / f"pwm{fan['index']}")
+                    try:
+                        values.append(round(int(raw) * 100 / 255))
+                    except (TypeError, ValueError):
+                        return None, None
+                return tuple(values)
         return None, None
 
     def _write_fan_speed(self, cpu, gpu):
         if not all(self._valid_fan_value(v) for v in (cpu, gpu)):
             return False
         path = self._sense_path("fan_speed")
-        if "fan_control" not in self.features or not path:
+        if "fan_control" not in self.features:
+            return False
+        if not path and self._native_fans:
+            fans = self._native_fans[0].fans()
+            if len(fans) < 2:
+                return False
+            with self._fan_lock:
+                if not self._native_fans[0].set_manual(fans[0]["index"], cpu):
+                    return False
+                if not self._native_fans[0].set_manual(fans[1]["index"], gpu):
+                    self._native_fans[0].set_auto()
+                    return False
+                return True
+        if not path:
             return False
         with self._fan_lock:
             if self.get_fan_speed() == (None, None):
@@ -623,7 +739,99 @@ class HardwareManager:
             return False
         if not self.stop_fan_curve():
             return False
-        return self._write_fan_speed(cpu, gpu)
+        native = not self._sense_path("fan_speed") and bool(self._native_fans)
+        if native and cpu == gpu == 0:
+            return True
+        claimed = []
+        if native:
+            for fan in self._native_fans[0].fans()[:2]:
+                if not self._claim_native_fan(fan["id"], "manual", "legacy-paired-api"):
+                    for fan_id in claimed:
+                        self._release_native_fan(fan_id)
+                    return False
+                claimed.append(fan["id"])
+        written = self._write_fan_speed(cpu, gpu)
+        if not written and native:
+            self._native_curve_restore_auto()
+        return written
+
+    def get_fans(self):
+        result = []
+        for backend in self._native_fans:
+            result.extend(backend.fans())
+        if self.sense_base and "fan_control" in self.features:
+            speeds = self.get_fan_speed()
+            for index, label in enumerate(("CPU Fan", "GPU Fan")):
+                result.append({"id": f"linuwu:{index + 1}", "index": index + 1,
+                               "label": label, "backend": "linuwu_paired",
+                               "modes": ["auto", "manual"], "minimum_percent": 0,
+                               "maximum_percent": 100, "duty_percent": speeds[index]})
+        return result
+
+    def set_fan_device(self, fan_id, percent, owner="authorized-user"):
+        if not isinstance(fan_id, str) or type(percent) is not int or not 0 <= percent <= 100:
+            return {"success": False, "error": "Invalid fan request"}
+        for backend in self._native_fans:
+            for fan in backend.fans():
+                if fan["id"] == fan_id:
+                    native_engine = getattr(self, "_native_curve_engine", None)
+                    if native_engine is not None and not native_engine.stop(fan_id):
+                        return {"success": False, "error": "Could not stop active curve and restore Auto"}
+                    if not self._claim_native_fan(fan_id, "manual", owner):
+                        return {"success": False, "error": "Could not persist fan ownership before write"}
+                    ok = backend.set_manual(fan["index"], percent)
+                    if not ok and native_engine is not None:
+                        native_engine.stop()
+                    if not ok:
+                        self._release_native_fan(fan_id)
+                    return {"success": ok, "data": {"fan_id": fan_id, "percent": percent} if ok else None,
+                            "error": None if ok else "Native Acer fan write/readback failed"}
+        if fan_id in ("linuwu:1", "linuwu:2"):
+            if not self.restore_firmware_auto().get("success"):
+                return {"success": False, "error": "Could not restore firmware automatic mode"}
+            current = self.get_fan_speed()
+            if None in current:
+                return {"success": False, "error": "Paired fan interface unavailable"}
+            values = [*current]
+            values[int(fan_id[-1]) - 1] = percent
+            ok = self._write_fan_speed(*values)
+            return {"success": ok, "data": {"fan_id": fan_id, "percent": percent} if ok else None}
+        return {"success": False, "error": "Fan device disappeared or is not writable"}
+
+    def set_fan_mode(self, fan_id, mode, owner="authorized-user"):
+        if not isinstance(fan_id, str) or mode not in ("auto", "turbo"):
+            return {"success": False, "error": "Invalid fan mode request"}
+        for backend in self._native_fans:
+            for fan in backend.fans():
+                if fan["id"] == fan_id:
+                    native_engine = getattr(self, "_native_curve_engine", None)
+                    if native_engine is not None and not native_engine.stop(fan_id):
+                        return {"success": False, "error": "Could not stop active curve and restore Auto"}
+                    if mode == "turbo" and not self._claim_native_fan(
+                            fan_id, "turbo", owner):
+                        return {"success": False, "error": "Could not persist fan ownership before write"}
+                    ok = backend.set_mode(fan["index"], mode)
+                    if not ok and native_engine is not None:
+                        native_engine.stop()
+                    if not ok:
+                        self._release_native_fan(fan_id)
+                    return {"success": ok,
+                            "data": {"fan_id": fan_id, "mode": mode} if ok else None,
+                            "error": None if ok else "Native Acer mode write failed"}
+        if mode == "auto" and fan_id in ("linuwu:1", "linuwu:2"):
+            return self.restore_firmware_auto()
+        return {"success": False, "error": "Fan mode is not supported"}
+
+    def restore_firmware_auto(self):
+        stopped = self._fan_curve_engine.stop()
+        native_engine = getattr(self, "_native_curve_engine", None)
+        native_curves = native_engine.stop() if native_engine is not None else True
+        native = self._native_curve_restore_auto() if self._native_fans else True
+        ok = bool(stopped or not self.sense_base) and bool(native_curves or not self._native_fans) and native
+        if ok:
+            self._disable_saved_curves()
+        return {"success": ok, "data": {"mode": "auto"} if ok else None,
+                "error": None if ok else "Firmware automatic fan restoration failed"}
 
     # --- Battery Features ---
     def _battery_calibration_path(self):
@@ -703,39 +911,135 @@ class HardwareManager:
         return write_sysfs(path, str(level))
 
     def get_battery_info(self):
-        """Get battery percentage, status, and time remaining."""
-        info = {"present": False}
-        for battery in battery_supply_paths():
-            bat_dir = str(battery)
-            info["present"] = True
-            try:
-                info["percentage"] = int(read_sysfs(os.path.join(bat_dir, "capacity")) or 0)
-            except ValueError:
-                info["percentage"] = 0
-            info["status"] = read_sysfs(os.path.join(bat_dir, "status")) or "Unknown"
-            # Calculate time remaining
-            try:
-                energy_now = read_sysfs(os.path.join(bat_dir, "energy_now"))
-                power_now = read_sysfs(os.path.join(bat_dir, "power_now"))
-                energy_full = read_sysfs(os.path.join(bat_dir, "energy_full"))
-                if energy_now and power_now and int(power_now) > 0:
-                    en = int(energy_now)
-                    pn = int(power_now)
-                    if info["status"] == "Discharging":
-                        hours = en / pn
-                    elif info["status"] == "Charging" and energy_full:
-                        hours = (int(energy_full) - en) / pn
-                    else:
-                        hours = 0
-                    h = int(hours)
-                    m = int((hours - h) * 60)
-                    info["time_remaining"] = f"{h}h {m}m"
-                else:
-                    info["time_remaining"] = ""
-            except (ValueError, ZeroDivisionError):
-                info["time_remaining"] = ""
-            break
-        return info
+        """Compatibility aggregate; detailed clients use get_battery_devices()."""
+        batteries = self.get_battery_devices()
+        if not batteries:
+            return {"present": False, "percentage": None, "status": "Unknown", "time_remaining": ""}
+        available = [b for b in batteries if b.get("present")]
+        if not available:
+            return {"present": False, "percentage": None, "status": "Unknown", "time_remaining": ""}
+        percentage = None
+        if len(available) == 1:
+            percentage = available[0].get("measurements", {}).get(
+                "capacity", {}).get("value")
+        else:
+            for prefix in ("energy", "charge"):
+                now_key, full_key = prefix + "_now", prefix + "_full"
+                if all(all((
+                    now_key in battery.get("measurements", {}),
+                    full_key in battery.get("measurements", {}),
+                )) for battery in available):
+                    now = sum(battery["measurements"][now_key]["value"]
+                              for battery in available)
+                    full = sum(battery["measurements"][full_key]["value"]
+                               for battery in available)
+                    percentage = round(now * 100 / full) if full > 0 else None
+                    break
+        seconds = [b["time_remaining_seconds"] for b in available if b.get("time_remaining_seconds") is not None]
+        status = available[0]["status"].title() if len({b["status"] for b in available}) == 1 else "Mixed"
+        total = sum(seconds) if len(seconds) == len(available) else None
+        return {"present": True, "percentage": percentage,
+                "status": status, "time_remaining": f"{total // 3600}h {(total % 3600) // 60}m" if total is not None else "",
+                "battery_count": len(available)}
+
+    def get_battery_devices(self):
+        inventory = getattr(self, "_inventory", {"devices": []})
+        key_map = {item.get("node"): item.get("key") for item in inventory.get("devices", [])
+                   if item.get("kind") == "power_supply"}
+        return archer_battery.discover(Path("/sys"), key_map)
+
+    def _battery_hardware_key(self, device_key):
+        matches = [d for d in getattr(self, "_inventory", {}).get("devices", [])
+                   if d.get("kind") == "power_supply" and d.get("key") == device_key and d.get("identity_unique", True)]
+        return "power_supply:" + matches[0]["node"] if len(matches) == 1 else None
+
+    @staticmethod
+    def _charge_owner_conflicts():
+        owners = archer_policy.owners_by_control(archer_policy.discover_providers(runner=run_command))
+        return owners.get("charge_threshold", [])
+
+    def set_battery_threshold(self, device_key, start, end):
+        self._inventory = self._collect_inventory()
+        conflicts = self._charge_owner_conflicts()
+        if conflicts:
+            return {"success": False, "error": "charge_threshold_owned", "owners": conflicts}
+        hardware_key = self._battery_hardware_key(device_key)
+        if not hardware_key:
+            return {"success": False, "error": "Battery device disappeared"}
+        policy = Path(self.settings.path).with_name("battery.json")
+        with archer_battery.policy_lock(policy):
+            data = archer_battery.read_policy_data(policy)
+            previous = copy.deepcopy(data)
+            data["batteries"].setdefault(device_key, {}).update(
+                {"start": start, "end": end, "owner": "archer", "node": hardware_key.split(':', 1)[1]})
+            archer_battery.write_policy_data(data, policy)
+            if not archer_battery.set_threshold(Path("/sys"), hardware_key, start, end):
+                archer_battery.write_policy_data(previous, policy)
+                return {"success": False, "error": "Threshold is invalid, read-only, or the device disappeared"}
+        return {"success": True, "data": {"device_key": device_key, "start": start, "end": end}}
+
+    def charge_full_once(self, device_key, duration):
+        if type(duration) is not int or not 300 <= duration <= 172800:
+            return {"success": False, "error": "Duration must be between 300 and 172800 seconds"}
+        self._inventory = self._collect_inventory()
+        conflicts = self._charge_owner_conflicts()
+        if conflicts:
+            return {"success": False, "error": "charge_threshold_owned", "owners": conflicts}
+        batteries = {item["device_key"]: item for item in self.get_battery_devices()}
+        item = batteries.get(device_key)
+        control = item.get("charge_control", {}) if item else {}
+        if control.get("kind") != "variable_threshold" or not control.get("writable") or \
+                control.get("constraints", {}).get("maximum") != 100:
+            return {"success": False, "error": "Temporary full charge is unavailable for this battery"}
+        original = control.get("end")
+        hardware_key = self._battery_hardware_key(device_key)
+        expires = time.time() + duration
+        policy = Path(self.settings.path).with_name("battery.json")
+        with archer_battery.policy_lock(policy):
+            data = archer_battery.read_policy_data(policy)
+            previous = copy.deepcopy(data)
+            saved = data["batteries"].setdefault(device_key, {})
+            saved.setdefault("end", original)
+            saved.update(owner="archer", node=hardware_key.split(':', 1)[1])
+            saved["full_override"] = {"expires_at": expires, "original_end": original,
+                                      "owner": "archer", "last_written": 100}
+            archer_battery.write_policy_data(data, policy)
+            if not archer_battery.set_threshold(Path("/sys"), hardware_key, control.get("start"), 100):
+                archer_battery.write_policy_data(previous, policy)
+                return {"success": False, "error": "Could not apply temporary full charge"}
+        return {"success": True, "data": {
+            "device_key": device_key, "expires_at": expires,
+            "original_end": original}}
+
+    def _expire_battery_overrides(self):
+        policy = Path(self.settings.path).with_name("battery.json")
+        try:
+            with archer_battery.policy_lock(policy):
+                data = archer_battery.read_policy_data(policy)
+                changed = False
+                conflicts = self._charge_owner_conflicts()
+                if conflicts:
+                    return
+                current_devices = {b["device_key"]: b for b in self.get_battery_devices()}
+                for key, saved in data["batteries"].items():
+                    override = saved.get("full_override")
+                    if not isinstance(override, dict) or float(override.get("expires_at", 0)) > time.time():
+                        continue
+                    current = current_devices.get(key, {})
+                    control = current.get("charge_control", {})
+                    # Conditional restore: do not overwrite an external change.
+                    if control.get("end") == override.get("last_written"):
+                        restored = archer_battery.set_threshold(
+                            Path("/sys"), "power_supply:" + saved.get("node", current.get("node", "")),
+                            control.get("start"), int(override.get("original_end", saved.get("end", 100))))
+                        if not restored:
+                            continue
+                    saved.pop("full_override", None)
+                    changed = True
+                if changed:
+                    archer_battery.write_policy_data(data, policy)
+        except (OSError, ValueError, TypeError):
+            return
 
     # --- Keyboard Lighting ---
     # Both setters prefer the ENE backend and keep the sysfs/WMI write as a
@@ -898,27 +1202,51 @@ class HardwareManager:
     def get_gpu_temp(self):
         return self._read_gpu_temp() or 0
 
+    def _active_nvidia_sample(self):
+        gpu = [d for d in getattr(self, "_inventory", {}).get("devices", [])
+               if d["kind"] == "pci" and d["attributes"].get("class", "").startswith("0x03")
+               and d["attributes"].get("vendor") == "0x10de"]
+        if not gpu:
+            return None, None
+        for card in gpu:
+            if not re.fullmatch(r"[0-9a-fA-F]{4}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]", card["node"]):
+                return None, None
+            device = Path("/sys/bus/pci/devices") / card["node"]
+            if card["driver"] != "nvidia" or read_sysfs(device / "power/runtime_status") != "active":
+                return None, None
+
+        def query():
+            reply = run_command(["/usr/bin/nvidia-smi", "--query-gpu=temperature.gpu,utilization.gpu",
+                                 "--format=csv,noheader,nounits"], 3)
+            rows = [line.split(",") for line in reply.stdout.splitlines()] if reply.success else []
+            temp = [int(t) for t, _ in (r for r in rows if len(r) == 2) if t.strip().isdigit() and 0 < int(t) <= 125]
+            usage = [int(u) for _, u in (r for r in rows if len(r) == 2) if u.strip().isdigit() and 0 <= int(u) <= 100]
+            return max(temp, default=None), max(usage, default=None)
+
+        return _PROBE_CACHE.get_or_compute(("active-nvidia", tuple(g["key"] for g in gpu)), query)
+
     def _read_gpu_temp(self):
         """Prefer discrete/Nitro GPU readings over the AMD integrated GPU."""
         discrete, integrated = [], []
         for hwmon in sorted(Path(HWMON_DIR).glob("hwmon*")):
             name = read_sysfs(hwmon / "name")
-            if name in ("acer", "acer_wmi", "linuwu_sense"):
-                # Linuwu's v4 hwmon mapping: CPU, external, GPU temperatures.
+            native_paths = {backend.path for backend in getattr(self, "_native_fans", [])}
+            if name in ("nvidia", "nouveau", "amdgpu") and read_sysfs(hwmon / "device/power/runtime_status") in ("suspending", "suspended"):
+                continue
+            if name == "acer_wmi" or (name == "acer" and hwmon in native_paths):
+                # Native acer-wmi mapping: CPU, GPU, external.
+                discrete.append(self._temperature(hwmon / "temp2_input"))
+            elif name == "linuwu_sense" or (name == "acer" and getattr(self, "sense_base", None)):
+                # Linuwu's v4 mapping: CPU, external, GPU.
                 discrete.append(self._temperature(hwmon / "temp3_input"))
             elif name in ("nvidia", "nouveau"):
                 discrete.append(self._temperature(hwmon / "temp1_input"))
             elif name == "amdgpu":
                 integrated.append(self._temperature(hwmon / "temp1_input"))
-        temp = _PROBE_CACHE.get_or_compute(
-            "nvidia-smi-temp",
-            lambda: run_cmd(
-                "nvidia-smi --query-gpu=temperature.gpu --format=csv,noheader,nounits 2>/dev/null",
-                timeout=3, shell_meta_ok=True,
-            ),
-        )
-        if temp and temp.isdigit() and 0 < int(temp) <= 125:
-            discrete.append(int(temp))
+        if not any(v is not None for v in discrete):
+            temp, _ = self._active_nvidia_sample()
+            if temp is not None:
+                discrete.append(temp)
         readings = [v for v in discrete if v is not None]
         # On a hybrid machine an unavailable NVIDIA sensor must not be replaced
         # by the cooler iGPU. Curves then fail closed through the watchdog.
@@ -956,23 +1284,14 @@ class HardwareManager:
 
     def _read_gpu_usage(self):
         """Get GPU usage from nvidia-smi or amdgpu."""
-        # NVIDIA (cached)
-        val = _PROBE_CACHE.get_or_compute(
-            "nvidia-smi-util",
-            lambda: run_cmd(
-                "nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null",
-                timeout=3, shell_meta_ok=True,
-            ),
-        )
-        if val and val.isdigit():
-            return int(val)
-        # AMD
+        _, value = self._active_nvidia_sample()
+        if value is not None:
+            return value
         for hwmon in Path("/sys/class/hwmon").glob("hwmon*"):
-            name = read_sysfs(hwmon / "name")
-            if name and name.lower() == "amdgpu":
-                val = read_sysfs(hwmon / "device/gpu_busy_percent")
-                if val:
-                    return int(val)
+            if read_sysfs(hwmon / "name") == "amdgpu" and read_sysfs(hwmon / "device/power/runtime_status") == "active":
+                raw = read_sysfs(hwmon / "device/gpu_busy_percent")
+                if raw and raw.isdigit() and 0 <= int(raw) <= 100:
+                    return int(raw)
         return None
 
     def get_fan_rpm(self):
@@ -1037,13 +1356,8 @@ class HardwareManager:
                         break
         except OSError:
             pass
-        gpu_model = _PROBE_CACHE.get_or_compute(
-            "lspci-gpu",
-            lambda: run_cmd(
-                "lspci 2>/dev/null | grep -iE 'vga|3d' | head -1 | sed 's/.*: //'",
-                timeout=3, shell_meta_ok=True,
-            ),
-        )
+        gpus = archer_graphics.graphics_devices(getattr(self, "_inventory", {}))
+        gpu_model = ", ".join(f'{g["vendor_id"]}:{g["device_id"]} ({g["driver"] or "unbound"})' for g in gpus)
         driver_version = read_sysfs(
             os.path.join(self.driver_base, "version") if self.driver_base else "/dev/null"
         ) or "N/A"
@@ -1093,9 +1407,78 @@ class HardwareManager:
             "driver_status": self.driver_status,
             "sense_base": self.sense_base,
             "driver_override": read_sysfs("/etc/modprobe.d/linuwu-sense.conf") or "Disabled",
+            "qualified_driver_overrides": qualified_driver_overrides(
+                read_sysfs(DMI_PRODUCT), read_sysfs(DMI_BOARD)),
             "recovery": self.get_recovery_status(),
+            "policy": self.get_policy_status(),
+            "capability_schema_version": 1,
+            "inventory_generation": self._inventory.get("generation"),
             "saved_settings": self.settings.data,
         }
+
+    def get_policy_status(self):
+        providers = archer_policy.discover_providers(runner=run_command)
+        return {"schema_version": 1, "providers": providers,
+                "owners": archer_policy.owners_by_control(providers),
+                "game_mode": self.get_game_mode()}
+
+    def get_capabilities(self):
+        generation = self._inventory.get("generation", "unavailable")
+        items = []
+        profile_path, _ = platform_profile_paths()
+        items.append(capability("system.platform_profile", "platform-profile", "kernel_platform_profile",
+                                availability="available" if profile_path else "absent",
+                                readable=bool(profile_path), writable=bool(profile_path and os.access(profile_path, os.W_OK)),
+                                value_kind="enum", constraints={"choices": self.get_thermal_profile_choices()},
+                                owner=(archer_policy.owners_by_control(archer_policy.discover_providers())
+                                       .get("platform_profile", ["archer"])[0]), generation=generation))
+        for backend in self._native_fans:
+            sensor_ids = [sensor["id"] for sensor in backend.temperatures()]
+            for fan in backend.fans():
+                items.append(capability("fan." + fan["id"] + ".duty", fan["id"], backend.backend,
+                                        readable=True, writable=True, value_kind="integer",
+                                        constraints={"minimum": fan["minimum_percent"],
+                                                     "maximum": fan["maximum_percent"], "step": 1,
+                                                     "modes": fan["modes"]}, generation=generation,
+                                        validation="automated-tested"))
+                items.append(capability("fan." + fan["id"] + ".curve", fan["id"], backend.backend,
+                                        readable=True, writable=bool(sensor_ids), value_kind="object",
+                                        constraints={"sensor_ids": sensor_ids, "minimum_percent": 30,
+                                                     "maximum_percent": 100, "minimum_duration_seconds": 60,
+                                                     "maximum_duration_seconds": 14400,
+                                                     "maximum_points": 16}, generation=generation,
+                                        reason_code=None if sensor_ids else "temperature_sensor_absent",
+                                        validation="automated-tested"))
+        for battery in self.get_battery_devices():
+            control = battery["charge_control"]
+            items.append(capability("battery." + battery["device_key"] + ".charge_limit",
+                                    battery["device_key"], "power_supply_threshold",
+                                    availability="available" if control["kind"] != "none" else "absent",
+                                    readable=control.get("readable", False), writable=control.get("writable", False),
+                                    value_kind="integer", constraints=control.get("constraints", {}),
+                                    generation=generation))
+        fixed_limit = self._battery_limit_path()
+        if fixed_limit and not fixed_limit.endswith("charge_control_end_threshold"):
+            items.append(capability(
+                "battery.controller.health_mode", "acer-battery-controller",
+                "fixed_health_mode", readable=True,
+                writable=os.access(fixed_limit, os.W_OK), value_kind="boolean",
+                constraints={"presets": [False, True]}, generation=generation,
+                validation="automated-tested"))
+        for key in BINARY_CONTROLS:
+            present = key in self.features
+            items.append(capability("system." + key, "acer-controller", "linuwu_binary",
+                                    availability="available" if present else "absent",
+                                    readable=present, writable=present, value_kind="boolean",
+                                    generation=generation, reason_code=None if present else "interface_absent"))
+        lighting = "ene_k5130" if getattr(self, "ene_ready", False) else "linuwu_wmi"
+        present = any(feature in self.features for feature in ("keyboard_per_zone", "keyboard_effects"))
+        items.append(capability("keyboard.lighting", "keyboard-controller", lighting,
+                                availability="available" if present else "absent", readable=False,
+                                writable=present, value_kind="object", generation=generation,
+                                validation="hardware-verified" if getattr(self, "ene_ready", False) else "discovered",
+                                reason_code=None if present else "qualified_controller_absent"))
+        return {"schema_version": 1, "inventory_generation": generation, "capabilities": items}
 
     def get_monitoring_data(self):
         """Preserve numeric fields and add explicit sensor validity metadata."""
@@ -1105,17 +1488,29 @@ class HardwareManager:
             "cpu_usage": self._read_cpu_usage(), "gpu_usage": self._read_gpu_usage(),
             "fan_rpm_cpu": cpu_rpm, "fan_rpm_gpu": gpu_rpm,
         }
-        return {
+        now = time.time()
+        telemetry = {
             **{key: value if value is not None else 0 for key, value in readings.items()},
             "metric_validity": {key: value is not None for key, value in readings.items()},
+            "metrics": [metric("system", key, value, "celsius" if key.endswith("temp") else
+                               "rpm" if key.startswith("fan_rpm") else "percent", "daemon",
+                               valid=value is not None, reason=None if value is not None else "unavailable",
+                               timestamp=now) for key, value in readings.items()],
             "battery_info": self.get_battery_info(),
+            "batteries": self.get_battery_devices(),
             "power_source_ac": self.get_power_source(),
             "thermal_profile": self.get_thermal_profile(),
             "keyboard_backend": "ene" if getattr(self, "ene_ready", False) else "wmi",
+            "fan_curves": (self._native_curve_engine.get_state()
+                           if hasattr(self, "_native_curve_engine") else {}),
         }
+        for backend in getattr(self, "_native_fans", []):
+            telemetry.setdefault("fans", []).extend(backend.fans())
+            telemetry.setdefault("temperatures", []).extend(backend.temperatures())
+        return telemetry
 
     # --- Fan Curve Methods ---
-    def _fan_curve_get_temp(self, target):
+    def _fan_curve_get_temp(self, target, sensor_id=None):
         return self._read_cpu_temp() if target == "cpu" else self._read_gpu_temp()
 
     def _fan_curve_set_fan(self, target, pct):
@@ -1131,7 +1526,14 @@ class HardwareManager:
 
     def _fan_curve_restore_auto(self):
         path = self._sense_path("fan_speed")
-        if "fan_control" not in self.features or not path:
+        if "fan_control" not in self.features:
+            return False
+        if not path and self._native_fans:
+            restored = self._native_curve_restore_auto()
+            if not restored:
+                logger.error("AUTOMATIC FAN RESTORATION FAILED for native Acer hwmon")
+            return restored
+        if not path:
             return False
         with self._fan_lock:
             if not write_sysfs(path, "0,0"):
@@ -1139,23 +1541,209 @@ class HardwareManager:
                 return False
             return True
 
+    def _native_fan(self, fan_id):
+        for backend in self._native_fans:
+            for fan in backend.fans():
+                if fan["id"] == fan_id:
+                    return backend, fan
+        return None, None
+
+    def _native_owners(self):
+        if not hasattr(self, "settings"):
+            return {}
+        value = self.settings.get("native_fan_owners", {})
+        if not isinstance(value, dict):
+            return {}
+        return {key: item for key, item in value.items()
+                if isinstance(key, str) and isinstance(item, dict)}
+
+    def _save_native_owners(self, owners):
+        if not hasattr(self, "settings"):
+            return not owners
+        try:
+            if owners:
+                self.settings.set("native_fan_owners", owners)
+            else:
+                self.settings.remove("native_fan_owners")
+            return True
+        except OSError as error:
+            logger.error("Could not persist native fan ownership: %s", error)
+            return False
+
+    def _claim_native_fan(self, fan_id, mode, owner):
+        owners = self._native_owners()
+        owners[fan_id] = {"mode": mode, "owner": owner, "claimed_at": time.time()}
+        return self._save_native_owners(owners)
+
+    def _release_native_fan(self, fan_id):
+        owners = self._native_owners()
+        owners.pop(fan_id, None)
+        return self._save_native_owners(owners)
+
+    def _restore_owned_native_fans(self):
+        owners = self._native_owners()
+        if not owners:
+            return True
+        remaining = dict(owners)
+        restored = True
+        for fan_id in owners:
+            backend, fan = self._native_fan(fan_id)
+            if not backend or not fan:
+                remaining.pop(fan_id, None)
+                continue
+            if backend.set_auto(fan["index"]):
+                remaining.pop(fan_id, None)
+            else:
+                restored = False
+        return self._save_native_owners(remaining) and restored
+
+    def _native_sensor(self, sensor_id, backend=None):
+        sources = [backend] if backend is not None else self._native_fans
+        for candidate in sources:
+            for sensor in candidate.temperatures():
+                if sensor["id"] == sensor_id:
+                    return candidate, sensor
+        return None, None
+
+    def _native_curve_get_temp(self, fan_id, sensor_id):
+        backend, fan = self._native_fan(fan_id)
+        if not backend or not fan:
+            return None
+        sensor_backend, _ = self._native_sensor(sensor_id, backend)
+        return sensor_backend.temperature(sensor_id) if sensor_backend else None
+
+    def _native_curve_set_fan(self, fan_id, percent):
+        backend, fan = self._native_fan(fan_id)
+        if not backend or not fan:
+            return False
+        with self._fan_lock:
+            return backend.set_manual(fan["index"], int(percent))
+
+    def _native_curve_restore_auto(self, fan_id=None):
+        restored = True
+        found = False
+        with self._fan_lock:
+            for backend in self._native_fans:
+                if fan_id is None:
+                    found = True
+                    for fan in backend.fans():
+                        ok = backend.set_auto(fan["index"])
+                        released = self._release_native_fan(fan["id"]) if ok else False
+                        restored = ok and released and restored
+                    continue
+                for fan in backend.fans():
+                    if fan["id"] == fan_id:
+                        found = True
+                        ok = backend.set_auto(fan["index"])
+                        released = self._release_native_fan(fan_id) if ok else False
+                        restored = ok and released and restored
+        return found and restored
+
+    @staticmethod
+    def _valid_curve(points):
+        if not isinstance(points, (list, tuple)) or not 2 <= len(points) <= 16:
+            return False
+        previous_temp = -1
+        previous_percent = 0
+        for point in points:
+            if not isinstance(point, (list, tuple)) or len(point) != 2:
+                return False
+            temp, percent = point
+            for value in point:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return False
+                if not math.isfinite(value):
+                    return False
+            if not 20 <= temp <= 110 or not 30 <= percent <= 100:
+                return False
+            if temp <= previous_temp or percent < previous_percent:
+                return False
+            previous_temp, previous_percent = temp, percent
+        return True
+
+    def start_native_fan_curve(self, fan_id, sensor_id, points, duration_seconds,
+                               *, owner="authorized-user", resume_after_suspend=True):
+        if "native_fan_control" not in self.features:
+            return {"success": False, "error": "Invalid native fan curve request"}
+        if not isinstance(fan_id, str) or not isinstance(sensor_id, str):
+            return {"success": False, "error": "Invalid native fan curve request"}
+        if type(duration_seconds) is not int or not 60 <= duration_seconds <= 14400:
+            return {"success": False, "error": "Invalid native fan curve request"}
+        if type(resume_after_suspend) is not bool or not self._valid_curve(points):
+            return {"success": False, "error": "Invalid native fan curve request"}
+        backend, fan = self._native_fan(fan_id)
+        sensor_backend, sensor = self._native_sensor(sensor_id, backend) if backend else (None, None)
+        if not fan or not sensor or sensor_backend is not backend:
+            return {"success": False, "error": "Selected fan or sensor disappeared"}
+        sample = backend.temperature(sensor_id)
+        if not sample or time.time() - sample["sampled_at"] > 3:
+            return {"success": False, "error": "Selected temperature sensor is unavailable or stale"}
+        if not self._native_curve_engine.stop(fan_id):
+            return {"success": False, "error": "Could not establish firmware Auto before curve start"}
+        if not self._claim_native_fan(fan_id, "curve", owner):
+            return {"success": False, "error": "Could not persist fan ownership before curve start"}
+        expires_at = time.time() + duration_seconds
+        self._native_curve_engine.start(
+            fan_id, points, sensor_id=sensor_id, expires_at=expires_at,
+            owner=owner, resume_after_suspend=resume_after_suspend)
+        return {"success": True, "data": {
+            "fan_id": fan_id, "sensor_id": sensor_id, "expires_at": expires_at,
+            "owner": owner, "resume_after_suspend": resume_after_suspend}}
+
+    def stop_native_fan_curve(self, fan_id):
+        if not isinstance(fan_id, str):
+            return {"success": False, "error": "Invalid fan identifier"}
+        restored = self._native_curve_engine.stop(fan_id)
+        return {"success": bool(restored), "data": {"fan_id": fan_id, "mode": "auto"} if restored else None,
+                "error": None if restored else "Firmware automatic fan restoration failed"}
+
+    def get_cooling_devices(self):
+        fans = []
+        temperatures = []
+        for backend in self._native_fans:
+            fans.extend(backend.fans())
+            temperatures.extend(backend.temperatures())
+        return {"schema_version": 1,
+                "inventory_generation": self._inventory.get("generation", "unavailable"),
+                "fans": fans, "temperatures": temperatures,
+                "curves": self._native_curve_engine.get_state()}
+
     def start_fan_curve(self, target, points):
         """Reject invalid requests before starting a hardware-control thread."""
         if "fan_control" not in self.features or target not in ("cpu", "gpu"):
             return False
+        # Retain the legacy wider temperature/count contract for saved paired curves.
         if not isinstance(points, (list, tuple)) or not 2 <= len(points) <= 64:
             return False
         for point in points:
             if not isinstance(point, (list, tuple)) or len(point) != 2:
                 return False
-            temp, pct = point
-            if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) for v in point):
-                return False
-            if not 0 <= temp <= 125 or not 30 <= pct <= 100:
+            for value in point:
+                if isinstance(value, bool) or not isinstance(value, (int, float)):
+                    return False
+                if not math.isfinite(value):
+                    return False
+            if not 0 <= point[0] <= 125 or not 30 <= point[1] <= 100:
                 return False
         if len({point[0] for point in points}) != len(points):
             return False
-        self.settings.set(f"fan_curve_{target}", {"enabled": True, "points": points})
+        native = not self._sense_path("fan_speed") and bool(self._native_fans)
+        claimed = []
+        if native:
+            if not self._fan_curve_engine.stop():
+                return False
+            for fan in self._native_fans[0].fans()[:2]:
+                if not self._claim_native_fan(fan["id"], "curve", "legacy-paired-api"):
+                    for fan_id in claimed:
+                        self._release_native_fan(fan_id)
+                    return False
+                claimed.append(fan["id"])
+        try:
+            self.settings.set(f"fan_curve_{target}", {"enabled": True, "points": points})
+        except OSError:
+            for fan_id in claimed:
+                self._release_native_fan(fan_id)
+            raise
         self._fan_curve_engine.start(target, points)
         logger.info("Fan curve started for %s", target)
         return True
@@ -1174,11 +1762,110 @@ class HardwareManager:
         return bool(restored)
 
     def get_fan_curve_state(self):
-        return self._fan_curve_engine.get_state()
+        native = (self._native_curve_engine.get_state()
+                  if hasattr(self, "_native_curve_engine") else {})
+        return {**self._fan_curve_engine.get_state(), **native}
 
     def shutdown_fan_curves(self):
         """Stop all fan curves and restore EC auto control. Called on daemon shutdown."""
-        self._fan_curve_engine.stop()
+        legacy_active = any(item.get("active") for item in self._fan_curve_engine.get_state().values())
+        if getattr(self, "sense_base", None) or legacy_active:
+            self._fan_curve_engine.stop()
+        if hasattr(self, "_native_curve_engine"):
+            self._native_curve_engine.stop()
+        self._restore_owned_native_fans()
+
+    def prepare_sleep(self):
+        """Release userspace fan/performance control before suspend."""
+        state = self.get_fan_curve_state()
+        self._resume_curves = {
+            target: data["points"] for target, data in state.items()
+            if target in ("cpu", "gpu") and data.get("active") and data.get("points")}
+        self._resume_native_curves = {
+            fan_id: dict(data) for fan_id, data in state.items()
+            if fan_id not in ("cpu", "gpu") and data.get("active") and data.get("resume_after_suspend")}
+        legacy_active = any(state[target].get("active") for target in ("cpu", "gpu"))
+        if getattr(self, "sense_base", None) or legacy_active:
+            self._fan_curve_engine.stop()
+        if hasattr(self, "_native_curve_engine"):
+            self._native_curve_engine.stop()
+        self._restore_owned_native_fans()
+        if self._game_mode_active:
+            result = self.deactivate_game_mode()
+            if not result.get("success"):
+                logger.error("Game Mode suspend cleanup failed: %s",
+                             result.get("error"))
+
+    def poll_inventory(self):
+        """Coalesce kernel device events; retain a bounded fallback on systems without the counter."""
+        now = time.monotonic()
+        if now < getattr(self, "_next_device_probe", 0):
+            return None
+        self._next_device_probe = now + 15
+        sequence = read_sysfs("/sys/kernel/uevent_seqnum")
+        if sequence and sequence == getattr(self, "_device_sequence", None):
+            return None
+        self._device_sequence = sequence
+        previous = getattr(self, "_announced_generation", self._inventory.get("generation"))
+        self._refresh_devices()
+        generation = self._inventory.get("generation")
+        self._announced_generation = generation
+        return generation if previous != generation else None
+
+    def _refresh_devices(self):
+        inventory = self._collect_inventory()
+        candidates = archer_fans.NativeAcerHwmon.probe(Path(HWMON_DIR))
+        hwmon = {item["node"]: item for item in inventory.get("devices", []) if item.get("kind") == "hwmon"}
+        backends = []
+        for backend in candidates:
+            device = hwmon.get(backend.path.name)
+            if device is not None:
+                if not device.get("identity_unique", True):
+                    continue
+                backend.device_key = device["key"]
+            backends.append(backend)
+        self._native_fans = backends
+        self._inventory = inventory
+        if self._native_fans:
+            if "native_fan_control" not in self.features:
+                self.features.append("native_fan_control")
+            if (not self.sense_base and len(self._native_fans) == 1
+                    and len(self._native_fans[0].fans()) >= 2 and "fan_control" not in self.features):
+                self.features.append("fan_control")
+        else:
+            if "native_fan_control" in self.features:
+                self.features.remove("native_fan_control")
+            if not self.sense_base and "fan_control" in self.features:
+                self.features.remove("fan_control")
+
+    def resume_controls(self):
+        """Re-enumerate native fan ownership before resuming explicit curves."""
+        self._refresh_devices()
+        curves = getattr(self, "_resume_curves", {})
+        self._resume_curves = {}
+        if curves and "fan_control" in self.features and self._fan_curve_restore_auto():
+            for target, points in curves.items():
+                temperature = self._fan_curve_get_temp(target)
+                if temperature is not None and math.isfinite(temperature):
+                    self.start_fan_curve(target, points)
+                else:
+                    logger.warning("%s fan curve remains paused: sensor unavailable",
+                                   target)
+        elif curves:
+            logger.warning("Saved fan curves remain paused after resume: backend unavailable")
+        native_curves = getattr(self, "_resume_native_curves", {})
+        self._resume_native_curves = {}
+        for fan_id, data in native_curves.items():
+            remaining = int((data.get("expires_at") or 0) - time.time())
+            if remaining < 60:
+                logger.info("Native fan curve for %s expired while suspended", fan_id)
+                continue
+            result = self.start_native_fan_curve(
+                fan_id, data.get("sensor_id"), data.get("points", []), remaining,
+                owner=data.get("owner", "resume"), resume_after_suspend=True)
+            if not result.get("success"):
+                logger.warning("Native fan curve for %s remains in Auto after resume: %s",
+                               fan_id, result.get("error"))
 
     # --- Display Mode ---
     def get_display_mode(self):
@@ -1187,11 +1874,17 @@ class HardwareManager:
             lambda: run_cmd("/usr/bin/envycontrol --query", timeout=3),
         )
         available_modes = ["integrated", "hybrid", "nvidia"]
-        return {
-            "mode": self.settings.get("display_configured_mode", mode) if self.settings.get("display_change_boot") == read_sysfs("/proc/sys/kernel/random/boot_id") else (mode if mode in available_modes else "unknown"),
-            "available_modes": available_modes,
-            "reboot_required": bool(read_sysfs("/proc/sys/kernel/random/boot_id")) and self.settings.get("display_change_boot") == read_sysfs("/proc/sys/kernel/random/boot_id"),
-        }
+        boot = read_sysfs("/proc/sys/kernel/random/boot_id")
+        pending = bool(boot and self.settings.get("display_change_boot") == boot)
+        configured = self.settings.get("display_configured_mode", mode) if pending else mode
+        return {"mode": configured if configured in available_modes else "unknown",
+                "configured_mode": configured if configured in available_modes else None,
+                "observed_render_mode": None, "available_modes": available_modes, "reboot_required": pending}
+
+    def get_graphics_plan(self, mode):
+        self._inventory = self._collect_inventory()
+        plan = archer_graphics.build_plan(self._inventory, mode)
+        return {**plan, "review_token": archer_graphics.review_token(plan)}
 
     def _system_operation(self, action, value="", deferred=False):
         duration = 450 if action in ("display", "override", "remove-override") else 30 if action == "audio" else 300
@@ -1228,9 +1921,20 @@ class HardwareManager:
         except (OSError, ValueError, TypeError):
             return None
 
-    def set_display_mode(self, mode):
+    def set_display_mode(self, mode, review_token=None):
         if mode not in ("hybrid", "nvidia", "integrated"):
             return {"success": False, "error": "Invalid graphics mode"}
+        if hasattr(self, "_inventory"):
+            plan = self.get_graphics_plan(mode)
+            if not plan.get("available"):
+                return {"success": False, "error": "Graphics plan is unavailable",
+                        "reason_code": plan.get("reason_code"), "plan": plan}
+            if review_token is not None and review_token != plan.get("review_token"):
+                return {"success": False, "reason_code": "plan_changed", "error": "Devices or configuration changed. Review the current plan."}
+            if plan.get("required_acknowledgements") and review_token is None:
+                return {"success": False,
+                        "error": "Graphics output consequences require explicit review",
+                        "reason_code": "acknowledgement_required", "plan": plan}
         result = self._system_operation("display", mode)
         if result.get("success"):
             self.settings.update({"display_change_boot": read_sysfs("/proc/sys/kernel/random/boot_id"),
@@ -1273,8 +1977,19 @@ class HardwareManager:
         if self._game_mode_active:
             return {"success": True, "data": self.get_game_mode()}
         if run_command(["systemctl", "is-active", "--quiet", "tlp.service"], 3).success:
-            return {"success": False, "error": "TLP owns power policy. Disable TLP before using Archer Game Mode."}
-        saved = {"boot_id": read_sysfs("/proc/sys/kernel/random/boot_id"), "epp": {}, "nvidia": {}}
+            return {"success": False, "error": "TLP owns power policy",
+                    "reason_code": "control_owned", "owners": ["tlp"]}
+        providers = archer_policy.discover_providers(runner=run_command)
+        owners = archer_policy.owners_by_control(providers)
+        conflicts = sorted(set(owners.get("platform_profile", []) + owners.get("cpu_policy", [])) - {"gamemode"})
+        if conflicts:
+            label = "TLP owns power policy" if any(owner in ("tlp", "tlp-pd") for owner in conflicts) \
+                else "Power policy is externally owned"
+            return {"success": False, "error": label,
+                    "reason_code": "control_owned", "owners": conflicts}
+        token = uuid.uuid4().hex
+        saved = {"boot_id": read_sysfs("/proc/sys/kernel/random/boot_id"), "epp": {}, "nvidia": {},
+                 "token": token, "leases": {}}
         choices = self.get_thermal_profile_choices()
         if "performance" in choices:
             profile = self.get_thermal_profile()
@@ -1302,13 +2017,20 @@ class HardwareManager:
                 ok, error = self.set_thermal_profile("performance")
                 if not ok:
                     raise OSError(error or "Profile change failed")
+                saved["leases"]["platform_profile"] = archer_policy.lease(
+                    "archer-gamemode", "platform_profile", saved["platform_profile"], "performance", token=token)
             paths = self._epp_paths()
             for name in saved["epp"]:
                 if name not in paths or not write_sysfs(paths[name], "performance") or read_sysfs(paths[name]) != "performance":
                     raise OSError(f"EPP change failed for {name}")
+                saved["leases"]["epp:" + name] = archer_policy.lease(
+                    "archer-gamemode", "cpu_policy", saved["epp"][name], "performance", token=token)
             for gpu, previous in saved["nvidia"].items():
                 if not previous and not run_command(["nvidia-smi", "-i", gpu, "-pm", "1"], 5).success:
                     raise OSError(f"NVIDIA persistence change failed for {gpu}")
+                saved["leases"]["nvidia:" + gpu] = archer_policy.lease(
+                    "archer-gamemode", "gpu_persistence", previous, 1, token=token)
+            self.settings.set("game_mode_saved_state", saved)
         except (OSError, ValueError) as error:
             rollback = self.deactivate_game_mode()
             return {"success": False, "error": str(error), "rollback": rollback}
@@ -1321,16 +2043,31 @@ class HardwareManager:
         errors = []
         profile = saved.get("platform_profile")
         if profile and profile in self.get_thermal_profile_choices():
-            ok, error = self.set_thermal_profile(profile)
-            if not ok:
-                errors.append(error or "Profile restoration failed")
+            lease = saved.get("leases", {}).get("platform_profile", {"last_written": "performance"})
+            if archer_policy.may_restore(self.get_thermal_profile(), lease):
+                ok, error = self.set_thermal_profile(profile)
+                if not ok:
+                    errors.append(error or "Profile restoration failed")
         paths = self._epp_paths()
         for name, value in saved.get("epp", {}).items():
             # Offline policies disappear; never substitute a different policy.
-            if name in paths and (not write_sysfs(paths[name], value) or read_sysfs(paths[name]) != value):
+            lease = saved.get("leases", {}).get("epp:" + name, {"last_written": "performance"})
+            if name in paths and archer_policy.may_restore(read_sysfs(paths[name]), lease) and \
+                    (not write_sysfs(paths[name], value) or read_sysfs(paths[name]) != value):
                 errors.append(f"EPP restoration failed for {name}")
+        current_nvidia = {}
+        query = None
+        if saved.get("leases"):
+            query = run_command(["nvidia-smi", "--query-gpu=uuid,persistence_mode", "--format=csv,noheader"], 3)
+        if query and query.success:
+            for line in query.stdout.splitlines():
+                fields = [value.strip() for value in line.split(",")]
+                if len(fields) == 2:
+                    current_nvidia[fields[0]] = int(fields[1] == "Enabled")
         for gpu, value in saved.get("nvidia", {}).items():
-            if not run_command(["nvidia-smi", "-i", gpu, "-pm", str(value)], 5).success:
+            lease = saved.get("leases", {}).get("nvidia:" + gpu, {"last_written": 1})
+            if (not query or not query.success or archer_policy.may_restore(current_nvidia.get(gpu), lease)) and \
+                    not run_command(["nvidia-smi", "-i", gpu, "-pm", str(value)], 5).success:
                 errors.append(f"NVIDIA persistence restoration failed for {gpu}")
         if errors:
             return {"success": False, "error": "; ".join(errors), "data": self.get_game_mode()}
@@ -1343,7 +2080,9 @@ class HardwareManager:
         components = list(self._game_mode_saved.get("epp", {})) + list(self._game_mode_saved.get("nvidia", {}))
         if self._game_mode_saved.get("platform_profile"):
             components.append("platform_profile")
-        return {"active": self._game_mode_active, "components": components}
+        return {"active": self._game_mode_active, "components": components,
+                "token": self._game_mode_saved.get("token"),
+                "leases": self._game_mode_saved.get("leases", {})}
 
     # --- USB Wake Policy ---
     def get_usb_wake_sources(self):
@@ -1414,18 +2153,10 @@ class HardwareManager:
         try:
             info["checked_at"] = time.time()
             try:
-                result = run_command(["fwupdmgr", "get-updates", "--json"], timeout=30)
-                # fwupd uses exit 2 for a successful query with no updates.
-                if result.timed_out or result.returncode not in (0, 2):
-                    raise RuntimeError(result.stderr.strip() or "Firmware check failed")
-                payload = json.loads(result.stdout) if result.stdout.strip() else {}
-                if not isinstance(payload, dict):
-                    raise ValueError("Unexpected firmware response")
-                info["updates"] = payload.get("Devices", [])
-                if not isinstance(info["updates"], list) or any(not isinstance(device, dict) for device in info["updates"]):
-                    raise ValueError("Unexpected firmware device list")
-                info["status"] = "updates" if info["updates"] else "current"
-                info.pop("error", None)
+                result = firmware_status(run_command)
+                info.update(result)
+                if "error" not in result:
+                    info.pop("error", None)
             except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
                 info["status"] = "error"
                 info["error"] = str(error)
@@ -1447,8 +2178,9 @@ class HardwareManager:
         return self._system_operation("reload", deferred=True)
 
     def set_modprobe_parameter(self, param):
-        if param not in ("nitro_v4", "predator_v4", "enable_all"):
-            return {"success": False, "error": "Invalid driver parameter"}
+        qualified = qualified_driver_overrides(read_sysfs(DMI_PRODUCT), read_sysfs(DMI_BOARD))
+        if param not in qualified:
+            return {"success": False, "error": "No qualified driver override for this exact model and board"}
         return self._system_operation("override", param)
 
     def remove_modprobe_parameter(self):
@@ -1521,6 +2253,7 @@ def main():
     try:
         def _on_prepare_for_sleep(sleeping):
             if sleeping:
+                hw.prepare_sleep()
                 return
             # The I2C-HID controller re-enumerates a moment after resume, and
             # PrepareForSleep(False) arrives before that. Writing immediately
@@ -1530,6 +2263,12 @@ def main():
             # Firmware may not keep LCD/boot/backlight settings across sleep.
             # Downgrade earlier evidence; no setting is rewritten on resume.
             hw.note_resume()
+
+            def _resume_controls():
+                hw.resume_controls()
+                return False
+
+            GLib.timeout_add_seconds(2, _resume_controls)
 
         system_bus = dbus.SystemBus()
         system_bus.add_signal_receiver(

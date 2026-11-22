@@ -15,7 +15,9 @@ from archer.pages.controls import (
     AdvancedPage, AudioPage, BatteryPage, DisplayPage, FirmwarePage,
     KeyboardPage, PerformancePage, SystemPage, link,
 )
+from archer.pages.health import HealthPage, InputPage, MediaPage, SleepPage
 from archer.pages.overview import OverviewPage
+from archer.pages.session import SessionPage
 from archer.preferences import Preferences
 from archer.state import AppState
 from archer.widgets.forms import Page, confirm, label
@@ -80,6 +82,10 @@ class ArcherWindow(Adw.ApplicationWindow):
 
     def _start(self):
         self.state.start()
+        if not self.preferences.data["setup_seen"]:
+            self.navigate("checks")
+            self.pages["checks"].refresh(save=False)
+            self.preferences.save(setup_seen=True)
         return False
 
     def _compact(self, enabled):
@@ -157,8 +163,24 @@ class ArcherWindow(Adw.ApplicationWindow):
             "performance": PerformancePage(self.state), "battery": BatteryPage(self.state),
             "display": DisplayPage(self.state), "keyboard": KeyboardPage(self.state),
             "audio": AudioPage(self.state), "system": SystemPage(self.state, self.navigate),
+            "session": SessionPage(self.state), "checks": HealthPage(self.state, self.preferences, self.navigate), "input": InputPage(self.state),
+            "sleep": SleepPage(self.state), "camera": MediaPage(self.state, True), "microphone": MediaPage(self.state, False),
             "firmware": FirmwarePage(self.state), "advanced": AdvancedPage(self.state),
         }
+        setup = Adw.PreferencesGroup()
+        link(setup, "Guided hardware checks", "Review a goal or resume a check", lambda: self.navigate("checks"))
+        self.pages["overview"].content.append(setup)
+        media = Adw.PreferencesGroup()
+        link(media, "Microphone", "Select a source, test its level, or run noise suppression", lambda: self.navigate("microphone"))
+        self.pages["audio"].content.append(media)
+        tools = Adw.PreferencesGroup()
+        for key, title, detail in (("checks", "Hardware checks", "Scan devices and preview a support report"),
+                                   ("session", "Session tools", "Review workspace presets or test a device service"),
+                                   ("sleep", "Sleep and wake", "Measure the next sleep cycle"),
+                                   ("input", "Input", "Touchpad preferences and pointer or pen checks"),
+                                   ("camera", "Camera", "Preview a physical source or produce virtual camera frames")):
+            link(tools, title, detail, lambda name=key: self.navigate(name))
+        self.pages["system"].content.append(tools)
         devices = Page("Display & Keyboard", "Graphics, panel response, and keyboard lighting.", self.state)
         devices.availability(True)
         group = Adw.PreferencesGroup()
@@ -178,7 +200,9 @@ class ArcherWindow(Adw.ApplicationWindow):
             self.navigation[key] = navigation
             self.stack.add_named(navigation, key)
         for key, parent, title in (("display", "devices", "Display"), ("keyboard", "devices", "Keyboard"),
-                                   ("firmware", "system", "Firmware"), ("advanced", "system", "Advanced")):
+                                   ("firmware", "system", "Firmware"), ("advanced", "system", "Advanced"),
+                                   ("session", "system", "Session tools"), ("checks", "system", "Hardware checks"), ("input", "system", "Input"),
+                                   ("sleep", "system", "Sleep and wake"), ("camera", "system", "Camera"), ("microphone", "audio", "Microphone")):
             page = Adw.NavigationPage.new(self.pages[key], title)
             page.set_tag(key)
             self.navigation[parent].add(page)

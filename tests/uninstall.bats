@@ -7,6 +7,8 @@ setup() {
     cp "$BATS_TEST_DIRNAME/../lib/"*.sh "$root/lib/"
     cp "$BATS_TEST_DIRNAME/../scripts/"*.py "$root/scripts/"
     export TEST_MANIFEST="$BATS_TEST_TMPDIR/manifest.json"
+    export ARCHER_TRANSACTION_ROOT="$BATS_TEST_TMPDIR/transactions"
+    export ARCHER_MODULE_STATE_ROOT="$BATS_TEST_TMPDIR/module-state"
     cat >> "$root/lib/manifest.sh" <<'FIXTURE'
 MANIFEST_FILE="$TEST_MANIFEST"
 MANIFEST_DIR="${TEST_MANIFEST%/*}"
@@ -62,4 +64,13 @@ FIXTURE
     run bash "$root/uninstall.sh" --help
     [ "$status" -eq 0 ]
     cmp "$TEST_MANIFEST" "$TEST_MANIFEST.before"
+}
+
+@test "missing ownership records refuse broad legacy cleanup" {
+    rm -f "$TEST_MANIFEST"
+    echo 'module_uninstall() { touch "$BATS_TEST_TMPDIR/broad-cleanup"; }' > "$root/modules/audio.sh"
+    run bash "$root/uninstall.sh" --no-confirm
+    [ "$status" -eq 1 ]
+    [[ "$output" == *'No trusted Archer module-state records'* ]]
+    [ ! -e "$BATS_TEST_TMPDIR/broad-cleanup" ]
 }

@@ -26,6 +26,10 @@ EXPLICIT_MODULES=""
 SHOW_HELP=0
 SHOW_VERSION=0
 VERIFY_ONLY=0
+TRANSACTION_STARTED=0
+TRANSACTION_MUTATING=0
+TRANSACTION_COMPLETE=0
+TRANSACTION_ID=""
 
 parse_args() {
     while [[ $# -gt 0 ]]; do
@@ -62,21 +66,86 @@ show_help() {
     echo "  --version, -v    Show version"
     echo ""
     echo "Available modules:"
-    echo "  driver      Linuwu-Sense kernel driver for fan/RGB hardware access (DKMS)"
-    echo "  battery     Limits battery charging to 80% via acer-wmi-battery"
-    echo "  gpu         EnvyControl for NVIDIA Optimus hybrid graphics switching"
-    echo "  touchpad    Fix I2C HID touchpad detection (module reload, kernel params)"
-    echo "  audio       SOF firmware, ALSA configuration, and audio codec fixes"
-    echo "  wifi        Diagnose and fix WiFi/Bluetooth issues for various chipsets"
-    echo "  power       TLP power management with Acer-optimized configuration"
-    echo "  thermal     Native kernel thermal profiles via acer_wmi (kernel 6.8+)"
-    echo "  gui         GTK4/Adwaita control panel and hardware daemon"
-    echo "  gamemode    Linux Game Mode with performance governor switching"
-    echo "  audio-enhance  Noise suppression via PipeWire/rnnoise"
-    echo "  camera-enhance Virtual camera with background blur (v4l2loopback)"
-    echo "  firmware    Firmware update advisor via fwupd"
+    local i
+    for i in "${!MODULE_IDS[@]}"; do
+        printf "  %-15s %s\n" "${MODULE_IDS[$i]}" "${MODULE_LABELS[$i]}"
+    done
     echo ""
     echo "Interactive mode (default): Detects hardware and presents a menu."
+}
+
+begin_install_transaction() {
+    INVENTORY_GENERATION=$(python3 "$SCRIPT_DIR/gui/archer_inventory.py" generation 2>/dev/null) || INVENTORY_GENERATION="unavailable"
+    [[ "$DRY_RUN" -eq 0 ]] || return 0
+    local plan init_name selected="" approval="interactive"
+    plan=$(mktemp) || return 1
+    for i in "${!MODULE_IDS[@]}"; do
+        [[ "${MODULE_SELECTED[$i]}" -eq 1 ]] && selected+="${selected:+,}${MODULE_IDS[$i]}"
+    done
+    init_name=$(cat /proc/1/comm 2>/dev/null || printf unknown)
+    [[ "$NO_CONFIRM" -eq 0 ]] || approval="no-confirm"
+    python3 - "$plan" "$selected" "$INSTALLER_VERSION" "${DISTRO_ID:-unknown}" \
+        "${DISTRO_NAME:-unknown}" "$init_name" "$INVENTORY_GENERATION" "$SCRIPT_DIR" <<'PY'
+import hashlib, json, subprocess, sys
+from pathlib import Path
+path, modules, version, distro_id, distro_name, init_name, generation, root = sys.argv[1:]
+boot = subprocess.run([sys.executable, root + '/scripts/archer-boot.py', 'inspect'],
+                      capture_output=True, text=True)
+boot_report = json.loads(boot.stdout) if boot.returncode == 0 else {'error': boot.stderr.strip()}
+resources = []
+for resource in ('/etc/default/grub', '/var/lib/archer/install-manifest.json',
+                 root + '/driver/linuwu-sense/source.conf',
+                 root + '/driver/acer-wmi-battery/source.conf'):
+    item = {'path': resource, 'sha256': None}
+    try:
+        item['sha256'] = hashlib.sha256(Path(resource).read_bytes()).hexdigest()
+    except OSError:
+        pass
+    resources.append(item)
+plan = {'schema': 1, 'modules': modules.split(',') if modules else [],
+        'installer_version': version, 'inventory_generation': generation,
+        'environment': {'distribution_id': distro_id, 'distribution_name': distro_name,
+                        'init': init_name}, 'boot': boot_report,
+        'operations': ['full package upgrade', 'selected module changes',
+                       'boot refresh when required', 'post-change verification'],
+        'resources_before': resources,
+        'rollback_limits': ['package downgrades are not automatic',
+                            'administrator-edited files are retained']}
+with open(path, 'w') as stream:
+    json.dump(plan, stream, indent=2)
+    stream.write('\n')
+PY
+    TRANSACTION_ID=$(run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" begin "$plan" --approval "$approval" --kind install --resume) || {
+        rm -f "$plan"; return 1;
+    }
+    rm -f "$plan"
+    log "Transaction journal: /var/lib/archer/transactions/${TRANSACTION_ID}.json"
+    TRANSACTION_STARTED=1
+}
+
+transaction_transition() {
+    [[ "$TRANSACTION_STARTED" -eq 1 ]] || return 0
+    run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" transition "$1" --message "${2:-}"
+}
+
+transaction_step() {
+    [[ "$TRANSACTION_STARTED" -eq 1 ]] || return 0
+    local resource="${4:-}"
+    if [[ -n "$resource" ]]; then
+        run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" step "$1" "$2" --message "${3:-}" --resource "$resource"
+    else
+        run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" step "$1" "$2" --message "${3:-}"
+    fi
+}
+
+transaction_abort() {
+    local status="$1"
+    [[ "$status" -ne 0 && "$TRANSACTION_STARTED" -eq 1 && "$TRANSACTION_COMPLETE" -eq 0 ]] || return 0
+    if [[ "$TRANSACTION_MUTATING" -eq 1 ]]; then
+        transaction_transition recovery-required "Installation stopped after mutations began. Inspect the journal, manifest, package state, DKMS state, and boot artifacts before retrying." || true
+    else
+        transaction_transition failed "Installation stopped before mutation; correct preflight failures and retry." || true
+    fi
 }
 
 # --- Menu display and interaction ---
@@ -338,9 +407,25 @@ main() {
     fi
 
     if [[ "$DRY_RUN" -eq 0 && "$VERIFY_ONLY" -eq 0 ]]; then
-        if [[ ! -d /run/systemd/system ]] || ! systemctl show --property=Version --value >/dev/null; then
-            warn "Archer requires a running systemd system manager; this init environment is unsupported."
+        local early_init
+        early_init=$(detect_init_adapter)
+        if [[ "$early_init" == unsupported ]]; then
+            warn "No supported init adapter is active (systemd and OpenRC are implemented)."
             return 1
+        fi
+        if [[ "$early_init" != systemd && -z "$EXPLICIT_MODULES" ]]; then
+            warn "$early_init installations require an explicit --modules list so unsupported service integrations cannot be selected."
+            return 1
+        fi
+        if [[ "$early_init" != systemd ]]; then
+            local early_module
+            IFS=',' read -ra early_modules <<< "$EXPLICIT_MODULES"
+            for early_module in "${early_modules[@]}"; do
+                if ! init_module_supported "$early_init" "$early_module"; then
+                    warn "Module '$early_module' has no complete $early_init lifecycle adapter. No changes were made."
+                    return 1
+                fi
+            done
         fi
     fi
 
@@ -353,6 +438,16 @@ main() {
             error "No install manifest found. Nothing to verify."
         fi
         section "Verifying Installed Modules"
+        local journal_state=""
+        if [[ "$DRY_RUN" -eq 0 ]]; then
+            journal_state=$(run_sudo python3 "$SCRIPT_DIR/scripts/archer-transaction.py" show 2>/dev/null |
+                python3 -c 'import json,sys; print(json.load(sys.stdin).get("state", ""))' 2>/dev/null) || journal_state=""
+            if [[ "$journal_state" == pending-restart ]]; then
+                TRANSACTION_STARTED=1
+                TRANSACTION_MUTATING=1
+                transaction_transition verifying "Post-reboot verification started." || return 1
+            fi
+        fi
         local mods
         mods=$(read_manifest_modules) || return 1
         local total=0
@@ -378,8 +473,14 @@ main() {
         done
         echo ""
         log "Verification: $passed/$total modules passed"
-        [[ "$passed" -eq "$total" ]]
-        return $?
+        if [[ "$passed" -eq "$total" ]]; then
+            if [[ "$TRANSACTION_STARTED" -eq 1 ]]; then
+                transaction_transition committed "Post-reboot verification passed." || return 1
+                TRANSACTION_COMPLETE=1
+            fi
+            return 0
+        fi
+        return 1
     fi
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
@@ -388,7 +489,7 @@ main() {
 
     # Run hardware detection
     log "Detecting hardware..."
-    detect_all
+    detect_all || return 1
     build_recommendations
 
     # Vendor check
@@ -458,12 +559,19 @@ main() {
         confirm "Proceed with installation?" || exit 0
     fi
 
+    begin_install_transaction || return 1
+
     # Validate selected source/preconditions and the runtime before any packages change.
     if [[ "$DRY_RUN" -eq 0 ]]; then
-        if [[ ! -d /run/systemd/system ]] || ! systemctl show --property=Version --value >/dev/null; then
-            warn "Archer requires a running systemd system manager; this init environment is unsupported."
-            return 1
-        fi
+        local active_init
+        active_init=$(detect_init_adapter)
+        for i in "${!MODULE_IDS[@]}"; do
+            [[ "${MODULE_SELECTED[$i]}" -eq 1 ]] || continue
+            if ! init_module_supported "$active_init" "${MODULE_IDS[$i]}"; then
+                warn "Module '${MODULE_IDS[$i]}' has no complete $active_init lifecycle adapter."
+                return 1
+            fi
+        done
     fi
     if has_manifest; then
         read_manifest_modules >/dev/null || return 1
@@ -476,17 +584,48 @@ main() {
             module_preflight || return 1
         fi
     done
+    transaction_transition preflight-complete "Inventory, manifest, runtime and selected module preflights passed." || return 1
 
     # Install shared dependencies
+    transaction_transition applying "Beginning package and module mutations." || return 1
+    TRANSACTION_MUTATING=1
     check_grub_ownership || return 1
     install_shared_deps || return 1
+    transaction_step shared-dependencies ok "Full-upgrade dependency transaction completed." \
+        "inventory-generation=$INVENTORY_GENERATION" || return 1
+
+    # A full upgrade can change drivers and exposed interfaces. Re-scan before
+    # any feature mutation and rerun selected module preflights against it.
+    local post_upgrade_generation
+    detect_all || return 1
+    post_upgrade_generation=$(python3 "$SCRIPT_DIR/gui/archer_inventory.py" generation 2>/dev/null) || return 1
+    if [[ "$post_upgrade_generation" != "$INVENTORY_GENERATION" ]]; then
+        transaction_step inventory-rescan ok "Inventory generation changed after the full upgrade; selected module preflights were re-resolved." || return 1
+        INVENTORY_GENERATION="$post_upgrade_generation"
+    else
+        transaction_step inventory-rescan ok "Inventory generation remained stable after the full upgrade." || return 1
+    fi
+    for i in "${!MODULE_IDS[@]}"; do
+        [[ "${MODULE_SELECTED[$i]}" -eq 1 ]] || continue
+        unset -f module_preflight
+        source "$SCRIPT_DIR/modules/${MODULE_IDS[$i]}.sh" || return 1
+        if declare -F module_preflight >/dev/null; then
+            module_preflight || return 1
+        fi
+    done
 
     # Run selected modules
     local installation_failed=0
     run_selected_modules || installation_failed=1
+    local manifest_hash="absent"
+    [[ ! -r "$MANIFEST_FILE" ]] || manifest_hash=$(sha256sum "$MANIFEST_FILE" | awk '{print $1}')
+    transaction_step selected-modules "$([[ "$installation_failed" -eq 0 ]] && echo ok || echo failed)" \
+        "Selected module stage completed; consult the manifest for retained partial changes." \
+        "$MANIFEST_FILE=$manifest_hash" || return 1
 
     # Verify
-    if [[ "$DRY_RUN" -eq 0 ]]; then
+    if [[ "$DRY_RUN" -eq 0 && "$REBOOT_REQUIRED" -eq 0 ]]; then
+        transaction_transition verifying "Running current-session module verification." || return 1
         verify_modules || installation_failed=1
     fi
 
@@ -496,6 +635,12 @@ main() {
         warn "Some modules failed installation or verification; see errors above. Existing manifest records were retained."
         return 1
     fi
+    if [[ "$REBOOT_REQUIRED" -eq 1 ]]; then
+        transaction_transition pending-restart "Changes require reboot. Run ./install.sh --verify after reboot to commit this transaction." || return 1
+    else
+        transaction_transition committed "Current-session installation and verification completed." || return 1
+    fi
+    TRANSACTION_COMPLETE=1
     success "All selected modules have been installed."
 
     if [[ "$REBOOT_REQUIRED" -eq 1 ]]; then
@@ -510,5 +655,6 @@ main() {
 
 # Only run main when executed directly (not when sourced for testing)
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    trap 'transaction_abort $?' EXIT
     main "$@"
 fi

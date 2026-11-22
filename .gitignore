@@ -26,3 +26,6 @@ ARCHER_2.0.md
 *.mod.c
 *.symvers
 *.order
+
+# Local release artifacts
+/dist/

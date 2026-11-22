@@ -7,10 +7,7 @@ MODULE_ID="gamemode"
 MODULE_DESCRIPTION="Linux Game Mode with performance governor switching"
 
 module_detect() {
-    case "$MODEL_FAMILY" in
-        nitro|predator|helios|triton) return 0 ;;
-        *) return 1 ;;
-    esac
+    [[ -d /sys/devices/system/cpu/cpufreq || -r /sys/firmware/acpi/platform_profile_choices ]]
 }
 
 module_check_installed() {
@@ -27,13 +24,25 @@ module_install() {
     else
         log "32-bit GameMode is optional; enable multilib if your games require it."
     fi
-    module_config /etc/gamemode.ini '# Installed by Archer Compatibility Suite
+    if systemctl is-active --quiet tlp.service 2>/dev/null || systemctl is-active --quiet tlp-pd.service 2>/dev/null ||
+       systemctl is-active --quiet power-profiles-daemon.service 2>/dev/null ||
+       systemctl is-active --quiet tuned.service 2>/dev/null; then
+        warn "An existing power provider owns system policy; GameMode will remain application-scoped."
+        module_config /etc/gamemode.ini '# Installed by Archer Compatibility Suite
+[general]
+reaper_freq=5
+softrealtime=auto
+renice=10
+ioprio=0' || return 1
+    else
+        module_config /etc/gamemode.ini '# Installed by Archer Compatibility Suite
 [general]
 reaper_freq=5
 desiredgov=performance
 softrealtime=auto
 renice=10
 ioprio=0' || return 1
+    fi
     if [[ -f /etc/gamemode.d/archer.ini ]] && declare -F read_manifest_field >/dev/null &&
        [[ " $(read_manifest_field files_created) " == *" /etc/gamemode.d/archer.ini "* ]]; then
         run_sudo rm -f /etc/gamemode.d/archer.ini || return 1
@@ -51,5 +60,5 @@ module_uninstall() {
 
 module_verify() {
     has_cmd gamemoded && [[ -f /etc/gamemode.ini ]] || return 1
-    grep -q '^desiredgov=performance$' /etc/gamemode.ini || return 1
+    grep -q '^\[general\]$' /etc/gamemode.ini || return 1
 }

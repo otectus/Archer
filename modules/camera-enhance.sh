@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Module: Loopback Camera Setup
-# Sets up v4l2loopback; a separate application must produce the video frames.
+# Sets up v4l2loopback; physical capture and optional effects run in the user session.
 
 MODULE_NAME="Loopback Camera Setup"
 MODULE_ID="camera-enhance"
-MODULE_DESCRIPTION="Loopback camera setup; requires an external frame-producing application"
+MODULE_DESCRIPTION="Virtual output for a selected physical camera and session producer"
 
 source "$(dirname "${BASH_SOURCE[0]}")/../lib/kernel.sh"
 
@@ -32,8 +32,8 @@ module_install() {
     run_sudo mkdir -p "${_CAMERA_DKMS_CONF%/*}" || return 1
     run_sudo cp "$_CAMERA_PACKAGE/v4l2loopback-dkms.conf" "$_CAMERA_DKMS_CONF" || return 1
     INSTALLED_FILES+=" $_CAMERA_DKMS_CONF"
-    run_sudo pacman -S --needed --noconfirm v4l2loopback-dkms v4l-utils || return 1
-    INSTALLED_PACKAGES+=" v4l2loopback-dkms v4l-utils"
+    run_sudo pacman -S --needed --noconfirm v4l2loopback-dkms v4l-utils ffmpeg || return 1
+    INSTALLED_PACKAGES+=" v4l2loopback-dkms v4l-utils ffmpeg"
     # pacman hooks can warn without failing pacman. Verify every target explicitly.
     local version kernel config
     config=$(pacman -Qlq v4l2loopback-dkms | grep '/dkms.conf$') || return 1
@@ -65,10 +65,10 @@ module_install() {
         run_sudo modprobe v4l2loopback || return 1
         _camera_device || { warn "Archer loopback camera identity could not be verified."; return 1; }
     fi
-    log "Loopback setup complete. Connect an external capture/effect producer before selecting Archer Camera in applications. No background processing is installed."
+    log "Loopback setup complete. In Archer, open System → Camera, choose a physical source and start streaming before selecting Archer Camera in an application."
 
     # v4l2loopback is package-managed; do not claim ownership of its DKMS tree.
-    INSTALLED_PACKAGES+=" v4l2loopback-dkms v4l-utils"
+    INSTALLED_PACKAGES+=" v4l2loopback-dkms v4l-utils ffmpeg"
 }
 
 module_uninstall() {

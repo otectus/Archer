@@ -1,3 +1,4 @@
-"""Archer Compatibility Suite - GUI Application"""
+"""Archer Compatibility Suite GUI."""
+from archer_version import VERSION as __version__
 
-__version__ = "1.0.1"
+__all__ = ["__version__"]

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "reviewed": "2026-11-21",
+  "entries": [
+    {
+      "id": "arch-firmware-split",
+      "condition": "installed-firmware-before-split",
+      "package": "linux-firmware",
+      "last_affected": "20250508.788aadc8-2",
+      "transition_to": "20250613.12fe085f-5",
+      "symptom": "Pacman reports existing NVIDIA firmware paths during the firmware package split.",
+      "mitigation": "Review the distribution's migration notice before upgrading across the split.",
+      "retire_when": "The installed firmware package has crossed the split.",
+      "source": "https://archlinux.org/news/linux-firmware-2025061312fe085f-5-upgrade-requires-manual-intervention/"
+    },
+    {
+      "id": "arch-mkinitcpio-pcr",
+      "condition": "systemd-hook-and-tpm2-unlock",
+      "package": "mkinitcpio",
+      "transition_to": "42-1",
+      "symptom": "A systemd-hook migration can change PCR values 0–7, 9 and 12–14 used by a TPM2 unlock policy.",
+      "mitigation": "Check the actual enrolled PCR policy and a working recovery credential before rebuilding. Follow the official notice if those PCRs are pinned.",
+      "retire_when": "An administrator verifies unlocking with the new measurements.",
+      "source": "https://archlinux.org/news/mkinitcpio-42-requires-manual-intervention-for-tpm2-based-unlocking-of-luks-devices/"
+    }
+  ]
+}
