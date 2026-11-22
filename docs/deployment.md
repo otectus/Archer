@@ -29,7 +29,7 @@ busctl introspect io.otectus.Archer1 /io/otectus/Archer1
 journalctl -u archer-daemon.service -b --no-pager -n 100
 ```
 
-The installer exits nonzero if the daemon cannot start, its D-Bus Ping fails, or polkit is unavailable. `bash install.sh --verify` also exits nonzero on failed checks. Resolve the reported error before testing controls; an installed file or enabled unit alone does not establish a working service. Lightweight desktop sessions need a polkit authentication agent for interactive authorization.
+The service reports readiness to systemd when it acquires the `io.otectus.Archer1` bus name. The installer then checks Ping and polkit. Both the installer and `bash install.sh --verify` exit nonzero on failed checks. Lightweight desktop sessions need a polkit authentication agent for interactive authorization.
 
 The hardware daemon retains `ProtectSystem=full`. After polkit authorization it requests fixed, allowlisted operations from `archer_system.py` through transient systemd services, outside the daemon's read-only `/etc` view. Audio edits are limited to Archer's filter; graphics changes require `/usr/bin/envycontrol`; driver recovery has one ordered stop/reload/start operation. Subprocess deadlines and transient-unit runtime limits bound these operations. Recovery records in `/etc/archer/recovery.json` let the reconnecting GUI distinguish completion from a failed reload.
 

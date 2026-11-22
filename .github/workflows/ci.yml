@@ -193,7 +193,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build tools and maintained v4l2loopback source
-        run: pacman -Syu --noconfirm base-devel git clang llvm dkms v4l2loopback-dkms curl pahole
+        run: pacman -Syu --noconfirm base-devel git clang llvm dkms v4l2loopback-dkms curl pahole bc cpio gettext libelf
       - name: Install target headers
         shell: bash
         env:
@@ -201,23 +201,88 @@ jobs:
         run: |
           if [[ "$TARGET" == baseline-* ]]; then
             case "$TARGET" in
-              baseline-6.12) package=linux-lts-headers; version=6.12.73-1 ;;
-              baseline-6.12.75) package=linux-lts-headers; version=6.12.75-1 ;;
+              baseline-6.12)
+                package=linux-lts-headers; version=6.12.73-1
+                packaging_commit=cbf4e9aa8a15939687ccac9931742eba55a2a00e
+                source_sha256=4059d394cbf8e9548df36d37e0b8a80c4409ac4e14ecc5019a72a770ef7b41ba
+                ;;
+              baseline-6.12.75)
+                package=linux-lts-headers; version=6.12.75-1
+                packaging_commit=dd261ee4e56028df3d1f069a0999d5be0f63ba00
+                source_sha256=06ee7927556ff1aa8810c4826501b0fdb169ebdc180644b882cf7c143ac1c177
+                ;;
               baseline-6.8) package=linux-headers; version=6.8.9.arch1-2 ;;
             esac
             filename="$package-$version-x86_64.pkg.tar.zst"
             fetched=0
-            for archive in "https://archive.archlinux.org/packages/l/$package" "https://archive.org/download/archlinux_pkg_$package"; do
-              if curl --max-time 90 -fL "$archive/$filename" -o /tmp/headers.pkg.tar.zst &&
+            for archive in "https://archive.org/download/archlinux_pkg_$package" "https://archive.archlinux.org/packages/l/$package"; do
+              if curl --max-time 20 -fL "$archive/$filename" -o /tmp/headers.pkg.tar.zst &&
                  curl --max-time 30 -fL "$archive/$filename.sig" -o /tmp/headers.sig &&
                  pacman-key --verify /tmp/headers.sig /tmp/headers.pkg.tar.zst; then
                 fetched=1
                 break
               fi
             done
-            if [[ $fetched != 1 ]]; then echo "No verified archive source for $filename" >&2; exit 1; fi
             mkdir -p /tmp/baseline
-            tar -xf /tmp/headers.pkg.tar.zst -C /tmp/baseline
+            if [[ $fetched == 1 ]]; then
+              tar -xf /tmp/headers.pkg.tar.zst -C /tmp/baseline
+            elif [[ "$package" == linux-lts-headers ]]; then
+              # Recreate a bounded, symbol-complete build tree when the Arch Linux
+              # Archive is unavailable. The fallback keeps Arch's exact source and
+              # API config, but disables debug data and links the providers exercised
+              # by Archer into vmlinux. Its Module.symvers therefore retains strict
+              # imported-symbol validation without building every Arch kernel module.
+              git clone --depth 1 --branch "$version" \
+                https://gitlab.archlinux.org/archlinux/packaging/packages/linux-lts.git /tmp/linux-lts-package
+              [[ "$(git -C /tmp/linux-lts-package rev-parse HEAD)" == "$packaging_commit" ]]
+              GNUPGHOME=/etc/pacman.d/gnupg git -C /tmp/linux-lts-package verify-tag "$version"
+              kernel_version=${version%-1}
+              curl --max-time 180 -fL \
+                "https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-$kernel_version.tar.xz" \
+                -o /tmp/linux.tar.xz
+              echo "$source_sha256  /tmp/linux.tar.xz" | sha256sum -c -
+              tar -xf /tmp/linux.tar.xz -C /tmp/linux-lts-package
+              cd "/tmp/linux-lts-package/linux-$kernel_version"
+              echo -1 >localversion.10-pkgrel
+              echo -lts >localversion.20-pkgname
+              # Do not inherit the surrounding packaging repository's Git suffix.
+              : >.scmversion
+              for patch_file in ../*.patch; do patch -Np1 <"$patch_file"; done
+              cp ../config .config
+              scripts/config \
+                --disable DEBUG_INFO \
+                --enable DEBUG_INFO_NONE \
+                --disable DEBUG_INFO_DWARF5 \
+                --disable DEBUG_INFO_BTF \
+                --disable DEBUG_INFO_BTF_MODULES \
+                --enable ACPI_WMI \
+                --enable ACPI_PLATFORM_PROFILE \
+                --enable MEDIA_SUPPORT \
+                --enable VIDEO_DEV \
+                --enable VIDEOBUF2_CORE \
+                --enable VIDEOBUF2_V4L2 \
+                --enable VIDEOBUF2_MEMOPS \
+                --enable VIDEOBUF2_VMALLOC
+              make olddefconfig
+              grep -qx 'CONFIG_DEBUG_INFO_NONE=y' .config
+              grep -qx '# CONFIG_DEBUG_INFO_BTF is not set' .config
+              grep -qx 'CONFIG_ACPI_WMI=y' .config
+              grep -qx 'CONFIG_ACPI_PLATFORM_PROFILE=y' .config
+              grep -qx 'CONFIG_VIDEO_DEV=y' .config
+              grep -qx 'CONFIG_VIDEOBUF2_V4L2=y' .config
+              kernel_release=$(make -s kernelrelease)
+              [[ "$kernel_release" == "$kernel_version-1-lts" ]]
+              make modules_prepare
+              make -j"$(nproc)" vmlinux
+              test -s vmlinux.symvers
+              cp vmlinux.symvers Module.symvers
+              test -s Module.symvers
+              mkdir -p "/tmp/baseline/usr/lib/modules/$kernel_release"
+              ln -s "$PWD" "/tmp/baseline/usr/lib/modules/$kernel_release/build"
+            else
+              echo "No verified archive source for $filename" >&2
+              exit 1
+            fi
             echo KERNEL_MODULES_ROOT=/tmp/baseline/usr/lib/modules >> "$GITHUB_ENV"
           else
             pacman -S --noconfirm "$TARGET-headers"

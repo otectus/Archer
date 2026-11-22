@@ -4,7 +4,8 @@ After=dbus.service
 Requires=dbus.service
 
 [Service]
-Type=simple
+Type=dbus
+BusName=io.otectus.Archer1
 ExecStart=/usr/bin/python3 /opt/archer/archer_daemon.py
 ExecStopPost=/usr/bin/python3 /opt/archer/archer_daemon.py --restore-fans
 Restart=on-failure
