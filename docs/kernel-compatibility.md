@@ -10,6 +10,8 @@ at any release; the build matrix and explicit failures make those changes visibl
 
 The application targets Archer 2.1.0. Linuwu-Sense is pinned at `4483b6c38b9bb963ac9ada9ca476578e0c63cc08` as `1.0.archer4`. The battery extension retains version `0.1.0.archer2`. The stable patch preserves Archer's input, firmware reply, fan restoration, probe and state-handling changes. Newly introduced protocols require separate testing. Review the [driver patch record](../driver/linuwu-sense/README.md) and [2.1 validation record](implementation-2.1.md).
 
+CI builds Linuwu-Sense, acer-wmi-battery and v4l2loopback against current Arch Linux and LTS headers and dated 6.8 and 6.12 baselines. The historical jobs first verify the archived header package with the Arch keyring. If the 6.12.73 or 6.12.75 headers are unavailable, CI verifies the Arch packaging tag, its pinned commit and the kernel source checksum. It then applies the Arch patches and builds a kernel with debug information disabled and the drivers' symbol providers linked in. The external module build checks imported symbols against that kernel. The workflow log identifies which inputs were used.
+
 ## Historical upstream audit (2026-09-10)
 
 Issue [Archer #9](https://github.com/otectus/Archer/issues/9) requests kernel 7.2
