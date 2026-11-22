@@ -87,13 +87,13 @@ class BootAdapterTests(unittest.TestCase):
         script = self.fixture(root, 'usr/share/libalpm/scripts/limine-mkinitcpio-install')
         script.chmod(0o755)
         mkinitcpio = self.fixture(root, 'usr/bin/mkinitcpio',
-                                 '#!/bin/sh\nout=\nfallback=0\n'
-                                 'while [ "$#" -gt 0 ]; do\n'
-                                 '  [ "$1" = --generate ] && shift && out=$1\n'
-                                 '  [ "$1" = autodetect ] && fallback=1\n'
-                                 '  shift\ndone\n'
-                                 'if [ "$fallback" -eq 1 ]; then printf fallback > "$out"; '
-                                 'else printf same-initramfs > "$out"; fi\n')
+                                  '#!/bin/sh\nout=\nfallback=0\n'
+                                  'while [ "$#" -gt 0 ]; do\n'
+                                  '  [ "$1" = --generate ] && shift && out=$1\n'
+                                  '  [ "$1" = autodetect ] && fallback=1\n'
+                                  '  shift\ndone\n'
+                                  'if [ "$fallback" -eq 1 ]; then printf fallback > "$out"; '
+                                  'else printf same-initramfs > "$out"; fi\n')
         mkinitcpio.chmod(0o755)
         self.fixture(root, 'etc/limine-entry-tool.conf', 'ENABLE_UKI=no\n')
         default = 'ESP_PATH="/boot"\n'
