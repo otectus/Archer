@@ -6,25 +6,46 @@
   "opt/archer/archer/application.py": "13fcbf4fce980d2c908c746b5c376157d870c907304897f7bdf13ab64389ca9c",
   "opt/archer/archer/autostart.py": "c80b6c47c69e5246e6a30671a35ac502e216849378f5e96ad9c19a84b7531aac",
   "opt/archer/archer/binary.py": "1933abe23256c5965dbccaa144448abf80963d612b02fff3a5f370a1094bb85e",
-  "opt/archer/archer/client.py": "e50628d57eeebb1b5bace22bdd1483634a30ff886f6478af67d3ccf464847c94",
+  "opt/archer/archer/client.py": [
+    "e50628d57eeebb1b5bace22bdd1483634a30ff886f6478af67d3ccf464847c94",
+    "7b989c74d743ba71a102021b799739a298182b7ab1079dc957eaa5c579e74d5e"
+  ],
   "opt/archer/archer/pages/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "opt/archer/archer/pages/controls.py": "db72395ab0cf80504e2fd9acd761afd4847ff83f886c4c5f253a599419613510",
+  "opt/archer/archer/pages/controls.py": [
+    "db72395ab0cf80504e2fd9acd761afd4847ff83f886c4c5f253a599419613510",
+    "7134bec005a72ef94688cf532eedc4f4a522d0c13740e93c8391c6d6ff46f578"
+  ],
   "opt/archer/archer/pages/overview.py": "74be89e26a01a23e2c16366f4788f2c7ce0e32fb9c396ee4fd656f2e89607e11",
   "opt/archer/archer/preferences.py": "13a24a225ce7dc7776270dddbd1b24b4571f86653e0f0b42a05135c3f9d8480e",
-  "opt/archer/archer/state.py": "fe42b776564f26edabeccb305253cf234056d2fb1937afd785e8016b88d6301b",
+  "opt/archer/archer/state.py": [
+    "fe42b776564f26edabeccb305253cf234056d2fb1937afd785e8016b88d6301b",
+    "f288842777f5f756c9c122b2006bbcc6c398c857f5605161cda4259de6a08478"
+  ],
   "opt/archer/archer/style.css": "75bcbe5fef5b613935aabe309991f712df6c3b3830e54bac3a473cf0acc3bb13",
   "opt/archer/archer/tray.py": "3965ec9e50b16293f5b5562c6726d4c389e578a7ad51cb0dd8ea553e8176ce9e",
   "opt/archer/archer/widgets/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-  "opt/archer/archer/widgets/forms.py": "f3cb3c9322c803051e1b5eb37c34e8affb1c91f101292a2bad8ea98a425dd6e0",
+  "opt/archer/archer/widgets/forms.py": [
+    "f3cb3c9322c803051e1b5eb37c34e8affb1c91f101292a2bad8ea98a425dd6e0",
+    "72197a8981f1c8b18fdce109db074128316ae4b86088ba637dd41dc8ad3bbe35"
+  ],
   "opt/archer/archer/window.py": "8f8acb34bf297ad0090930f513a9a0280f8c29c901f53b2a2ecbab9fa67c3263",
   "opt/archer/archer_battery.py": "a69cf76966f072ad514d526c66e857f3921c0bb9376e02316a107c3fff1b99c9",
   "opt/archer/archer_binary.py": "1f4485d6e7f73f7e90f7ac87781ff7b3739c7da12e20f2ab1101f8373df1ab81",
-  "opt/archer/archer_daemon.py": "6527fa56353562faf6659a1798c72a84513fe5f89e9ff461194d8a3fee92be54",
-  "opt/archer/archer_dbus.py": "f2b026dcf1c176b0dbea22108f5d0342f840509e321193b858420569e43f55ec",
+  "opt/archer/archer_daemon.py": [
+    "6527fa56353562faf6659a1798c72a84513fe5f89e9ff461194d8a3fee92be54",
+    "cd943d47f5c556ccbca668baf8c56f7b9ef134926c8bc3baa296217f28f14d4f"
+  ],
+  "opt/archer/archer_dbus.py": [
+    "f2b026dcf1c176b0dbea22108f5d0342f840509e321193b858420569e43f55ec",
+    "ae412f24ac3ddc63378502b022d8190b82bc1b5d2d7c6de5ff1ce3a2cf4be0df"
+  ],
   "opt/archer/archer_ene.py": "73670dcf6934a95c89e0a98300e0921c3c8a28f4c3428aaac0c2b827fd164042",
   "opt/archer/archer_gui.py": "85b3d556d1769b840eba1b6ff29e650329b42fbe9ac0117696bd66051a240e0e",
   "opt/archer/archer_runtime.py": "0c76d262f025dc9be618fa9e513c589d0f48e2706aa741d0d431db862bf647ba",
-  "opt/archer/archer_settings.py": "75803ae89c66be30bdf1eb79e7b12a3e2af3b21fbc51e496f0b9847fab726764",
+  "opt/archer/archer_settings.py": [
+    "75803ae89c66be30bdf1eb79e7b12a3e2af3b21fbc51e496f0b9847fab726764",
+    "e9cdf511ebd09b11d630afdcbd676286cf7251bf23788cf5fcc001e4cfef2ce5"
+  ],
   "opt/archer/archer_system.py": "e52a36efb7ed1b525b69a8eb9d7c7cbdd2dde39d0c8f72fa79b32cc033222b7b",
   "opt/archer/assets/archer-tray.png": "3710d38051f686d402fe1f791231200f5af11d013941c6e7e013b2c7cb479e59",
   "opt/archer/assets/archer.svg": "786221205e8069f5bdcc441d201cef809c17f86685e2a0e252e1f66fa8dbd62e",

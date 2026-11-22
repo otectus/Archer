@@ -240,10 +240,11 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
+      - name: Install package build dependencies
+        run: pacman -Syu --needed --noconfirm git python python-gobject python-dbus gtk4 libadwaita polkit python-cairo
       - uses: actions/checkout@v4
       - name: Build packages from reviewed source as an unprivileged user
         run: |
-          pacman -Syu --needed --noconfirm git python python-gobject python-dbus gtk4 libadwaita polkit python-cairo
           useradd -m builder
           cp -r "$GITHUB_WORKSPACE" /home/builder/Archer
           chown -R builder:builder /home/builder/Archer
@@ -283,13 +284,14 @@ jobs:
       matrix:
         module: [linuwu-sense, acer-wmi-battery]
     steps:
+      - name: Install DKMS package build dependencies
+        run: pacman -Syu --needed --noconfirm git dkms
       - uses: actions/checkout@v4
       - name: Build the pinned DKMS package
         env:
           MODULE: ${{ matrix.module }}
         run: |
           set -eu
-          pacman -Syu --needed --noconfirm git dkms
           useradd -m builder
           cp -r "$GITHUB_WORKSPACE" /home/builder/Archer
           chown -R builder:builder /home/builder/Archer

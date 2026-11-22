@@ -45,6 +45,20 @@ def digest(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def accepted_hashes(manifest, target):
+    """Return the reviewed hashes for one path, accepting the legacy scalar form."""
+    value = manifest.get(target)
+    if value is None:
+        return set()
+    values = [value] if isinstance(value, str) else value
+    if (not isinstance(values, list) or not values
+            or any(not isinstance(item, str) or len(item) != 64
+                   or any(char not in "0123456789abcdef" for char in item)
+                   for item in values)):
+        raise ValueError(f"Invalid reviewed hash entry for {target}")
+    return set(values)
+
+
 def checked_path(root, relative):
     path = root / relative
     if path.resolve() != path:
@@ -81,7 +95,7 @@ def plan(root):
                  or (name.startswith("opt/archer/") and "/opt/archer" in claimed))
         if not owned or run("pacman", "-Qo", str(path), check=False).returncode == 0:
             raise ValueError(f"Conflicting ownership for {name}")
-        if digest(path) not in (legacy.get(name), recorded.get(name)):
+        if digest(path) not in accepted_hashes(legacy, name) | {recorded.get(name)}:
             raise ValueError(f"Locally edited {name}. Review the file before transfer.")
         result[name] = digest(path)
     if state_path.exists():

@@ -54,6 +54,20 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def accepted_hashes(manifest, target):
+    """Return the reviewed hashes for one path, accepting the legacy scalar form."""
+    value = manifest.get(target)
+    if value is None:
+        return set()
+    values = [value] if isinstance(value, str) else value
+    if (not isinstance(values, list) or not values
+            or any(not isinstance(item, str) or len(item) != 64
+                   or any(char not in "0123456789abcdef" for char in item)
+                   for item in values)):
+        raise ValueError(f"Invalid reviewed hash entry for {target}")
+    return set(values)
+
+
 def deploy(action, root=Path("/"), repo=REPO):
     state = root / STATE
     if state.resolve() != state:
@@ -63,16 +77,20 @@ def deploy(action, root=Path("/"), repo=REPO):
     payloads = files(repo)
     manifest = root / "var/lib/archer/install-manifest.json"
     old_gui = manifest.is_file() and "gui" in json.loads(manifest.read_text()).get("modules_installed", [])
-    old = legacy if old_gui else {}
-    targets = set(payloads) | set(old) | set(saved["files"]) | set(saved["pending"])
+    old = {}
+    targets = set(payloads) | set(legacy) | set(saved["files"]) | set(saved["pending"])
     for target in targets:
         path = root / target
         if path.resolve() != path or not path.is_relative_to(root):
             raise ValueError(f"Refusing redirected GUI destination {target}")
         if path.exists():
-            known = {old.get(target), saved["files"].get(target), saved["pending"].get(target)}
-            if digest(path.read_bytes()) not in known:
+            reviewed = accepted_hashes(legacy, target) if old_gui else set()
+            known = reviewed | {saved["files"].get(target), saved["pending"].get(target)}
+            actual = digest(path.read_bytes())
+            if actual not in known:
                 raise ValueError(f"Retaining locally edited or unowned {path}. Review it before continuing.")
+            if actual in reviewed:
+                old[target] = actual
     if action == "check":
         return
     if action == "install":
