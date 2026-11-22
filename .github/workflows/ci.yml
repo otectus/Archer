@@ -258,6 +258,11 @@ jobs:
                 --enable ACPI_WMI \
                 --enable INSPUR_PLATFORM_PROFILE \
                 --enable ACPI_PLATFORM_PROFILE \
+                --enable ACPI_VIDEO \
+                --enable SERIO \
+                --enable SERIO_I8042 \
+                --enable RFKILL \
+                --enable INPUT_SPARSEKMAP \
                 --enable MEDIA_SUPPORT \
                 --enable VIDEO_DEV \
                 --enable VIDEOBUF2_CORE \
@@ -269,6 +274,10 @@ jobs:
               if grep -qx 'CONFIG_DEBUG_INFO_BTF=y' .config; then echo 'Unexpected BTF in historical test configuration' >&2; exit 1; fi
               grep -qx 'CONFIG_ACPI_WMI=y' .config
               grep -qx 'CONFIG_ACPI_PLATFORM_PROFILE=y' .config
+              grep -qx 'CONFIG_ACPI_VIDEO=y' .config
+              grep -qx 'CONFIG_SERIO_I8042=y' .config
+              grep -qx 'CONFIG_RFKILL=y' .config
+              grep -qx 'CONFIG_INPUT_SPARSEKMAP=y' .config
               grep -qx 'CONFIG_VIDEO_DEV=y' .config
               grep -qx 'CONFIG_VIDEOBUF2_V4L2=y' .config
               kernel_release=$(make -s kernelrelease)
