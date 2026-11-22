@@ -69,7 +69,8 @@ external_install_dkms() {
         done
     else
         if ! run_sudo cp -r "$temp_dir/source" "$src_dir" ||
-           ! run_sudo chown -R root:root "$src_dir"; then
+           ! run_sudo chown -R root:root "$src_dir" ||
+           ! run_sudo chmod -R u=rwX,go=rX "$src_dir"; then
             rm -rf "$temp_dir"
             return 1
         fi
