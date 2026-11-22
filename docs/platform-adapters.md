@@ -92,14 +92,30 @@ graphical session.
 boot sources as JSON, including staged target roots selected with `--root`.
 `rebuild` selects exactly one configured generator. Mkinitcpio targets come
 from literal preset image/UKI assignments and must cover every installed kernel
-that declares a `pkgbase`. Dracut is invoked once per installed kernel with an
+that declares a `pkgbase`. The preset-free CachyOS Limine layout is also
+recognized only when the active `/etc/pacman.d/hooks/90-mkinitcpio-install.hook`
+uses the packaged `limine-mkinitcpio-install` action, `/boot` is the mounted FAT
+ESP, the machine ID and every kernel package mapping are literal, and effective
+configuration keeps `ENABLE_UKI=no` and `ESP_PATH=/boot`. Its regular
+`vmlinuz`, `initramfs`, and configured fallback targets follow the upstream
+per-machine-ID and per-package layout; presets alongside that hook, UKIs,
+custom ESP paths, unknown fallback selectors, and incomplete layouts are
+refused. Dracut is invoked once per installed kernel with an
 explicit output. Booster is invoked through exactly one executable distribution
 kernel-install hook, and only when the entry token, kernel image, existing entry
 directory, and resulting `initrd` path are unambiguous.
 
 Before a command runs, every target directory must be on an accessible mounted
 filesystem with at least 32 MiB free. Afterward, every selected kernel's
-required artifact must be non-empty and show a change in content or replacement of the file. A reproducible mkinitcpio build can install identical bytes under a new inode. With Secure Boot
+required artifact must be non-empty and show a change in content or replacement
+of the file. A reproducible mkinitcpio build can install identical bytes under a
+new inode. The supported Limine hook deliberately leaves byte-identical outputs
+untouched, so Archer additionally requires its exact per-kernel build evidence,
+rejects reported build errors even after a zero hook exit, verifies the installed
+kernel against its source, and checks every expected initramfs or fallback
+result. If an initramfs inode and content remain unchanged, Archer performs a
+fresh mkinitcpio build and requires its measured bytes to equal the installed
+target before accepting the upstream identical-output optimization. With Secure Boot
 enabled, every generated UKI/EFI target must have certificate evidence in
 `sbverify --list` output; a zero exit status without a listed certificate is a
 failure. Installed but unconfigured tools are ignored. Missing, ambiguous, or

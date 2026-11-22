@@ -10,12 +10,16 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 
 
 MIN_FREE = 32 * 1024 * 1024
 TOKEN = re.compile(r'[A-Za-z0-9_.-]+(?:=[A-Za-z0-9_,.:/+@%-]+)?\Z')
 ASSIGNMENT = re.compile(r'^\s*([A-Za-z0-9_]+)\s*=\s*(["\'])([^"\']*)\2\s*(?:#.*)?$')
+LIMINE_HOOK = 'etc/pacman.d/hooks/90-mkinitcpio-install.hook'
+LIMINE_HOOK_EXEC = '/usr/share/libalpm/scripts/limine-mkinitcpio-install'
+LIMINE_VALUES = ('ENABLE_UKI', 'ESP_PATH', 'MKINITCPIO_FALLBACK')
 
 
 def rooted(root, value):
@@ -37,6 +41,79 @@ def literal_assignments(path):
         if match:
             values[match.group(1)] = match.group(3)
     return values
+
+
+def pacman_hook_action(path):
+    """Read the literal action contract from one pacman hook."""
+    section = None
+    values = {}
+    flags = set()
+    for raw in path.read_text(errors='strict').splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if line.startswith('[') and line.endswith(']'):
+            section = line[1:-1].strip()
+            continue
+        if section != 'Action':
+            continue
+        if '=' in line:
+            key, value = (part.strip() for part in line.split('=', 1))
+            if key in values:
+                raise ValueError(f'Duplicate {key} in pacman hook action {path}')
+            values[key] = value
+        else:
+            flags.add(line)
+    return values, flags
+
+
+def limine_hook(root):
+    hook = root / LIMINE_HOOK
+    if not hook.is_file():
+        return None
+    values, flags = pacman_hook_action(hook)
+    if (values.get('When') != 'PostTransaction' or values.get('Exec') != LIMINE_HOOK_EXEC
+            or 'NeedsTargets' not in flags):
+        return None
+    command = executable(root, LIMINE_HOOK_EXEC)
+    if not command:
+        raise ValueError(f'Configured Limine mkinitcpio hook is unavailable: {root / LIMINE_HOOK_EXEC.lstrip("/")}')
+    return hook, command
+
+
+def limine_config(root):
+    """Resolve only the simple scalar values used by the packaged Limine hook."""
+    base = root / 'etc/limine-entry-tool.conf'
+    paths = sorted((root / 'usr/share/limine-entry-tool.d').glob('*.conf'))
+    paths += [base]
+    paths += sorted((root / 'etc/limine-entry-tool.d').glob('*.conf'))
+    paths += [root / 'etc/default/limine']
+    values = {}
+    origins = {}
+    per_file = {}
+    assignment = re.compile(
+        r'^\s*(' + '|'.join(LIMINE_VALUES) + r')\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([A-Za-z0-9_./-]*))\s*(?:#.*)?$')
+    starts = re.compile(r'^\s*(' + '|'.join(LIMINE_VALUES) + r')\s*=')
+    for path in paths:
+        if not path.is_file():
+            continue
+        current = {}
+        for raw in path.read_text(errors='strict').splitlines():
+            if not starts.match(raw) or raw.lstrip().startswith('#'):
+                continue
+            match = assignment.fullmatch(raw)
+            if not match:
+                raise ValueError(f'Unsupported Limine scalar assignment in {path}: {raw.strip()}')
+            value = next((item for item in match.groups()[1:] if item is not None), '')
+            current[match.group(1)] = value
+            values[match.group(1)] = value
+            origins[match.group(1)] = str(path)
+        per_file[path] = current
+    if per_file.get(base, {}).get('ENABLE_UKI') != 'no' or values.get('ENABLE_UKI') != 'no':
+        raise ValueError('Limine hook support requires literal ENABLE_UKI=no in /etc/limine-entry-tool.conf')
+    if values.get('ESP_PATH') != '/boot':
+        raise ValueError('Limine hook support requires the literal ESP_PATH=/boot layout')
+    return values, origins
 
 
 def installed_kernels(root):
@@ -102,6 +179,13 @@ def inspect(root):
     presets = sorted(glob.glob(str(etc / 'mkinitcpio.d/*.preset')))
     if presets:
         configured.append({'name': 'mkinitcpio', 'evidence': presets})
+    hook = limine_hook(root)
+    if hook:
+        if presets:
+            configured[-1]['limine_hook'] = str(hook[0])
+        else:
+            configured.append({'name': 'mkinitcpio', 'layout': 'limine-hook',
+                               'evidence': [str(hook[0]), str(root / 'etc/limine-entry-tool.conf')]})
     dracut_evidence = ([etc / 'dracut.conf'] if (etc / 'dracut.conf').is_file() else [])
     dracut_evidence.extend(sorted((etc / 'dracut.conf.d').glob('*.conf')))
     dracut_evidence.extend(path for path in (
@@ -132,6 +216,11 @@ def resolve_generator(root):
 
 def mkinitcpio_plan(root, command):
     presets = sorted((root / 'etc/mkinitcpio.d').glob('*.preset'))
+    hook = limine_hook(root)
+    if hook and presets:
+        raise ValueError('Both mkinitcpio presets and the Limine-only hook layout are active')
+    if hook:
+        return limine_mkinitcpio_plan(root, hook[1], command)
     kernels = installed_kernels(root)
     by_pkgbase = {item['pkgbase']: item['version'] for item in kernels if item['pkgbase']}
     targets = []
@@ -154,6 +243,56 @@ def mkinitcpio_plan(root, command):
         raise ValueError('Installed kernels lack an unambiguous mkinitcpio preset mapping: '
                          + ', '.join(missing + unknown))
     return [([str(command), '-P'], targets)]
+
+
+def limine_mkinitcpio_plan(root, command, mkinitcpio):
+    values, origins = limine_config(root)
+    machine_id = root / 'etc/machine-id'
+    token = machine_id.read_text().strip() if machine_id.is_file() else ''
+    if not re.fullmatch(r'[0-9a-f]{32}', token):
+        raise ValueError('Limine hook support requires a literal 32-character /etc/machine-id')
+    boot = root / 'boot'
+    mount = mount_for(root, boot)
+    if mount['mountpoint'] != boot.resolve(strict=False) or mount['filesystem'] not in ('vfat', 'fat', 'msdos'):
+        raise ValueError('Limine hook support requires /boot to be the mounted FAT ESP')
+    kernels = installed_kernels(root)
+    if not kernels or any(not item['pkgbase'] for item in kernels):
+        raise ValueError('Limine hook support requires pkgbase for every installed kernel')
+    pkgbases = [item['pkgbase'] for item in kernels]
+    if len(pkgbases) != len(set(pkgbases)) or any(not re.fullmatch(r'[A-Za-z0-9_.-]+', name) for name in pkgbases):
+        raise ValueError('Limine kernel package names are missing, duplicated, or unsafe')
+    fallback = values.get('MKINITCPIO_FALLBACK', '')
+    if fallback not in ('', 'yes') and fallback not in pkgbases:
+        raise ValueError(f'Limine fallback selector does not match an installed kernel package: {fallback}')
+    targets = []
+    markers = []
+    for kernel in kernels:
+        source = Path(kernel['directory']) / 'vmlinuz'
+        modules = Path(kernel['directory']) / 'modules.builtin'
+        if not source.is_file() or not modules.is_file():
+            raise ValueError(f"Limine kernel source is incomplete for {kernel['version']}")
+        directory = boot / token / kernel['pkgbase']
+        marker = f"Building initramfs for {kernel['pkgbase']} ({kernel['version']})"
+        markers.append(marker)
+        common = {'kernel': kernel['version'], 'pkgbase': kernel['pkgbase'],
+                  'storage_parent': boot, 'required_before': True, 'build_marker': marker,
+                  'verify_command': mkinitcpio}
+        targets.append({**common, 'path': directory / 'vmlinuz', 'kind': 'kernel', 'source': source})
+        targets.append({**common, 'path': directory / 'initramfs', 'kind': 'initramfs'})
+        fallback_path = directory / 'initramfs-fallback'
+        if fallback == 'yes' or fallback == kernel['pkgbase']:
+            marker = f"Building fallback initramfs for {kernel['pkgbase']} ({kernel['version']})"
+            markers.append(marker)
+            targets.append({**common, 'path': fallback_path, 'kind': 'initramfs-fallback',
+                            'build_marker': marker})
+        else:
+            targets.append({**common, 'path': fallback_path, 'kind': 'absent',
+                            'required_before': False, 'build_marker': None})
+    options = {'stdin': ''.join(name + '\n' for name in pkgbases), 'markers': markers,
+               'reject_output': r'(?im)^.*(?:error|fail(?:ed|ure)?|cannot|unable to).*$',
+               'layout': 'limine-hook',
+               'config': origins}
+    return [([str(command)], targets, options)]
 
 
 def dracut_plan(root, command):
@@ -216,6 +355,27 @@ def content_fingerprint(path, *, include_inode=False):
     return (metadata.st_size, digest.hexdigest(), identity)
 
 
+def verify_unchanged_limine_image(item):
+    """Regenerate an unchanged image and compare the actual produced bytes."""
+    with tempfile.TemporaryDirectory(prefix='archer-initramfs-verify-') as directory:
+        generated = Path(directory) / 'initramfs'
+        argv = [str(item['verify_command']), '--kernel', item['kernel'], '--no-cmdline',
+                '--generate', str(generated)]
+        if item['kind'] == 'initramfs-fallback':
+            argv += ['-S', 'autodetect']
+        result = subprocess.run(argv, timeout=300, capture_output=True, text=True)
+        if result.returncode:
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
+            raise ValueError(f"mkinitcpio verification exited with status {result.returncode} for {item['kernel']}")
+        expected = content_fingerprint(generated)
+        actual = content_fingerprint(item['path'])
+        if expected is None or expected[0] == 0:
+            raise ValueError(f"mkinitcpio verification produced no image for {item['kernel']}")
+        if expected[:2] != actual[:2]:
+            raise ValueError(f"Unchanged Limine target does not match freshly generated bytes: {item['path']}")
+
+
 def mount_for(root, path):
     resolved = path.resolve(strict=False)
     best = None
@@ -245,7 +405,7 @@ def mount_for(root, path):
 def verify_storage(targets):
     mounts = {}
     for item in targets:
-        parent = item['path'].parent
+        parent = item.get('storage_parent', item['path'].parent)
         if not parent.is_dir():
             raise ValueError(f'Boot target directory is unavailable: {parent}')
         mount = mount_for(item['root'], parent)
@@ -289,7 +449,8 @@ def rebuild(root, dry_run=False):
     name, command = resolve_generator(root)
     plans = {'mkinitcpio': mkinitcpio_plan, 'dracut': dracut_plan,
              'booster': booster_plan}[name](root, command)
-    targets = [item for _, group in plans for item in group]
+    normalized = [(plan[0], plan[1], plan[2] if len(plan) > 2 else {}) for plan in plans]
+    targets = [item for _, group, _ in normalized for item in group]
     for item in targets:
         item['root'] = root
     paths = [item['path'] for item in targets]
@@ -297,27 +458,64 @@ def rebuild(root, dry_run=False):
         raise ValueError('Multiple selected kernels resolve to the same boot artifact')
     verify_storage(targets)
     if dry_run:
-        print(json.dumps({'adapter': name, 'commands': [argv for argv, _ in plans],
-                          'targets': [{key: str(value) if isinstance(value, Path) else value
-                                       for key, value in item.items()}
-                                      for item in targets]}, sort_keys=True))
+        report = {'adapter': name, 'commands': [argv for argv, _, _ in normalized],
+                  'targets': [{key: str(value) if isinstance(value, Path) else value
+                               for key, value in item.items()}
+                              for item in targets]}
+        inputs = [options.get('stdin') for _, _, options in normalized]
+        if any(value is not None for value in inputs):
+            report['command_inputs'] = inputs
+        print(json.dumps(report, sort_keys=True))
         return
     before = {path: content_fingerprint(path, include_inode=True) for path in paths}
-    for argv, _ in plans:
-        result = subprocess.run(argv, timeout=300)
+    for item in targets:
+        previous = before[item['path']]
+        if item.get('required_before') and (previous is None or previous[0] == 0):
+            raise ValueError(f"Required pre-existing boot artifact is absent or empty: {item['path']}")
+    confirmed = set()
+    for argv, _, options in normalized:
+        capture = options.get('stdin') is not None
+        result = subprocess.run(argv, timeout=300, input=options.get('stdin'), text=capture,
+                                capture_output=capture)
+        output = ''
+        if capture:
+            output = result.stdout + result.stderr
+            sys.stdout.write(result.stdout)
+            sys.stderr.write(result.stderr)
         if result.returncode:
             raise ValueError(f'{name} exited with status {result.returncode}')
+        if options.get('reject_output') and re.search(options['reject_output'], output):
+            raise ValueError(f'{name} reported a build error despite returning success')
+        for marker in options.get('markers', []):
+            if marker not in output:
+                raise ValueError(f'{name} did not confirm the expected build: {marker}')
+            confirmed.add(marker)
     limine = executable(root, '/usr/bin/limine-mkinitcpio')
-    if name == 'mkinitcpio' and limine and any(item['name'] == 'limine' for item in inspect(root)['boot']):
+    limine_hook_layout = any(options.get('layout') == 'limine-hook' for _, _, options in normalized)
+    if (name == 'mkinitcpio' and limine and not limine_hook_layout
+            and any(item['name'] == 'limine' for item in inspect(root)['boot'])):
         result = subprocess.run([str(limine)], timeout=120)
         if result.returncode:
             raise ValueError(f'limine-mkinitcpio exited with status {result.returncode}')
     for item in targets:
         after = content_fingerprint(item['path'], include_inode=True)
+        if item['kind'] == 'absent':
+            if after is not None:
+                raise ValueError(f"{name} returned success but obsolete fallback remains: {item['path']}")
+            continue
         if after is None or after[0] == 0:
             raise ValueError(f"{name} returned success but required artifact is absent or empty: {item['path']}")
+        if item['kind'] == 'kernel' and content_fingerprint(item['source'])[:2] != after[:2]:
+            raise ValueError(f"{name} returned success but installed kernel does not match its source: {item['path']}")
         if after == before[item['path']]:
-            raise ValueError(f"{name} returned success but required artifact did not change: {item['path']}")
+            # limine-entry-tool deliberately preserves an existing inode when
+            # the newly generated bytes are identical. For initramfs targets,
+            # prove that condition with a successful fresh build and byte
+            # comparison; the hook's early "Building" line is not sufficient.
+            if item['kind'] in ('initramfs', 'initramfs-fallback') and item.get('verify_command'):
+                verify_unchanged_limine_image(item)
+            elif not item.get('build_marker') or item['build_marker'] not in confirmed:
+                raise ValueError(f"{name} returned success but required artifact did not change: {item['path']}")
     if secure_boot_enabled(root):
         for item in targets:
             if item['kind'] == 'uki' or item['path'].suffix.lower() == '.efi':

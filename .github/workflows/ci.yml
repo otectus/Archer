@@ -256,6 +256,7 @@ jobs:
                 --disable DEBUG_INFO_BTF \
                 --disable DEBUG_INFO_BTF_MODULES \
                 --enable ACPI_WMI \
+                --enable INSPUR_PLATFORM_PROFILE \
                 --enable ACPI_PLATFORM_PROFILE \
                 --enable MEDIA_SUPPORT \
                 --enable VIDEO_DEV \
@@ -265,7 +266,7 @@ jobs:
                 --enable VIDEOBUF2_VMALLOC
               make olddefconfig
               grep -qx 'CONFIG_DEBUG_INFO_NONE=y' .config
-              grep -qx '# CONFIG_DEBUG_INFO_BTF is not set' .config
+              if grep -qx 'CONFIG_DEBUG_INFO_BTF=y' .config; then echo 'Unexpected BTF in historical test configuration' >&2; exit 1; fi
               grep -qx 'CONFIG_ACPI_WMI=y' .config
               grep -qx 'CONFIG_ACPI_PLATFORM_PROFILE=y' .config
               grep -qx 'CONFIG_VIDEO_DEV=y' .config
